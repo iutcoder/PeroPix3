@@ -58,7 +58,6 @@ import agentlog
 import migrate_terms
 import migrate_thumbs
 import nai
-import update as update_mod
 import vibe as vibe_mod
 from cards import KINDS, Cards
 from blocklib import BlockLib
@@ -616,71 +615,6 @@ async def health():
             #   되고, 그게 조용히 일어난다 (실측 2026-08-08 의 포트 다툼).
             "root": str(APP_DIR), "port": CURRENT_PORT,
             "hasLlm": bool(llm_settings().get("key"))}
-
-
-# ── 자동 업데이트 ──────────────────────────────────────────────────
-# ★★**받아 두는 것까지가 여기 일이다** (`backend/update.py` 머리 주석). 돌고 있는 exe 는
-#   덮어쓸 수 없어서, 실제 교체와 재시작은 껍데기(Rust)가 백엔드를 내리고 나서 한다.
-@app.get("/api/update/check")
-async def update_check():
-    """새 판이 있나. ★조용히 실패한다 — 부팅 때 한 번 도는 것이라 시끄러우면 안 된다."""
-    return await update_mod.check(APP_VERSION)
-
-
-#: 지금 받고 있는 일. ★**하나뿐이다** — 취소가 무엇을 끊을지 알아야 하고, 둘이 겹치면
-#  나중 것이 앞의 것이 받아 둔 `.update/` 를 지우고 시작한다 (`update.stage` 첫 줄).
-_UPDATE_TASK: asyncio.Task | None = None
-
-
-@app.post("/api/update/stage")
-async def update_stage():
-    """새 판을 받아 `.update/new/` 에 쌓아 둔다. ★앱 파일은 아직 안 건드린다.
-
-    ★★**따로 떼어 돌린다** (사용자 지적 2026-08-26: *"취소 버튼이 없음. 무조건 끝까지
-      받아야함"*). 예전에는 요청 안에서 그대로 기다렸는데, 그러면 **끊을 손잡이가 없다.**
-      일감으로 만들어 두면 `/api/update/cancel` 이 그것을 끊는다.
-    ★답은 예전과 같다 — 끝까지 기다렸다가 결과를 돌려준다. 화면은 소켓으로 진행을 본다."""
-    global _UPDATE_TASK
-    if _UPDATE_TASK and not _UPDATE_TASK.done():
-        return {"ok": False, "error": "이미 받는 중입니다"}
-
-    async def prog(done: int, total: int) -> None:
-        await Q.broadcast({"type": "update_progress", "done": done, "total": total})
-
-    async def unpack() -> None:
-        """다 받았고 이제 푼다 — ★화면의 「받는 중」이 「설치 중」으로 넘어가는 지점이다."""
-        await Q.broadcast({"type": "update_unpack"})
-
-    _UPDATE_TASK = asyncio.create_task(update_mod.stage(APP_DIR, APP_VERSION, prog, unpack))
-    try:
-        got = await _UPDATE_TASK
-    except asyncio.CancelledError:
-        # ★받다 만 것을 치운다 — 다음에 받을 때 `.update/` 가 어중간하면 안 된다
-        update_mod.clear(APP_DIR)
-        got = {"ok": False, "cancelled": True, "error": "취소했습니다"}
-    except Exception as e:
-        # ★★**끝났다는 소식은 무슨 일이 있어도 나간다** (2026-08-27). 예전에는 취소만 받아서,
-        #   푸는 중에 무엇이 깨지면 예외가 그대로 올라가고 **아래 방송을 건너뛰었다** —
-        #   화면은 「받는 중」에서 영영 멈춘다. 실패도 소식이다.
-        traceback.print_exc()
-        update_mod.clear(APP_DIR)
-        got = {"ok": False, "error": f"{type(e).__name__}: {e}"}
-    finally:
-        _UPDATE_TASK = None
-    await Q.broadcast({"type": "update_staged", **got})
-    return got
-
-
-@app.post("/api/update/cancel")
-async def update_cancel():
-    """받는 중인 것을 끊는다 (사용자 지적 2026-08-26).
-
-    ★끊긴 뒤의 치우기는 **받던 쪽**이 한다 (`update_stage` 의 `except`) — 치우는 자리가
-      둘이면 서로 남의 파일을 지운다."""
-    if _UPDATE_TASK and not _UPDATE_TASK.done():
-        _UPDATE_TASK.cancel()
-        return {"ok": True}
-    return {"ok": False, "error": "받는 중인 것이 없습니다"}
 
 
 @app.post("/api/token")

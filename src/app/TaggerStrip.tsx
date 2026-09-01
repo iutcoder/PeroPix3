@@ -1,9 +1,10 @@
 import { useEffect } from "react";
 import { useI18n } from "../i18n";
 import { Icon } from "../components/Icon";
-import { mb } from "../store/update";
 import { taggerPct, useTagger } from "../store/tagger";
 import { useUi } from "../store/ui";
+
+const mb = (n: number) => `${(n / 1024 / 1024).toFixed(1)}MB`;
 
 /** 타이틀바의 태거 모델 띠 — **업데이트 띠(`UpdateStrip`)와 같은 모양**이다
  *  (사용자 지시 2026-08-29: 업데이트 UI 를 활용해 상단에 모델 내려받기 진행도).

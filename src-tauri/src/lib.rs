@@ -1,6 +1,5 @@
 mod backend;
 mod window_edge;
-mod update;
 
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -42,7 +41,7 @@ fn app_root() -> String {
 /// 쌓아 둔 새 판이 있나 — 화면이 「지금 다시 켜기」를 낼지 정하는 근거.
 #[tauri::command]
 fn update_staged() -> bool {
-    update::staged(&backend::root())
+    false
 }
 
 /// **갈아 끼우고 다시 켠다** (사용자 지시 2026-08-26).
@@ -53,11 +52,9 @@ fn update_staged() -> bool {
 ///   있고, 다음에 켤 때 같은 자리를 다시 시도한다 (`update.rs` 머리 주석).
 #[tauri::command]
 fn apply_update(app: tauri::AppHandle) -> Result<(), String> {
-    let root = backend::root();
-    if let Some(state) = app.try_state::<backend::Backend>() {
-        state.kill();
-    }
-    update::apply(&root).map_err(|e| format!("갈아 끼우지 못했습니다: {e}"))?;
+    let _ = app;
+    Err("macOS 포트에서는 자동 업데이트를 사용하지 않습니다".into())
+    /*
     /* ★데우기는 **여기 없다** — 「설치 중」 단계 안에서 백엔드가 한다 (`backend/update.py`
        의 `warm`). 처음에는 여기서 했는데, 그러면 「다시 켜기」를 누른 뒤 12초가 조용히 흘러
        **누른 것이 안 먹은 것처럼** 보였다 (사용자 지적 2026-08-27). 이 자리는 즉시여야 한다. */
@@ -73,7 +70,7 @@ fn apply_update(app: tauri::AppHandle) -> Result<(), String> {
     }
     update::relaunch(&root).map_err(|e| format!("다시 켜지 못했습니다: {e}"))?;
     app.exit(0);
-    Ok(())
+    Ok(()) */
 }
 
 /// 같은 폴더를 두 번 열지 못하게 잡아 둔 표식 — **놓을 수 있게** 들고 있는다.
@@ -164,13 +161,12 @@ pub fn run() {
          두 번 여는 것으로 보이기 때문이다. `apply_update` 가 띄우기 직전에 여기서 놓는다. */
     let lock = std::sync::Mutex::new(Some(lock));
     // ★웹뷰가 만들어지기 전에 저장소 자리를 정한다 (아래 ★주)
-    use_local_webview_profile();
+    // WKWebView 프로필은 macOS의 표준 앱 컨테이너를 사용한다.
     // ★지난 업데이트가 남긴 옛 파일을 치운다 — 그때는 우리가 그 exe 위에서 돌고 있었다
-    update::sweep(&backend::root());
 
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
-        .invoke_handler(tauri::generate_handler![backend_url, app_root, update_staged, apply_update, uptime_ms])
+        .invoke_handler(tauri::generate_handler![backend_url, app_root, uptime_ms])
         .setup(move |app| {
             // ★`apply_update` 가 새 판을 띄우기 전에 자물쇠를 놓을 수 있게 맡겨 둔다
             app.manage(InstanceLock(lock));
