@@ -1,0 +1,57 @@
+name: macOS port check
+
+on:
+  push:
+    branches: [macos-port]
+  pull_request:
+    branches: [master]
+  workflow_dispatch:
+
+jobs:
+  check-macos:
+    runs-on: macos-14
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Build frontend
+        run: npm run build
+
+      - name: Check Tauri shell
+        working-directory: src-tauri
+        run: cargo check --target aarch64-apple-darwin
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Install backend dependencies
+        run: python3 -m pip install -r backend/requirements.txt
+
+      - name: Import backend modules
+        run: |
+          python3 - <<'PY'
+          import sys
+          sys.path.insert(0, 'backend')
+          import server
+          import censor
+          import files
+          print('macOS backend imports OK')
+          PY
