@@ -1,5 +1,4 @@
 mod backend;
-mod window_edge;
 
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -190,19 +189,6 @@ pub fn run() {
                     // 백엔드가 안 떠도 창은 띄운다 — 프론트가 상태를 표시하고 로그를 안내한다.
                     backend::log_line(&format!("[backend] spawn failed: {e}"));
                     app.manage(backend::Backend(Mutex::new(None)));
-                }
-            }
-            /* ★★Tauri 가 깔아 둔 크기 조절 덧창을 걷는다 — 커서·누름·더블클릭의 주인을
-               화면의 손잡이 하나로 (사용자 지적 2026-08-28). 까닭은 `window_edge.rs` 머리에.
-               ★사이드카를 띄운 뒤에 한다 — 로그 파일이 그때 열린다. */
-            #[cfg(windows)]
-            if let Some(w) = app.get_webview_window("main") {
-                match w.hwnd() {
-                    Ok(h) => {
-                        let gone = window_edge::drop_tauri_resize_overlay(h.0 as isize as *mut core::ffi::c_void);
-                        backend::log_line(&format!("[edge] Tauri 크기 조절 덧창 걷기 = {}", if gone { "걷음" } else { "없었음" }));
-                    }
-                    Err(e) => backend::log_line(&format!("[edge] 창 손잡이를 못 얻었다: {e}")),
                 }
             }
             Ok(())

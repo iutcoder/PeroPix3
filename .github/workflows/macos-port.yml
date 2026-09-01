@@ -36,6 +36,10 @@ jobs:
         working-directory: src-tauri
         run: cargo check --target aarch64-apple-darwin
 
+      - name: Test Tauri shell
+        working-directory: src-tauri
+        run: cargo test --target aarch64-apple-darwin
+
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
