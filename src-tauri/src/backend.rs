@@ -96,54 +96,6 @@ pub fn root() -> PathBuf {
     find_repo_root().unwrap_or_else(app_dir)
 }
 
-/// 자식을 **Job Object 에 매단다** — 부모가 어떻게 죽든 함께 내려간다.
-///
-/// ★`kill()` 은 종료 이벤트에서만 돈다. `taskkill /F`·크래시·`process::exit` 에서는
-/// 그 이벤트가 안 돌아 **파이썬이 고아로 남고 포트를 계속 쥔다.** 실측(2026-08-08):
-/// 고아 사이드카가 8770 을 잡고 있어 새로 띄운 백엔드가 바인딩에 실패했고,
-/// **옛 코드가 계속 응답해서** 고친 것이 안 먹힌 것처럼 보였다.
-/// 잡의 `KILL_ON_JOB_CLOSE` 는 커널이 보장하므로 우리 코드가 안 돌아도 지켜진다.
-#[cfg(windows)]
-fn adopt_into_job(child: &Child) {
-    use std::os::windows::io::AsRawHandle;
-    use std::sync::OnceLock;
-    use windows_sys::Win32::Foundation::HANDLE;
-    use windows_sys::Win32::System::JobObjects::{
-        AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
-        SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
-        JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
-    };
-
-    // ★핸들을 **살려 둔다.** 닫는 순간 잡이 닫히고 멤버가 죽는다 — 프로세스가 끝날 때까지 들고 있는다.
-    static JOB: OnceLock<usize> = OnceLock::new();
-    let job = *JOB.get_or_init(|| unsafe {
-        let h = CreateJobObjectW(std::ptr::null(), std::ptr::null());
-        if h.is_null() {
-            return 0;
-        }
-        let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
-        info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-        SetInformationJobObject(
-            h,
-            JobObjectExtendedLimitInformation,
-            &info as *const _ as *const std::ffi::c_void,
-            std::mem::size_of_val(&info) as u32,
-        );
-        h as usize
-    });
-    if job == 0 {
-        eprintln!("[backend] job object 를 못 만들었습니다 — 고아 방지가 꺼집니다");
-        return;
-    }
-    let ok = unsafe { AssignProcessToJobObject(job as HANDLE, child.as_raw_handle() as HANDLE) };
-    if ok == 0 {
-        eprintln!("[backend] job 에 매달지 못했습니다 — 고아 방지가 꺼집니다");
-    }
-}
-
-#[cfg(not(windows))]
-fn adopt_into_job(_child: &Child) {}
-
 /// 자식 프로세스 핸들.
 ///
 /// ★종료는 `kill()` 을 종료 이벤트에서 **명시적으로** 부르는 것이 정본이다.
@@ -155,7 +107,8 @@ impl Backend {
     pub fn kill(&self) {
         if let Ok(mut guard) = self.0.lock() {
             if let Some(child) = guard.as_mut() {
-                let _ = child.kill();
+                // 백엔드는 하위 프로세스를 만들 수 있으므로 프로세스 그룹 전체를 내린다.
+                unsafe { libc::kill(-(child.id() as i32), libc::SIGKILL) };
                 let _ = child.wait();
             }
             *guard = None;
@@ -167,7 +120,7 @@ impl Drop for Backend {
     fn drop(&mut self) {
         if let Ok(mut guard) = self.0.lock() {
             if let Some(child) = guard.as_mut() {
-                let _ = child.kill();
+                unsafe { libc::kill(-(child.id() as i32), libc::SIGKILL) };
                 let _ = child.wait();
             }
         }
@@ -212,13 +165,19 @@ fn find_repo_root() -> Option<PathBuf> {
     None
 }
 
-/// 번들된 파이썬 → PATH 의 python 순으로 찾는다.
-fn find_python(root: &PathBuf) -> PathBuf {
-    let bundled = inner(root).join("python").join("python.exe");
-    if bundled.exists() {
-        return bundled;
+/// macOS 앱에 번들된 파이썬, 개발용 가상환경, PATH 순으로 찾는다.
+fn find_python(root: &Path) -> PathBuf {
+    let home = inner(root);
+    for candidate in [
+        home.join("python/bin/python3"),
+        root.join(".venv/bin/python3"),
+        root.join("venv/bin/python3"),
+    ] {
+        if candidate.is_file() {
+            return candidate;
+        }
     }
-    PathBuf::from("python")
+    PathBuf::from("python3")
 }
 
 /// **같은 폴더를 두 번 열지 못하게** 잡아 두는 표식 (사용자 지시 2026-08-26).
@@ -229,21 +188,20 @@ fn find_python(root: &PathBuf) -> PathBuf {
 /// ★파일을 **공유 없이** 연다. 잡혀 있으면 열리지 않으므로 그것이 곧 「누가 쓰는 중」이다.
 ///   ★핸들을 살려 둔다 — 닫으면 잠금이 풀린다. 프로세스가 죽으면 커널이 알아서 놓아 준다
 ///     (크래시·강제 종료에도 자물쇠가 남지 않는다).
-#[cfg(windows)]
 pub fn lock_app_dir() -> Option<File> {
-    use std::os::windows::fs::OpenOptionsExt;
-    std::fs::OpenOptions::new()
+    lock_file(&root().join(".instance.lock"))
+}
+
+fn lock_file(path: &Path) -> Option<File> {
+    use std::os::fd::AsRawFd;
+    let file = std::fs::OpenOptions::new()
         .write(true)
         .create(true)
         .truncate(false)
-        .share_mode(0) // 아무에게도 안 빌려준다
-        .open(root().join(".instance.lock"))
-        .ok()
-}
-
-#[cfg(not(windows))]
-pub fn lock_app_dir() -> Option<File> {
-    File::create(root().join(".instance.lock")).ok()
+        .open(path)
+        .ok()?;
+    let locked = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0;
+    locked.then_some(file)
 }
 
 
@@ -377,22 +335,15 @@ pub fn spawn() -> std::io::Result<Child> {
         .stdout(out.map(Stdio::from).unwrap_or_else(Stdio::null))
         .stderr(err.map(Stdio::from).unwrap_or_else(Stdio::null));
 
-    // 콘솔 창이 따로 뜨지 않게 (Windows)
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        cmd.creation_flags(CREATE_NO_WINDOW);
-    }
+    use std::os::unix::process::CommandExt;
+    cmd.process_group(0);
 
-    let child = cmd.spawn()?;
-    adopt_into_job(&child); // ★부모가 어떻게 죽든 함께 내려가게
-    Ok(child)
+    cmd.spawn()
 }
 
 #[cfg(test)]
 mod log_tests {
-    use super::{trim_at, MARK};
+    use super::{lock_file, trim_at, MARK};
 
     /// 실행 세 회분을 만든다 — 각 회는 경계 한 줄 + 본문 몇 줄
     fn runs(n: usize, body: usize) -> String {
@@ -402,6 +353,16 @@ mod log_tests {
 ", format!("실행{i} 줄
 ").repeat(body)))
             .collect()
+    }
+
+    #[test]
+    fn 같은_파일은_두_번_잠글_수_없다() {
+        let path = std::env::temp_dir().join(format!("peropix-lock-{}", std::process::id()));
+        let first = lock_file(&path).expect("첫 잠금");
+        assert!(lock_file(&path).is_none(), "둘째 잠금은 거부되어야 한다");
+        drop(first);
+        assert!(lock_file(&path).is_some(), "핸들을 놓으면 다시 잠겨야 한다");
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]

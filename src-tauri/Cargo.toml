@@ -19,14 +19,8 @@ tauri-plugin-opener = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
-# ★고아 사이드카 방지 — 파이썬 자식을 Job Object 에 매단다 (backend.rs `adopt_into_job`).
-#   tauri 가 이미 끌어오는 크레이트라 새로 받는 것이 없다.
-[target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.59", features = [
-  "Win32_Foundation", "Win32_Security", "Win32_System_JobObjects", "Win32_System_Threading",
-  # ★Tauri 의 크기 조절 덧창을 찾아 없앤다 (window_edge.rs)
-  "Win32_UI_WindowsAndMessaging",
-] }
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [profile.release]
 codegen-units = 1
