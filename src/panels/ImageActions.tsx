@@ -700,23 +700,36 @@ function PromptView({
 /** 아이콘만 있는 단추 — 글자 단추와 **같은 높이**로 선다 (줄이 들쭉날쭉하면 안 된다) */
 /** ★단추 모양은 이 줄이 정본이다 — `extra` 로 끼워 넣는 쪽도 같은 자를 쓴다
  *  (갤러리의 지우기 단추). 자리마다 새로 만들면 한 줄 안에서 크기가 갈린다. */
+/** ★★**줄의 키는 하나다** (사용자 지시 2026-09-04: *"업스케일 버튼 기준으로 통일"*).
+ *  아이콘만 있는 것과 글자만 있는 것은 속의 줄 높이가 달라 **내용에 따라 키가 갈렸다**
+ *  (아이콘 16px · 12px 글자의 줄 상자 14px). 높이를 못 박고 가운데 정렬로 두면 무엇이 들어가든
+ *  같은 키다. 값은 업스케일 단추의 원래 키다 — 아이콘 16 + 위아래 여백 6 + 테두리 2. */
+const ACT_H = 24;
+
 export const iconBtn: React.CSSProperties = {
-  display: "grid",
+  display: "inline-grid",
   placeItems: "center",
+  boxSizing: "border-box",
+  height: ACT_H,
   border: "1px solid var(--line)",
   borderRadius: "var(--r-2)",
   background: "var(--panel)",
   color: "var(--ink-soft)",
-  padding: "3px var(--sp-2)",
+  padding: "0 var(--sp-2)",
   minWidth: 28,
 };
 
 const btn: React.CSSProperties = {
+  display: "inline-flex",
+  alignItems: "center",
+  justifyContent: "center",
+  boxSizing: "border-box",
+  height: ACT_H,
   border: "1px solid var(--line)",
   borderRadius: "var(--r-2)",
   background: "var(--panel)",
   color: "var(--ink-soft)",
-  padding: "3px var(--sp-3)",
+  padding: "0 var(--sp-3)",
   fontSize: "var(--text-2xs)",
 };
 
@@ -733,11 +746,16 @@ function SendMenu({ busy, items }: { busy: boolean; items: SendItem[] }) {
   const [open, setOpen] = useState(false);
   const [at, setAt] = useState<{ x: number; y: number } | null>(null);
   const ref = useRef<HTMLButtonElement | null>(null);
+  /** 펼친 목록. ★★**닫기 검사에서 빼야 한다** — 캡처 단계로 듣기 때문에 항목을 누르면
+   *  `click` 이 오기 **전에** `pointerdown` 이 먼저 닫아 버려, 눌러도 아무 일도 안 일어났다
+   *  (사용자 지적 2026-09-04: *"보내기가 전부 작동 안 함"*). */
+  const menuRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     if (!open) return;
     const close = (e: Event) => {
-      if (e.target instanceof Node && ref.current?.contains(e.target)) return;
+      const n = e.target instanceof Node ? e.target : null;
+      if (n && (ref.current?.contains(n) || menuRef.current?.contains(n))) return;
       setOpen(false);
     };
     const key = (e: KeyboardEvent) => e.key === "Escape" && setOpen(false);
@@ -782,6 +800,7 @@ function SendMenu({ busy, items }: { busy: boolean; items: SendItem[] }) {
       {open && at
         && createPortal(
           <div
+            ref={menuRef}
             data-act-send-menu
             style={{
               position: "fixed",
