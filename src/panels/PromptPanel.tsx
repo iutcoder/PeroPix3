@@ -1,6 +1,6 @@
 import { useI18n } from "../i18n";
 import { useState } from "react";
-import { compileBlocks } from "../lib/blocks";
+import { compileBlocks, makeBlock } from "../lib/blocks";
 import { usePrompt } from "../store/prompt";
 import { canEnableChar } from "../store/gen";
 import { StyleSection, CharSection, JoinZone, type SectionProps } from "./PromptSections";
@@ -79,7 +79,11 @@ export function PromptPanel({ onThumb }: SectionProps) {
           <button
             /* ★자리가 없으면 **꺼진 채로** 만든다 — 칸을 만드는 것은 막지 않고,
                나가는 수만 모델 상한에 맞춘다 (`store/gen.ts` 의 `canEnableChar`) */
-            onClick={() => addChar({ on: canEnableChar() })}
+            /* ★★**빈 블록 하나를 깔아 준다** (사용자 지시 2026-09-04). 예전에는 칸만 서고
+               블록이 0개라, 인물을 더한 사람이 「블록 추가」를 한 번 더 눌러야 적을 수 있었다.
+               ★블록 추가 단추가 만드는 것과 **같은 모양**이다 (`BlockList` 의 `data-block-add`) —
+                 이름도 「새 블록」이고 펼친 채로 선다. 둘이 다르면 어느 쪽이 진짜인지 헷갈린다. */
+            onClick={() => addChar({ on: canEnableChar(), prompt: [makeBlock(t("block.newBlock"), [], { open: true })] })}
             style={{
               width: "100%",
               marginBottom: "var(--sp-5)",
