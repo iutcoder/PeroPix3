@@ -15,7 +15,9 @@
  *
  *  박스를 끄는 동안 일어나는 일은 `drawImage` 몇 번과 경로 채우기 하나뿐이다.
  */
-import { cloudFromMask, cloudRGBA, cloudReach } from "./steam.ts";
+import { bucketAspect, bucketScale, cloudScale, plate, plateRGBA } from "./steam.ts";
+import { makeNoise } from "./noise.ts";
+import type { Plate } from "./steam.ts";
 
 export type CoverSettings = {
   method: string;
@@ -50,6 +52,9 @@ const STEAM_WORK = 340;
  *  문제라(2026-08-23 「반응성이 매우 안 좋음」) 매 프레임 40ms 를 태울 수 없다. */
 const STEAM_WORK_QUICK = 170;
 
+/** 두 구름을 합칠 때 **이만큼 차이 안에서만** 이음매를 둥글린다 (0..255 의 덮임 단위) */
+const SMAX = 40;
+
 const c2d = (w: number, h: number) => {
   const cv = document.createElement("canvas");
   cv.width = Math.max(1, Math.round(w));
@@ -67,6 +72,8 @@ export class CensorRenderer {
   /** 재료 — 그림 전체를 덮은 한 장. 열쇠는 `방식|수치|그릴 크기` */
   private layers = new Map<string, HTMLCanvasElement>();
   /** 구운 구름 한 장 — 열쇠는 **모양과 설정**이다 (`steamKey`) */
+  /** 박스별 v2 무늬 판 — 씨앗·부드럽게·비율·배율에만 매인다 (크기와 무관하므로 오래 산다) */
+  private plates = new Map<string, Plate>();
   private steamCache: { key: string; cv: HTMLCanvasElement; x: number; y: number; w: number; h: number } | null = null;
   /** 매 프레임 새로 만들지 않으려고 들고 있는 석 장 (모양 · 여백을 두른 모양 · 오려낸 재료) */
   private maskCv: HTMLCanvasElement | null = null;
@@ -273,14 +280,41 @@ export class CensorRenderer {
     return `${boxes}|${s.expand}|${s.feather}|${s.steamBright}|${s.steamAlpha}|${scale.toFixed(3)}|${quick ? "q" : "f"}`;
   }
 
+  /** 박스 하나가 쓸 **v2 무늬 판**. 씨앗·부드럽게·비율·배율에만 매이므로 캐시가 잘 듣는다 */
+  private steamPlate(b: RenderBox, s: CoverSettings, scale: number): Plate {
+    const [x1, y1, x2, y2] = b.box;
+    const w = (x2 - x1 + s.expand * 2) * scale;
+    const h = (y2 - y1 + s.expand * 2) * scale;
+    // ★배율은 **원본 픽셀의 짧은 변**으로 정한다 (화면 배율이 아니라) — 확대해도 구름이 안 변한다
+    const shortSrc = Math.min(x2 - x1, y2 - y1) + s.expand * 2;
+    const key = `${b.seed}|${s.feather}|${bucketAspect(w, h)}|${bucketScale(cloudScale(shortSrc))}`;
+    let p = this.plates.get(key);
+    if (!p) {
+      p = plate({
+        seed: b.seed, feather: s.feather,
+        aspect: bucketAspect(w, h), scale: bucketScale(cloudScale(shortSrc)),
+      });
+      this.plates.set(key, p);
+    }
+    return p;
+  }
+
   /** ── 스팀 ──────────────────────────────────────────────────
    *
-   *  ★★**한 덩이로 만든다** (사용자 지시 2026-09-05). 박스마다 따로 그리면 겹친 자리가
-   *    밝은 띠로 드러난다 — 캔버스에는 알파를 「최대값」으로 합치는 수단이 없다.
-   *    그래서 가릴 자리를 **마스크 한 장**에 모으고, 거기서 잰 거리로 구름 하나를 만든다.
-   *    겹치거나 닿은 박스는 한 덩이가 되고, 멀리 떨어진 것은 halo 가 안 닿아 따로 남는다.
+   *  ★★★**그림은 v2 그대로, 합치는 방법만 바꾼다** (사용자 지시 2026-09-05:
+   *    *"보기에 v2 버전하고 똑같아 보이면서 확장 가능한게 아니면 의미가 없음"*).
+   *    한때 가릴 자리 전체에서 **거리를 재어** 구름을 새로 만들었는데, 겹침은 해결됐지만
+   *    *"아예 시각적인 느낌이 너무 다름"* 이었다 — v2 의 거리는 **박스 크기로 정규화된 타원
+   *    거리**라 노이즈 진폭 0.25 가 「반지름의 25%」인데, 픽셀 거리로 재면 그 비례가 사라진다.
    *
-   *  ★★**낮은 해상도에서 만들어 늘려 그린다.** 구름은 부드러워서 원본의 1/3 로 만들어도
+   *  그래서 순서가 이렇다:
+   *    ① 박스마다 **v2 판을 그대로** 만든다 (`steamPlate` → `plate`).
+   *    ② 판들을 캔버스가 아니라 **배열에 모은다** — 픽셀마다 더 진한 쪽을 남긴다(max).
+   *       캔버스에 겹쳐 그리면 알파가 더해져 겹친 자리가 밝은 띠가 되기 때문이다.
+   *    ③ 모은 것에 밝기·진하기를 입혀 한 장으로 그린다.
+   *  겹치거나 닿은 박스는 구름이 이어져 한 덩이가 되고, 떨어진 것은 그대로 따로 남는다.
+   *
+   *  ★★**낮은 해상도에서 모아 늘려 그린다.** 구름은 부드러워서 원본의 1/3 로 만들어도
    *    눈에 차이가 없고, 박스를 끄는 동안 매 프레임 다시 만들 수 있어야 한다 (이 앱이 한 번
    *    겪은 문제다 — 2026-08-23 「반응성이 매우 안 좋음」).
    *  ★모양이 안 바뀌면 구운 것을 그대로 쓴다 (`steamCache`).
@@ -292,31 +326,30 @@ export class CensorRenderer {
     const live = list.filter((b) => b.box[2] > b.box[0] && b.box[3] > b.box[1]);
     if (!live.length) return;
 
-    // 번지는 폭 — **원본 픽셀**로 정하고 화면 배율을 곱한다 (확대해도 구름이 안 변해야 한다).
-    // ★박스가 여럿이면 짧은 변의 **평균**으로 정한다. 한 장 안의 박스는 대개 비슷한 크기이고,
-    //   폭을 박스마다 달리하면 한 덩이로 합쳐질 때 경계가 드러난다.
-    const shorts = live.map((b) => Math.min(b.box[2] - b.box[0], b.box[3] - b.box[1]) + s.expand * 2);
-    const reachSrc = cloudReach(shorts.reduce((a, v) => a + v, 0) / shorts.length);
-    const reach = reachSrc * scale;
+    /** 박스 하나가 화면에서 차지하는 자리와 그 판 — 두 번 쓰므로 미리 뽑는다 */
+    const items = live.map((b) => {
+      const [x1, y1, x2, y2] = b.box;
+      return {
+        p: this.steamPlate(b, s, scale),
+        cx: ((x1 + x2) / 2) * scale,
+        cy: ((y1 + y2) / 2) * scale,
+        w: (x2 - x1 + s.expand * 2) * scale,
+        h: (y2 - y1 + s.expand * 2) * scale,
+        rot: b.rotation ?? 0,
+      };
+    });
 
-    // 합집합의 자리 — 번지는 폭만큼 넉넉히
+    // 구름들이 차지하는 자리 — 판은 박스의 `span` 배로 그려진다
     let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
-    for (const b of live) {
-      const [bx1, by1, bx2, by2] = b.box;
-      const cx = ((bx1 + bx2) / 2) * scale;
-      const cy = ((by1 + by2) / 2) * scale;
-      const hw = ((bx2 - bx1) / 2 + s.expand) * scale;
-      const hh = ((by2 - by1) / 2 + s.expand) * scale;
-      // 돌아간 사각형도 감싸도록 두 반폭의 합으로 잡는다 (넉넉한 쪽으로)
-      const r = Math.abs(b.rotation ?? 0) > 1e-6 ? Math.hypot(hw, hh) : 0;
-      const ex = r || hw;
-      const ey = r || hh;
-      x0 = Math.min(x0, cx - ex); y0 = Math.min(y0, cy - ey);
-      x1 = Math.max(x1, cx + ex); y1 = Math.max(y1, cy + ey);
+    for (const it of items) {
+      const hw = (it.w * it.p.span) / 2;
+      const hh = (it.h * it.p.span) / 2;
+      const r = Math.abs(it.rot) > 1e-6 ? Math.hypot(hw, hh) : 0;
+      x0 = Math.min(x0, it.cx - (r || hw)); y0 = Math.min(y0, it.cy - (r || hh));
+      x1 = Math.max(x1, it.cx + (r || hw)); y1 = Math.max(y1, it.cy + (r || hh));
     }
-    const pad = Math.ceil(reach) + 2;
-    x0 = Math.floor(x0 - pad); y0 = Math.floor(y0 - pad);
-    x1 = Math.ceil(x1 + pad); y1 = Math.ceil(y1 + pad);
+    x0 = Math.floor(x0 - 1); y0 = Math.floor(y0 - 1);
+    x1 = Math.ceil(x1 + 1); y1 = Math.ceil(y1 + 1);
     const W = Math.max(1, x1 - x0);
     const H = Math.max(1, y1 - y0);
 
@@ -329,39 +362,73 @@ export class CensorRenderer {
 
     let baked = this.steamCache && this.steamCache.key === key ? this.steamCache : null;
     if (!baked) {
-      // ① 가릴 자리를 한 장에 모은다
-      const mcv = c2d(gw, gh);
-      const mg = mcv.getContext("2d")!;
-      mg.fillStyle = "#fff";
-      const sx = gw / W;
-      const sy = gh / H;
-      for (const b of live) {
-        const [bx1, by1, bx2, by2] = b.box;
-        const cx = (((bx1 + bx2) / 2) * scale - x0) * sx;
-        const cy = (((by1 + by2) / 2) * scale - y0) * sy;
-        const w = ((bx2 - bx1) * scale + s.expand * scale * 2) * sx;
-        const h = ((by2 - by1) * scale + s.expand * scale * 2) * sy;
-        mg.save();
-        mg.translate(cx, cy);
-        if (b.rotation) mg.rotate(b.rotation);
-        mg.fillRect(-w / 2, -h / 2, w, h);
-        mg.restore();
-      }
-      const px = mg.getImageData(0, 0, gw, gh).data;
-      const mask = new Uint8Array(gw * gh);
-      for (let i = 0; i < mask.length; i++) mask[i] = px[i * 4 + 3] > 127 ? 1 : 0;
+      const sx = gw / W, sy = gh / H;
+      const cover = new Uint8Array(gw * gh);
 
-      // ② 거리에서 구름 하나
-      const cloud = cloudFromMask(mask, gw, gh, {
-        // ★씨앗은 **맨 앞 박스**의 것을 쓴다 — 박스마다 다른 씨앗을 섞을 수 없다 (한 덩이라서).
-        seed: live[0].seed,
-        feather: s.feather,
-        reach: reach * ((sx + sy) / 2),
-      });
+      /* ★★**밝기 무늬는 격자 전체에서 한 번 만든다** (판마다가 아니라).
+         판의 것을 쓰면 두 구름이 만나는 자리에서 무늬가 갈려 **각진 선**이 드러난다
+         (2026-09-05 렌더 대조). v2 의 밝기는 230~255 의 좁은 흔들림이라, 어느 좌표에서
+         만들든 구름의 성격은 같다 — 갈리지 않는 쪽이 낫다.
+         ★계산은 v2 원문 그대로다 (3옥타브 · 0.5~1 로 압축). 파장만 격자 단위로 환산한다. */
+      const lum = new Uint8Array(gw * gh);
+      {
+        const n = makeNoise(live[0].seed);
+        const ff = 1 + Math.min(50, Math.max(0, s.feather)) / 25;
+        const ns = (Math.max(gw, gh) / 2) * ff;
+        for (let y = 0; y < gh; y++) {
+          for (let x = 0; x < gw; x++) {
+            const bn = n(x / ns, y / ns) + n((x / ns) * 2, (y / ns) * 2) * 0.5
+              + n((x / ns) * 4, (y / ns) * 4) * 0.25;
+            lum[y * gw + x] = Math.round((0.5 + ((bn / 1.75 + 1) / 2) * 0.5) * 255);
+          }
+        }
+      }
+
+      for (const it of items) {
+        const { p } = it;
+        // 이 판이 격자에서 차지하는 크기·자리
+        const dw = it.w * p.span * sx, dh = it.h * p.span * sy;
+        const cx = (it.cx - x0) * sx, cy = (it.cy - y0) * sy;
+        // 격자 → 판 좌표는 **회전의 역**이다
+        const cos = Math.cos(-it.rot), sin = Math.sin(-it.rot);
+        const rad = Math.hypot(dw, dh) / 2;
+        const gx0 = Math.max(0, Math.floor(cx - rad)), gx1 = Math.min(gw - 1, Math.ceil(cx + rad));
+        const gy0 = Math.max(0, Math.floor(cy - rad)), gy1 = Math.min(gh - 1, Math.ceil(cy + rad));
+
+        for (let y = gy0; y <= gy1; y++) {
+          for (let x = gx0; x <= gx1; x++) {
+            const ux = x + 0.5 - cx, uy = y + 0.5 - cy;
+            const rx = ux * cos - uy * sin, ry = ux * sin + uy * cos;
+            // 판 픽셀 자리 (가장자리 반 픽셀을 빼고 잡는다)
+            const fx = (rx / dw + 0.5) * p.pw - 0.5;
+            const fy = (ry / dh + 0.5) * p.ph - 0.5;
+            if (fx < 0 || fy < 0 || fx > p.pw - 1 || fy > p.ph - 1) continue;
+            // 이중선형 — 판을 늘려 쓰므로 최근접이면 계단이 진다
+            const ix = Math.floor(fx), iy = Math.floor(fy);
+            const tx = fx - ix, ty = fy - iy;
+            const jx = Math.min(p.pw - 1, ix + 1), jy = Math.min(p.ph - 1, iy + 1);
+            const cv = (p.cover[iy * p.pw + ix] * (1 - tx) + p.cover[iy * p.pw + jx] * tx) * (1 - ty)
+              + (p.cover[jy * p.pw + ix] * (1 - tx) + p.cover[jy * p.pw + jx] * tx) * ty;
+            if (cv <= 0) continue;
+            const i = y * gw + x;
+            const was = cover[i];
+            /* ★★**더 진한 쪽을 남긴다** — 더하면 겹친 자리가 밝은 띠가 된다.
+               ★그냥 최대값만 쓰면 두 구름이 만나는 선이 각지게 드러나므로, 두 값이 엇비슷한
+                 자리에서만 조금 부풀려 둥글린다 — 많아야 `SMAX/4`(≈10/255)라 밝아 보이지 않는다.
+               ★안 닿았던 자리(was 0)는 그대로 넣는다 (안 그러면 배경이 옅게 덮인다) */
+            const hi = cv > was ? cv : was;
+            if (was > 0) {
+              const t = Math.max(0, (SMAX - Math.abs(cv - was)) / SMAX);
+              cover[i] = Math.min(255, Math.round(hi + t * t * SMAX * 0.25));
+            } else cover[i] = Math.round(hi);
+          }
+        }
+      }
+
       const cv = c2d(gw, gh);
       const g = cv.getContext("2d")!;
       const img = g.createImageData(gw, gh);
-      img.data.set(cloudRGBA(cloud, s.steamBright, s.steamAlpha));
+      img.data.set(plateRGBA({ cover, lum }, s.steamBright, s.steamAlpha));
       g.putImageData(img, 0, 0);
       baked = { key, cv, x: x0, y: y0, w: W, h: H };
       this.steamCache = baked;
