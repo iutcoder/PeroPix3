@@ -15,7 +15,7 @@
  *
  *  박스를 끄는 동안 일어나는 일은 `drawImage` 몇 번과 경로 채우기 하나뿐이다.
  */
-import { bucketAspect, bucketScale, cloudScale, plate, plateRGBA, type Plate } from "./steam.ts";
+import { cloudFromMask, cloudRGBA, cloudReach } from "./steam.ts";
 
 export type CoverSettings = {
   method: string;
@@ -42,6 +42,14 @@ export type RenderBox = {
 
 type Src = CanvasImageSource & { width: number; height: number };
 
+/** 구름을 만드는 작업 해상도 (긴 변). ★★**여기가 비용이다** — 픽셀마다 노이즈를 여섯 번
+ *  돈다 (실측 2026-09-05: 420px 에 40ms · 300px 에 21ms). 구름은 부드러워서 줄여 만들어
+ *  늘려도 눈에 차이가 없다. */
+const STEAM_WORK = 340;
+/** ★★**끄는 동안**의 해상도. 손을 떼면 위 값으로 한 번 더 굽는다 — 이 앱이 한 번 겪은
+ *  문제라(2026-08-23 「반응성이 매우 안 좋음」) 매 프레임 40ms 를 태울 수 없다. */
+const STEAM_WORK_QUICK = 170;
+
 const c2d = (w: number, h: number) => {
   const cv = document.createElement("canvas");
   cv.width = Math.max(1, Math.round(w));
@@ -58,10 +66,8 @@ export class CensorRenderer {
 
   /** 재료 — 그림 전체를 덮은 한 장. 열쇠는 `방식|수치|그릴 크기` */
   private layers = new Map<string, HTMLCanvasElement>();
-  /** 스팀 무늬 판 — 열쇠는 `씨앗|부드럽게|비율` */
-  private plates = new Map<string, Plate>();
-  /** 무늬 판을 밝기·진하기까지 입혀 캔버스로 구워 둔 것 */
-  private plateCanvas = new Map<string, HTMLCanvasElement>();
+  /** 구운 구름 한 장 — 열쇠는 **모양과 설정**이다 (`steamKey`) */
+  private steamCache: { key: string; cv: HTMLCanvasElement; x: number; y: number; w: number; h: number } | null = null;
   /** 매 프레임 새로 만들지 않으려고 들고 있는 석 장 (모양 · 여백을 두른 모양 · 오려낸 재료) */
   private maskCv: HTMLCanvasElement | null = null;
   private padCv: HTMLCanvasElement | null = null;
@@ -76,13 +82,12 @@ export class CensorRenderer {
   /** 설정이 바뀌면 재료를 버린다. ★모양만 바뀔 때는 **부르지 않는다** — 그게 빠른 이유다 */
   invalidate() {
     this.layers.clear();
-    this.plateCanvas.clear();
+    this.steamCache = null;
   }
 
   /** 무늬까지 버린다 (「부드럽게」가 바뀌었을 때) */
   invalidateAll() {
     this.invalidate();
-    this.plates.clear();
   }
 
   /** 한 장을 그린다. `scale` 은 **원본 픽셀당 화면 픽셀**.
@@ -93,7 +98,7 @@ export class CensorRenderer {
    *  ★저장할 때만 참이다 — 그때는 한 장으로 합쳐야 한다. */
   draw(
     target: HTMLCanvasElement, boxes: RenderBox[], s: CoverSettings,
-    scale: number, withBase = false,
+    scale: number, withBase = false, quick = false,
   ) {
     const W = Math.max(1, Math.round(this.w * scale));
     const H = Math.max(1, Math.round(this.h * scale));
@@ -120,7 +125,7 @@ export class CensorRenderer {
     }
 
     for (const [how, list] of groups) {
-      if (how === "steam") this.drawSteam(ctx, list, s, scale);
+      if (how === "steam") this.drawSteam(ctx, list, s, scale, quick);
       else this.drawMasked(ctx, how, list, s, scale, W, H);
     }
   }
@@ -260,52 +265,108 @@ export class CensorRenderer {
     ctx.globalAlpha = 1;
   }
 
-  private steamPlate(b: RenderBox, s: CoverSettings, scale: number) {
-    const [x1, y1, x2, y2] = b.box;
-    const w = (x2 - x1) * scale + s.expand * scale * 2;
-    const h = (y2 - y1) * scale + s.expand * scale * 2;
-    const aspect = bucketAspect(w, h);
-    /* ★★배율은 **원본 픽셀의 짧은 변**이 정한다 (`steam.cloudScale`) — 화면 배율(`scale`)로 재면
-       확대할 때마다 구름 모양이 바뀐다. 넓히기(`expand`)는 원본 좌표의 값이라 함께 센다. */
-    const shortSide = Math.min(x2 - x1, y2 - y1) + s.expand * 2;
-    const k = bucketScale(cloudScale(shortSide));
-    const pkey = `${b.seed}|${s.feather}|${aspect}|${k}`;
-    let p = this.plates.get(pkey);
-    if (!p) {
-      p = plate({ seed: b.seed, feather: s.feather, aspect, scale: k });
-      this.plates.set(pkey, p);
-    }
-    const ckey = `${pkey}|${s.steamBright}|${s.steamAlpha}`;
-    let cv = this.plateCanvas.get(ckey);
-    if (!cv) {
-      cv = c2d(p.pw, p.ph);
-      const g = cv.getContext("2d")!;
-      const img = g.createImageData(p.pw, p.ph);
-      img.data.set(plateRGBA(p, s.steamBright, s.steamAlpha));
-      g.putImageData(img, 0, 0);
-      this.plateCanvas.set(ckey, cv);
-    }
-    return { p, cv, w, h };
+  /** 이 구름이 무엇으로 만들어졌나 — 모양이 바뀌면 다시 굽는다 */
+  private steamKey(list: RenderBox[], s: CoverSettings, scale: number, quick: boolean) {
+    const boxes = list
+      .map((b) => `${b.seed}:${b.box.map((v) => Math.round(v)).join(",")}:${(b.rotation ?? 0).toFixed(3)}`)
+      .join("|");
+    return `${boxes}|${s.expand}|${s.feather}|${s.steamBright}|${s.steamAlpha}|${scale.toFixed(3)}|${quick ? "q" : "f"}`;
   }
 
+  /** ── 스팀 ──────────────────────────────────────────────────
+   *
+   *  ★★**한 덩이로 만든다** (사용자 지시 2026-09-05). 박스마다 따로 그리면 겹친 자리가
+   *    밝은 띠로 드러난다 — 캔버스에는 알파를 「최대값」으로 합치는 수단이 없다.
+   *    그래서 가릴 자리를 **마스크 한 장**에 모으고, 거기서 잰 거리로 구름 하나를 만든다.
+   *    겹치거나 닿은 박스는 한 덩이가 되고, 멀리 떨어진 것은 halo 가 안 닿아 따로 남는다.
+   *
+   *  ★★**낮은 해상도에서 만들어 늘려 그린다.** 구름은 부드러워서 원본의 1/3 로 만들어도
+   *    눈에 차이가 없고, 박스를 끄는 동안 매 프레임 다시 만들 수 있어야 한다 (이 앱이 한 번
+   *    겪은 문제다 — 2026-08-23 「반응성이 매우 안 좋음」).
+   *  ★모양이 안 바뀌면 구운 것을 그대로 쓴다 (`steamCache`).
+   */
   private drawSteam(
     ctx: CanvasRenderingContext2D, list: RenderBox[], s: CoverSettings, scale: number,
+    quick = false,
   ) {
-    for (const b of list) {
-      const [x1, y1, x2, y2] = b.box;
-      if (x2 <= x1 || y2 <= y1) continue;
-      const { p, cv, w, h } = this.steamPlate(b, s, scale);
-      // ★판은 박스의 `span` 배로 만들어졌다 (v2 처럼 **각 변에 비례**한다 — 짧은 변 단위가 아니다)
-      const dw = w * p.span;
-      const dh = h * p.span;
-      const cx = ((x1 + x2) / 2) * scale;
-      const cy = ((y1 + y2) / 2) * scale;
-      ctx.save();
-      ctx.translate(cx, cy);
-      if (b.rotation) ctx.rotate(b.rotation);
-      ctx.drawImage(cv, -dw / 2, -dh / 2, dw, dh);
-      ctx.restore();
+    const live = list.filter((b) => b.box[2] > b.box[0] && b.box[3] > b.box[1]);
+    if (!live.length) return;
+
+    // 번지는 폭 — **원본 픽셀**로 정하고 화면 배율을 곱한다 (확대해도 구름이 안 변해야 한다).
+    // ★박스가 여럿이면 짧은 변의 **평균**으로 정한다. 한 장 안의 박스는 대개 비슷한 크기이고,
+    //   폭을 박스마다 달리하면 한 덩이로 합쳐질 때 경계가 드러난다.
+    const shorts = live.map((b) => Math.min(b.box[2] - b.box[0], b.box[3] - b.box[1]) + s.expand * 2);
+    const reachSrc = cloudReach(shorts.reduce((a, v) => a + v, 0) / shorts.length);
+    const reach = reachSrc * scale;
+
+    // 합집합의 자리 — 번지는 폭만큼 넉넉히
+    let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+    for (const b of live) {
+      const [bx1, by1, bx2, by2] = b.box;
+      const cx = ((bx1 + bx2) / 2) * scale;
+      const cy = ((by1 + by2) / 2) * scale;
+      const hw = ((bx2 - bx1) / 2 + s.expand) * scale;
+      const hh = ((by2 - by1) / 2 + s.expand) * scale;
+      // 돌아간 사각형도 감싸도록 두 반폭의 합으로 잡는다 (넉넉한 쪽으로)
+      const r = Math.abs(b.rotation ?? 0) > 1e-6 ? Math.hypot(hw, hh) : 0;
+      const ex = r || hw;
+      const ey = r || hh;
+      x0 = Math.min(x0, cx - ex); y0 = Math.min(y0, cy - ey);
+      x1 = Math.max(x1, cx + ex); y1 = Math.max(y1, cy + ey);
     }
+    const pad = Math.ceil(reach) + 2;
+    x0 = Math.floor(x0 - pad); y0 = Math.floor(y0 - pad);
+    x1 = Math.ceil(x1 + pad); y1 = Math.ceil(y1 + pad);
+    const W = Math.max(1, x1 - x0);
+    const H = Math.max(1, y1 - y0);
+
+    // 작업 해상도 — 긴 변을 이만큼으로 줄인다
+    const long = Math.max(W, H);
+    const k = Math.min(1, (quick ? STEAM_WORK_QUICK : STEAM_WORK) / long);
+    const gw = Math.max(8, Math.round(W * k));
+    const gh = Math.max(8, Math.round(H * k));
+    const key = this.steamKey(live, s, scale, quick);
+
+    let baked = this.steamCache && this.steamCache.key === key ? this.steamCache : null;
+    if (!baked) {
+      // ① 가릴 자리를 한 장에 모은다
+      const mcv = c2d(gw, gh);
+      const mg = mcv.getContext("2d")!;
+      mg.fillStyle = "#fff";
+      const sx = gw / W;
+      const sy = gh / H;
+      for (const b of live) {
+        const [bx1, by1, bx2, by2] = b.box;
+        const cx = (((bx1 + bx2) / 2) * scale - x0) * sx;
+        const cy = (((by1 + by2) / 2) * scale - y0) * sy;
+        const w = ((bx2 - bx1) * scale + s.expand * scale * 2) * sx;
+        const h = ((by2 - by1) * scale + s.expand * scale * 2) * sy;
+        mg.save();
+        mg.translate(cx, cy);
+        if (b.rotation) mg.rotate(b.rotation);
+        mg.fillRect(-w / 2, -h / 2, w, h);
+        mg.restore();
+      }
+      const px = mg.getImageData(0, 0, gw, gh).data;
+      const mask = new Uint8Array(gw * gh);
+      for (let i = 0; i < mask.length; i++) mask[i] = px[i * 4 + 3] > 127 ? 1 : 0;
+
+      // ② 거리에서 구름 하나
+      const cloud = cloudFromMask(mask, gw, gh, {
+        // ★씨앗은 **맨 앞 박스**의 것을 쓴다 — 박스마다 다른 씨앗을 섞을 수 없다 (한 덩이라서).
+        seed: live[0].seed,
+        feather: s.feather,
+        reach: reach * ((sx + sy) / 2),
+      });
+      const cv = c2d(gw, gh);
+      const g = cv.getContext("2d")!;
+      const img = g.createImageData(gw, gh);
+      img.data.set(cloudRGBA(cloud, s.steamBright, s.steamAlpha));
+      g.putImageData(img, 0, 0);
+      baked = { key, cv, x: x0, y: y0, w: W, h: H };
+      this.steamCache = baked;
+    }
+    ctx.drawImage(baked.cv, baked.x, baked.y, baked.w, baked.h);
   }
 
   /** 저장용 — **원본 크기**로 한 장 굽는다. 화면에 쓰는 것과 같은 `draw` 를 지난다 */
@@ -313,13 +374,12 @@ export class CensorRenderer {
     const cv = c2d(this.w, this.h);
     // ★저장은 화면 캐시와 섞이지 않게 제 렌더러로 돈다 (그릴 크기가 다르면 재료도 다르다)
     const one = new CensorRenderer(this.src, this.w, this.h);
-    one.plates = this.plates;   // 무늬는 크기와 무관하므로 그대로 쓴다
+    /* ★캐시를 물려주지 않는다 — 구름은 **그릴 크기에 매인 한 장**이라 화면용(축소)과
+       저장용(원본 크기)이 다르다. 저장은 한 번뿐이라 다시 굽는 비용이 문제되지 않는다. */
     one.draw(cv, boxes, s, 1, true);
     return await new Promise<Blob>((ok, no) =>
       cv.toBlob((b) => (b ? ok(b) : no(new Error("캔버스를 굽지 못했습니다"))), type));
   }
 }
 
-/** 「부드럽게」가 바뀌면 무늬까지 버려야 하는지 — 스토어가 이 표를 보고 고른다 */
-export const NEEDS_PLATE_RESET = new Set(["feather"]);
 

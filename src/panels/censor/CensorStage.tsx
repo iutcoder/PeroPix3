@@ -75,7 +75,10 @@ export function CensorStage() {
     const dpr = Math.min(2, window.devicePixelRatio || 1);
     const shown = el.clientWidth;
     if (!shown) return;
-    r.draw(cv, liveBoxes(st.boxes[cur.id] ?? []), coverOf(st), (shown * dpr) / sz.w);
+    /* ★끄는 동안에는 **낮은 해상도로** 굽는다 (`censorRender` 의 `STEAM_WORK_QUICK`).
+       스팀은 모양이 바뀔 때마다 다시 만들어야 해서, 제 해상도로 태우면 손이 걸린다.
+       손을 떼면 `editing` 이 꺼지고 이 함수가 한 번 더 돌아 제 해상도로 다시 굽는다. */
+    r.draw(cv, liveBoxes(st.boxes[cur.id] ?? []), coverOf(st), (shown * dpr) / sz.w, false, st.editing);
   }, []);
 
   /** 그림 좌표 ↔ 화면 좌표의 배율 + **판에 맞춘 크기**.
@@ -106,7 +109,9 @@ export function CensorStage() {
   // ★박스·설정이 바뀌면 `rev` 가 오르고, 여기서 다시 그린다 (끄는 동안에는 `move` 가 직접 부른다)
   useEffect(() => {
     paint();
-  }, [c.rev, c.src, c.tab, c.renderer, paint]);
+    // ★`editing` 도 딸림값이다 — 손을 뗀 순간 **제 해상도로 다시 굽기** 위해서다.
+    //   박스를 안 옮긴 채 눌렀다 떼도(고르기만) 낮은 해상도가 남지 않는다.
+  }, [c.rev, c.src, c.tab, c.renderer, c.editing, paint]);
 
   const toImage = (e: React.PointerEvent) => {
     const el = imgRef.current;
