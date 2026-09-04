@@ -26,30 +26,34 @@
  */
 import { makeNoise, smoothstep } from "./noise.ts";
 
-/** 작은 도형에서 밖으로 번지는 폭 (원본 픽셀) */
-const REACH_MAX = 84;
-/** 큰 도형에서 내려갈 바닥 (원본 픽셀) */
-const REACH_MIN = 34;
-/** 곡선이 반쯤 내려오는 짧은 변 (원본 픽셀) */
-const REACH_REF = 240;
+/** 구름이 실제로 뻗는 폭 ÷ `cloudReach` — 아래 세 몫(둥글리기·부풀림·경사)을 더한 값이다 */
+const EXTENT = 1.9;
+/** 도형 짧은 변 대비 뻗는 폭. ★**이만큼은 있어야 안개로 읽힌다** (아래 ★★주) */
+const EXTENT_RATIO = 1.0;
+/* ★0.78 로 뽑아 봤더니 긴 변이 아직 곧게 비쳤다 (2026-09-05 렌더 대조). 1.0 에서 덩어리가
+   변 길이에 맞먹어 네모가 사라진다. */
+/** 뻗는 폭의 바닥·천장 (원본 픽셀) */
+const EXTENT_MIN = 60;
+const EXTENT_MAX = 300;
 
-/** ★★**밖으로 번지는 폭** (원본 픽셀). 도형이 클수록 조금씩 줄어든다.
+/** ★★**구름 크기의 단위** (원본 픽셀). 실제로 뻗는 폭은 이 값의 약 `EXTENT` 배다.
  *
- *  ★왜 상수가 아니라 곡선인가: 작은 박스에 34px 만 두르면 구름이 아니라 테두리로 보이고,
- *    큰 박스에 84px 를 두르면 자리를 너무 먹는다 (사용자 지적 2026-09-04: *"지금도 좀 큼"*).
- *  ★그래도 **비례는 아니다** — 폭이 위아래로 갇혀 있어 박스를 두 배로 키워도 넘치는 폭은
- *    두 배가 되지 않는다.
+ *  ★★**안개로 읽히려면 뻗는 폭이 도형 크기에 견줄 만해야 한다** (사용자 지적 2026-09-05:
+ *    *"예전처럼 네모박스가 됨 … 불균일한 안개 느낌을 유지"*). 한때 이 폭을 34~84px 로 **못
+ *    박았는데**(절대값), 그러면 200px 짜리 박스에서 덩어리가 변 길이보다 훨씬 작아 **직선 변이
+ *    그대로 드러났다.** 덩어리는 폭에 비례하므로, 폭이 작으면 무슨 짓을 해도 네모로 보인다.
+ *  ★대신 **천장을 둔다** — 큰 박스에서 자리를 너무 먹지 않게 (2026-09-04 지적).
  *
- *      짧은 변    번지는 폭(한쪽)
- *        60px        74px
- *       150px        65px
- *       300px        56px
- *       800px        46px
- *      2000px        39px
+ *      짧은 변    뻗는 폭(한쪽)   그린 크기
+ *        60px        60px        박스의 3.0배
+ *       150px       150px             3.0배
+ *       300px       300px             3.0배
+ *       800px       300px             1.75배
+ *      2000px       300px             1.30배
  */
 export function cloudReach(shortSide: number): number {
-  const s = Math.max(0, shortSide);
-  return REACH_MIN + (REACH_MAX - REACH_MIN) * (REACH_REF / (REACH_REF + s));
+  const ext = Math.min(EXTENT_MAX, Math.max(EXTENT_MIN, Math.max(0, shortSide) * EXTENT_RATIO));
+  return ext / EXTENT;
 }
 
 /** 회색 범위 — **v2 원문 그대로** (`floor(b*230) + floor(bright * floor(b*25))`).
@@ -70,9 +74,43 @@ export type CloudOpts = {
   seed: number;
   /** 0~50. 무늬를 성기게 하고 윤곽 흔들림을 약하게 한다 (v2 그대로) */
   feather: number;
-  /** 칠한 자리 밖으로 번질 폭 — **이 격자의 픽셀 단위** */
+  /** 구름 크기의 단위 — **이 격자의 픽셀 단위**. 실제로 뻗는 폭은 이 값의 약 1.9배 */
   reach: number;
 };
+
+/** 마스크를 흐려 **둥글린다** — 상자 흐리기 두 번(≈가우시안). 결과는 0..1.
+ *
+ *  ★★왜 필요한가: 사각형에서 잰 거리는 등고선이 **모서리만 둥근 사각형**이라, 긴 변이
+ *    그대로 직선으로 남는다. 노이즈를 아무리 걸어도 그 직선이 비쳐 「네모」로 읽힌다
+ *    (사용자 지적 2026-09-05). 거리를 재기 **전에** 모양을 뭉개면 바탕부터 둥글다.
+ *  ★칠한 자리는 그대로 합집합에 넣는다 (`mask || 뭉갠 것`) — 덮임 보장이 여기 걸려 있다.
+ *  ★가장자리는 **바깥값을 되풀이**한다 (0 으로 보면 판 테두리에서 모양이 잘린다). */
+function roundedBase(mask: Uint8Array, w: number, h: number, r: number): Uint8Array {
+  const R = Math.max(1, Math.round(r));
+  let cur = Float32Array.from(mask);
+  const tmp = new Float32Array(w * h);
+  for (let pass = 0; pass < 2; pass++) {
+    for (let y = 0; y < h; y++) {
+      let sum = 0;
+      for (let x = -R; x <= R; x++) sum += cur[y * w + Math.min(w - 1, Math.max(0, x))];
+      for (let x = 0; x < w; x++) {
+        tmp[y * w + x] = sum / (2 * R + 1);
+        sum += cur[y * w + Math.min(w - 1, x + R + 1)] - cur[y * w + Math.max(0, x - R)];
+      }
+    }
+    for (let x = 0; x < w; x++) {
+      let sum = 0;
+      for (let y = -R; y <= R; y++) sum += tmp[Math.min(h - 1, Math.max(0, y)) * w + x];
+      for (let y = 0; y < h; y++) {
+        cur[y * w + x] = sum / (2 * R + 1);
+        sum += tmp[Math.min(h - 1, y + R + 1) * w + x] - tmp[Math.max(0, y - R) * w + x];
+      }
+    }
+  }
+  const base = new Uint8Array(w * h);
+  for (let i = 0; i < w * h; i++) base[i] = mask[i] || cur[i] > 0.28 ? 1 : 0;
+  return base;
+}
 
 /** 마스크(0/1) **밖으로의 거리**. 안쪽은 0 이다.
  *
@@ -123,20 +161,27 @@ export function distanceOutside(mask: Uint8Array, w: number, h: number): Float32
 export function cloudFromMask(mask: Uint8Array, w: number, h: number, o: CloudOpts): Cloud {
   const reach = Math.max(1, o.reach);
   const soft = Math.min(50, Math.max(0, o.feather)) / 50;
-  // ★「부드럽게」를 올리면 덩어리가 잦아들고(bulge↓) 경사가 넓어진다(halo↑) — v2 와 같은 방향
-  const solid = reach * 0.04;
-  const bulge = reach * (0.4 - soft * 0.28);
-  const halo = reach - solid - bulge;
+  /* ★「부드럽게」를 올리면 덩어리가 잦아들고(bulge↓) 경사가 넓어진다(halo↑) — v2 와 같은 방향.
+     ★셋을 더하면 `EXTENT` 배가 된다 (둥글리기 0.45 + 부풀림 0.85 + 경사 0.6). */
+  const roundR = reach * 0.45;
+  const bulge = reach * (0.85 - soft * 0.45);
+  const halo = reach * (0.6 + soft * 0.5);
+  /** 경사 폭을 자리마다 흔드는 정도 — 한결같은 띠가 아니라 들쭉날쭉한 안개가 된다 */
+  const vary = 0.55 - soft * 0.2;
+  /** 바깥으로 갈수록 알파에 얼룩을 주는 정도 */
+  const patch = 0.45 - soft * 0.15;
 
   const n = makeNoise(o.seed);
-  /* ★★**덩어리는 크게, 진폭은 halo 만큼** — v2 의 비례를 그대로 옮긴 값이다.
-     v2 는 짧은 변 140px 짜리 박스에서 파장 146·73·35px, 진폭 30px, 경사 65px 였다.
+  /** 경사·얼룩을 흔드는 두 번째 무늬 — 윤곽과 같은 자리에서 흔들리면 결이 겹쳐 보인다 */
+  const nd = makeNoise(o.seed * 3 + 17);
+  /* ★★**덩어리는 크게** — v2 의 비례를 옮긴 값이다 (짧은 변 140px 에서 파장 146·73·35px).
      처음엔 파장을 `reach` 의 1.5배로 잡았다가 **잔털 난 네모**가 됐다 — 직선 변을 흔들려면
      파장이 변 길이에 맞먹어야 한다. */
-  const ns = reach * 4.5 * (1 + soft * 0.6);
+  const ns = reach * 5 * (1 + soft * 0.5);
   const lumScale = reach * 6;
+  const cap = reach * EXTENT;
 
-  const d = distanceOutside(mask, w, h);
+  const d = distanceOutside(roundedBase(mask, w, h, roundR), w, h);
   const cover = new Uint8Array(w * h);
   const lum = new Uint8Array(w * h);
 
@@ -151,17 +196,23 @@ export function cloudFromMask(mask: Uint8Array, w: number, h: number, o: CloudOp
       lum[i] = Math.round(bn * 255);
 
       const dist = d[i];
-      if (dist >= reach) continue;          // 닿는 끝 밖 — 완전히 투명하다
+      if (dist > cap) continue;             // 닿는 끝 밖 — 완전히 투명하다
       // ── 덮는 범위 ──────────────────────────────────────────
       // ★v2 의 3옥타브 가장자리 노이즈. **밖으로만** 민다 (`max(0, …)`) — 안으로 파이면
       //   칠한 자리가 드러난다. 이 한 줄이 「반드시 덮인다」를 지킨다.
       const en = n(x / (ns * 0.5) + 50, y / (ns * 0.5) + 50) * 0.5
         + n(x / (ns * 0.25) + 150, y / (ns * 0.25) + 150) * 0.35
         + n(x / (ns * 0.12) + 250, y / (ns * 0.12) + 250) * 0.15;
-      const edge = solid + Math.max(0, en) * bulge;
-      cover[i] = dist <= edge
-        ? 255
-        : Math.round(255 * (1 - smoothstep(edge, edge + halo, dist)));
+      const edge = Math.max(0, en) * bulge;
+      // ★경사 폭도 자리마다 다르다 — 어디는 뚝 끊기고 어디는 길게 흩어져야 안개로 읽힌다
+      const hv = halo * (1 - vary + vary * (nd(x / (ns * 0.35), y / (ns * 0.35)) + 1));
+      let a = dist <= edge ? 1 : 1 - smoothstep(edge, edge + hv, dist);
+      if (patch > 0 && dist > edge) {
+        // ★바깥으로 갈수록 얼룩이 세진다 — 안쪽은 건드리지 않는다 (덮임 보장)
+        const pk = (nd(x / (ns * 0.18) + 90, y / (ns * 0.18) + 90) + 1) / 2;
+        a *= 1 - patch * (1 - pk) * Math.min(1, (dist - edge) / Math.max(1, hv));
+      }
+      cover[i] = Math.round(255 * Math.max(0, Math.min(1, a)));
     }
   }
   return { cover, lum, w, h };
