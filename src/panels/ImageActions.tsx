@@ -741,11 +741,15 @@ function SendMenu({ busy, items }: { busy: boolean; items: SendItem[] }) {
       setOpen(false);
     };
     const key = (e: KeyboardEvent) => e.key === "Escape" && setOpen(false);
-    document.addEventListener("pointerdown", close);
+    /* ★★**캡처 단계**로 듣는다 (사용자 지적 2026-09-04: *"이미지를 다른 거 선택하면 선택 팝업
+       사라져야 하는데 그대로 있음"*). 씬 칸·갤러리 칸은 `pointerdown` 에 `stopPropagation` 을
+       걸어 두어(끌기와 클릭을 가르려고), 거품 단계에서 듣는 이 창구까지 올라오지 않았다.
+       캡처는 그 앞을 지나므로 어디를 눌러도 닫힌다. */
+    document.addEventListener("pointerdown", close, true);
     document.addEventListener("keydown", key);
     window.addEventListener("scroll", close, true);
     return () => {
-      document.removeEventListener("pointerdown", close);
+      document.removeEventListener("pointerdown", close, true);
       document.removeEventListener("keydown", key);
       window.removeEventListener("scroll", close, true);
     };

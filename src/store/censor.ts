@@ -532,7 +532,14 @@ export const useCensor = create<S>((set, get) => ({
       }
       set({ progress: { done: i + 1, total: s.images.length, what: "save" } });
     }
-    set({ after: made, afterIdx: -1, busy: false, progress: null, staged: false });
+    /* ★★**저장한 장의 편집 상태는 버린다** (사용자 지적 2026-09-04: *"검열 편집하고 난 다음에
+       같은 이미지 한 번 더 돌렸는데 이전에 작업했던 편집 정보가 남아 있었음"*).
+       `scanAll` 은 `boxes[id]` 가 있으면 탐지를 건너뛰므로, 남겨 두면 **다음 판이 지난번에
+       손본 박스로 시작한다.** ★빈 배열로 두면 안 된다 — `[]` 도 값이라 그 건너뛰기에 걸린다.
+       열쇠를 **지운다.** */
+    const kept = { ...get().boxes };
+    for (const im of s.images) delete kept[im.id];
+    set({ after: made, afterIdx: -1, busy: false, progress: null, staged: false, boxes: kept });
     get().setTab("after");
   },
 
@@ -555,7 +562,10 @@ export const useCensor = create<S>((set, get) => ({
         image: await blobToBase64(blob),
       });
       const made: CensorImage = { id: `a${seq++}`, name: r.name, rel: r.file };
-      set({ after: [...get().after, made], boxes: { ...get().boxes, [im.id]: [] } });
+      // ★빈 배열이 아니라 **열쇠를 지운다** (`saveAll` 의 ★★주 — `[]` 는 탐지 건너뛰기에 걸린다)
+      const rest = { ...get().boxes };
+      delete rest[im.id];
+      set({ after: [...get().after, made], boxes: rest });
       get().select(get().after.length - 1);
     } catch (e) {
       set({ error: String(e) });
