@@ -15,7 +15,7 @@
  *
  *  박스를 끄는 동안 일어나는 일은 `drawImage` 몇 번과 경로 채우기 하나뿐이다.
  */
-import { bucketAspect, marginOf, plate, plateRGBA, type Plate } from "./steam.ts";
+import { bucketAspect, plate, plateRGBA, type Plate } from "./steam.ts";
 
 export type CoverSettings = {
   method: string;
@@ -291,10 +291,9 @@ export class CensorRenderer {
       const [x1, y1, x2, y2] = b.box;
       if (x2 <= x1 || y2 <= y1) continue;
       const { p, cv, w, h } = this.steamPlate(b, s, scale);
-      // 판은 박스 짧은 변을 1 로 놓고 만들었다. 그 단위로 되돌려 그릴 크기를 셈한다
-      const unit = Math.min(w, h);
-      const dw = w + 2 * p.margin * unit;
-      const dh = h + 2 * p.margin * unit;
+      // ★판은 박스의 `span` 배로 만들어졌다 (v2 처럼 **각 변에 비례**한다 — 짧은 변 단위가 아니다)
+      const dw = w * p.span;
+      const dh = h * p.span;
       const cx = ((x1 + x2) / 2) * scale;
       const cy = ((y1 + y2) / 2) * scale;
       ctx.save();
@@ -320,4 +319,3 @@ export class CensorRenderer {
 /** 「부드럽게」가 바뀌면 무늬까지 버려야 하는지 — 스토어가 이 표를 보고 고른다 */
 export const NEEDS_PLATE_RESET = new Set(["feather"]);
 
-void marginOf;
