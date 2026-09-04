@@ -26,36 +26,58 @@ import { fbm, makeNoise, sdRoundRect, smoothstep } from "./noise.ts";
 
 /** 판의 긴 변 (픽셀). ★비용이 여기 걸린다 — 픽셀마다 노이즈를 여섯 번 돈다.
  *  640 이면 한 장에 약 40ms 이고 (실측 2026-09-04), 캐시되므로 끄는 동안에는 0 이다.
- *  ★이 안에서 **박스가 차지하는 것은 `640 / SPAN`** 이다 — 그만큼이 실제 해상도다. */
+ *  ★이 안에서 **박스가 차지하는 것은 `640 / span`** 이다 — 그만큼이 실제 해상도다. */
 const PLATE_MAX = 640;
 
 /** v2 의 `expandRatio` — 판은 구름 박스보다 각 변으로 이만큼 넓다 */
 const EXPAND = 0.35;
 
-/** ★★**구름을 박스보다 몇 배로 그리나** (사용자 지시 2026-09-04: 박스를 90% 이상 가리게).
+/** ★★**작은 박스에서의 배율** (곡선의 천장). 큰 박스는 `cloudScale` 이 여기서부터 내린다.
  *
  *  v2 의 타원은 박스에 내접하므로 모서리를 원리상 못 덮는다 — 그래서 **구름 자체를 키운다.**
- *  실측 2026-09-04 — **이 함수로** 잰 값이다 (다섯 비율 × 여덟 씨앗, 가장 나쁜 조건인
- *  「부드럽게 0」. 다시 재려면 이 상수만 바꿔 `steam.test.ts` 의 덮임 판정을 돌린다):
+ *  실측 2026-09-04 — 박스 짧은 변별로 (`steam.test.ts` 의 덮임 판정이 같은 값을 잰다):
  *
- *      배율    덮임 중앙값   덮임 최저    그리는 크기
- *      ×1.5        68%         60%      박스의 2.55배
- *      ×1.7        83%         73%            2.89배
- *      ×1.9        91%         84%            3.23배
- *      ×2.1        96%         93%            3.57배   ← 지금 값
+ *      짧은 변   배율    그리는 크기        덮임 중앙값 / 최저
+ *       60px    ×1.90   194px (3.23배)        91% / 84%
+ *      150px    ×1.70   433px (2.89배)        83% / 73%
+ *      300px    ×1.55   790px (2.63배)        72% / 63%
+ *      800px    ×1.35  1836px (2.29배)        56% / 49%
  *
- *  ★★**「90% 이상」을 최저 기준으로 읽었다.** 그래서 보통 그림에서는 96% 를 덮고, 사용자
- *    눈에는 *"박스를 다 덮고도 초과"* 로 보인다 (지적 2026-09-04). 중앙값을 90% 에 맞추면
- *    (×1.9) **최저가 84% 로 떨어져 어떤 그림에서는 박스의 1/6 이 비친다** — 검열에서
- *    「가려진 줄 알았는데 안 가려진」 것이 가장 나쁜 결함이라 최저 쪽을 기준으로 뒀다.
- *    더 줄일지는 사용자가 정한다.
+ *  ★★**큰 박스는 덮임을 내주고 크기를 얻는다.** 고정 배율 2.1 이던 때(덮임 93~96%)는
+ *    큰 박스에서 구름이 화면을 덮었다 (사용자 지적 2026-09-04: *"지금도 좀 큼"*).
+ *    더 덮고 싶으면 `CLOUD_SCALE_MIN` 을, 작은 박스까지 함께 키우려면 `CLOUD_SCALE` 을 올린다.
  *  ★구름이 커 보이는 몫은 대부분 **알파 경사(0.6→1.15)의 halo** 다. 더 줄이려면 배율이
  *    아니라 그 경사를 좁혀야 하는데, 그러면 v2 의 부드러운 느낌이 함께 사라진다.
- *  ★올리면 더 덮이지만 구름이 그만큼 커진다 (그림에서 차지하는 자리가 넓어진다). */
+ */
 const CLOUD_SCALE = 2.1;
 
-/** 판을 **박스 크기의 몇 배로 그리나**. 부르는 쪽이 이 값으로 그릴 자리를 셈한다 */
-export const SPAN = (1 + 2 * EXPAND) * CLOUD_SCALE;
+/** 큰 박스에서 내려갈 바닥값 */
+const CLOUD_SCALE_MIN = 1.15;
+/** 곡선이 반쯤 내려오는 박스 짧은 변 (원본 픽셀) */
+const CLOUD_SCALE_REF = 220;
+
+/** ★★**박스가 클수록 배율을 줄인다** (사용자 제안 2026-09-04: *"박스 크기에 비례해서
+ *  배율을 점점 줄여주면?"*).
+ *
+ *  까닭: 배율이 고정이면 **넘치는 폭도 박스에 비례해 커진다** — 큰 박스에서는 구름이
+ *  화면을 덮었다 (지적: *"지금도 좀 큼"*). 곡선을 두면 큰 박스일수록 박스에 붙는다.
+ *
+ *  ★★**넘치는 폭을 상수로는 못 만든다.** 타원이 사각형 **모서리**를 덮으려면 반지름이
+ *    박스 반폭의 √2 배 이상이어야 하는데, 이 비는 박스 크기와 무관하다. 절대 여백(+50px)
+ *    으로 묶으면 큰 박스에서 구름이 박스보다 작아져 검열이 아예 안 된다.
+ *    그래서 **기울기만 낮춘다** — 큰 박스는 덮임을 내주고 크기를 얻는다.
+ *  ★재는 것은 **원본 픽셀의 짧은 변**이다 (화면 배율이 아니라) — 확대해도 구름이 안 변해야 한다. */
+export function cloudScale(shortSide: number): number {
+  const s = Math.max(0, shortSide);
+  return CLOUD_SCALE_MIN
+    + (CLOUD_SCALE - CLOUD_SCALE_MIN) * (CLOUD_SCALE_REF / (CLOUD_SCALE_REF + s));
+}
+
+/** 배율을 캐시 열쇠로 쓰려고 5% 단위로 뭉갠다 (`bucketAspect` 와 같은 뜻) */
+export const bucketScale = (k: number) => Math.round(k * 20) / 20;
+
+/** 그 배율일 때 판을 **박스 크기의 몇 배로 그리나** */
+export const spanOf = (k: number) => (1 + 2 * EXPAND) * k;
 
 export type Plate = {
   /** 덮는 정도 0..255 */
@@ -70,7 +92,13 @@ export type Plate = {
 };
 
 /** 이 판이 무엇으로 만들어졌나 — 캐시 열쇠 */
-export type PlateKey = { seed: number; feather: number; aspect: number };
+export type PlateKey = {
+  seed: number;
+  feather: number;
+  aspect: number;
+  /** 구름 배율 — `cloudScale(짧은 변)` 을 `bucketScale` 로 뭉갠 값 */
+  scale: number;
+};
 
 /** 가로세로비를 **5% 단위로 뭉갠다.** 늘리는 동안 판을 다시 만들지 않기 위한 것이고,
  *  5% 는 눈에 안 띈다 (판을 그 비율로 늘려 쓴다). */
@@ -84,6 +112,7 @@ export const bucketAspect = (w: number, h: number) =>
 export function plate(key: PlateKey): Plate {
   const { seed, feather } = key;
   const aspect = Math.max(0.05, key.aspect);
+  const span = spanOf(Math.max(1, key.scale));
 
   // 판 크기 — 긴 변이 `PLATE_MAX`. 그 안에서 구름 박스는 `1 / (1+2*EXPAND)` 를 차지한다
   const tw = Math.max(8, aspect >= 1 ? PLATE_MAX : Math.round(PLATE_MAX * aspect));
@@ -141,7 +170,7 @@ export function plate(key: PlateKey): Plate {
       cover[i] = a;
     }
   }
-  return { cover, lum, pw: tw, ph: th, span: SPAN };
+  return { cover, lum, pw: tw, ph: th, span };
 }
 
 /** 회색 범위 — **v2 원문 그대로** (`floor(b*230) + floor(bright * floor(b*25))`).

@@ -15,7 +15,7 @@
  *
  *  박스를 끄는 동안 일어나는 일은 `drawImage` 몇 번과 경로 채우기 하나뿐이다.
  */
-import { bucketAspect, plate, plateRGBA, type Plate } from "./steam.ts";
+import { bucketAspect, bucketScale, cloudScale, plate, plateRGBA, type Plate } from "./steam.ts";
 
 export type CoverSettings = {
   method: string;
@@ -265,10 +265,14 @@ export class CensorRenderer {
     const w = (x2 - x1) * scale + s.expand * scale * 2;
     const h = (y2 - y1) * scale + s.expand * scale * 2;
     const aspect = bucketAspect(w, h);
-    const pkey = `${b.seed}|${s.feather}|${aspect}`;
+    /* ★★배율은 **원본 픽셀의 짧은 변**이 정한다 (`steam.cloudScale`) — 화면 배율(`scale`)로 재면
+       확대할 때마다 구름 모양이 바뀐다. 넓히기(`expand`)는 원본 좌표의 값이라 함께 센다. */
+    const shortSide = Math.min(x2 - x1, y2 - y1) + s.expand * 2;
+    const k = bucketScale(cloudScale(shortSide));
+    const pkey = `${b.seed}|${s.feather}|${aspect}|${k}`;
     let p = this.plates.get(pkey);
     if (!p) {
-      p = plate({ seed: b.seed, feather: s.feather, aspect });
+      p = plate({ seed: b.seed, feather: s.feather, aspect, scale: k });
       this.plates.set(pkey, p);
     }
     const ckey = `${pkey}|${s.steamBright}|${s.steamAlpha}`;
