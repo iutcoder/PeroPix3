@@ -147,6 +147,13 @@ MODES = ("overwrite", "sub", "folder")
 SUB_DIR = "output"
 
 
+def retire(root: Path, paths: list[Path]) -> bool:
+    """★검열 저장도 같은 규칙을 쓴다 (`server.censor_apply` 의 덮어쓰기).
+    돌려주는 것은 **다 물러났는가** — 거짓이면 부르는 쪽이 덮어쓰기를 멈춘다."""
+    _retire(root, paths)
+    return not any(p.exists() for p in paths)
+
+
 def _retire(root: Path, paths: list[Path]) -> None:
     """덮어쓰기에 밀려나는 옛 파일을 **휴지통으로** (지우지 않는다).
 

@@ -44,6 +44,11 @@ export function CensorStage() {
   const [drag, setDrag] = useState<Drag | null>(null);
   const [hover, setHover] = useState(-1);
   const [scale, setScale] = useState(1);
+  /** ★그림을 **판 안에 맞춘 화면 크기**(px). CSS 퍼센트로는 세로가 안 잡혀서 셈해서 못 박는다
+   *  (사용자 지적 2026-09-04: *"검열중 화면이 앱 안에 꽉차게 표시되어야 하는데 원본 해상도로
+   *  표시되어서 전체화면으로만 작업할 수 있음"*). 세로로 긴 그림은 `max-height: 100%` 가
+   *  **부모 높이가 auto 라 안 먹었다** — 그래서 원본 크기 그대로 서고 판을 넘쳤다. */
+  const [fitted, setFitted] = useState<{ w: number; h: number } | null>(null);
   const editable = c.tab !== "before";
 
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -73,16 +78,27 @@ export function CensorStage() {
     r.draw(cv, liveBoxes(st.boxes[cur.id] ?? []), coverOf(st), (shown * dpr) / sz.w);
   }, []);
 
-  // 그림 좌표 ↔ 화면 좌표의 배율. 손잡이 크기와 글자 크기가 여기에 매인다
+  /** 그림 좌표 ↔ 화면 좌표의 배율 + **판에 맞춘 크기**.
+   *
+   *  ★재는 대상은 **판**(무대를 감싼 칸)이다. 그림 자신을 재면 「지금 크기」를 되먹여
+   *    줄어들 줄을 모른다 (커지기만 하고 다시 못 줄어드는 되먹임이 된다).
+   *  ★확대는 안 한다 — 작은 그림을 억지로 늘리면 뭉개진다. 줄이기만 한다. */
   useEffect(() => {
-    const el = imgRef.current;
-    if (!el || !size) return;
+    const el = wrapRef.current;
+    const host = el?.parentElement;
+    if (!el || !host || !size) return;
     const fit = () => {
-      setScale(el.clientWidth / size.w || 1);
+      const bw = host.clientWidth, bh = host.clientHeight;
+      if (!bw || !bh) return;
+      const k = Math.min(bw / size.w, bh / size.h, 1);
+      const w = Math.max(1, Math.floor(size.w * k));
+      const h = Math.max(1, Math.floor(size.h * k));
+      setFitted((old) => (old && old.w === w && old.h === h ? old : { w, h }));
+      setScale(w / size.w || 1);
       paint();
     };
     const ro = new ResizeObserver(fit);
-    ro.observe(el);
+    ro.observe(host);
     fit();
     return () => ro.disconnect();
   }, [size?.w, size?.h, c.src, paint]);
@@ -216,7 +232,15 @@ export function CensorStage() {
   return (
     <div
       ref={wrapRef}
-      style={{ position: "relative", maxWidth: "100%", maxHeight: "100%", lineHeight: 0 }}
+      style={{
+        position: "relative",
+        lineHeight: 0,
+        // ★셈한 크기로 못 박는다 (아직 못 쟀으면 판 안으로만 묶어 둔다)
+        width: fitted ? fitted.w : undefined,
+        height: fitted ? fitted.h : undefined,
+        maxWidth: "100%",
+        maxHeight: "100%",
+      }}
     >
       <img
         ref={imgRef}
@@ -229,7 +253,8 @@ export function CensorStage() {
           if (!size) c.set({ sizes: { ...c.sizes, [im.id]: { w: el.naturalWidth, h: el.naturalHeight } } });
           setScale(el.clientWidth / (size?.w ?? el.naturalWidth) || 1);
         }}
-        style={{ maxWidth: "100%", maxHeight: "100%", objectFit: "contain", userSelect: "none" }}
+        // ★칸을 꽉 채운다 — 칸의 크기는 위에서 그림 비율대로 셈해 두었다
+        style={{ width: "100%", height: "100%", objectFit: "contain", userSelect: "none", display: "block" }}
       />
       <canvas
         ref={canvasRef}

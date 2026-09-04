@@ -1,4 +1,6 @@
 import { useI18n } from "../../i18n";
+import { api } from "../../lib/backend";
+import { toast } from "../../store/toast";
 import { Icon } from "../../components/Icon";
 import { useCensor, type Tool } from "../../store/censor";
 import { card, box, on, num, dropFocus, Hint, Line, Sec } from "./ui";
@@ -256,6 +258,10 @@ export function CensorSide() {
 
       {/* 액션은 스크롤 밖에 고정. 위의 것이 늘고 줄어도 버튼 자리는 그대로다 */}
       <div style={{ paddingTop: "var(--sp-3)", display: "flex", flexDirection: "column", gap: "var(--sp-2)" }}>
+        {/* ★★저장 위치 — **일괄변환과 같은 선택지**다 (사용자 지시 2026-09-04).
+            문구도 그 도구의 것을 그대로 쓴다 (`tools.dest*`) — 같은 뜻에 다른 말을 두면
+            어느 쪽이 무엇인지 매번 다시 읽어야 한다. */}
+        {editable && <DestPicker />}
         {c.error && (
           <span data-censor-error style={{ fontSize: "var(--text-2xs)", color: "var(--err-ink)" }}>{c.error}</span>
         )}
@@ -340,3 +346,54 @@ const runBtn: React.CSSProperties = {
   fontSize: "var(--text-xs)",
   fontWeight: "var(--w-semi)",
 };
+
+/** 저장 위치 — 일괄변환(`ConvertTool`)과 같은 세 갈래.
+ *
+ *  ★★**자리를 모르는 그림**(밖에서 떨군 것)은 「저장 폴더 지정」으로만 받는다 —
+ *    덮어쓸 원본도, 아래에 폴더를 만들 자리도 없기 때문이다. 그 그림이 하나라도 있으면
+ *    나머지 갈래를 잠근다 (변환 도구가 `noHome` 으로 하는 것과 같다).
+ */
+function DestPicker() {
+  const t = useI18n((s) => s.t);
+  const c = useCensor();
+  const list = c.tab === "after" ? c.after : c.images;
+  const noHome = list.some((im) => !im.rel && !im.path);
+  const needDest = c.destMode === "folder" || noHome;
+
+  const pick = async () => {
+    const first = list.find((im) => im.path || im.rel);
+    try {
+      const r = await api<{ dir: string | null }>("/api/files/pick-dir", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        // ★윈도우 경로는 `\` 로도 갈린다 — 둘 다 봐야 파일 이름을 떼고 폴더가 남는다
+        body: JSON.stringify({ start: first?.path ? first.path.replace(/[\\/][^\\/]*$/, "") : "" }),
+      });
+      if (r.dir) c.set({ dest: r.dir });
+    } catch (e) {
+      toast(String(e), "warn");
+    }
+  };
+
+  return (
+    <Sec label={t("tools.dest")} help={t("tools.destHint")}>
+      <select
+        data-censor-dest-mode
+        value={noHome ? "folder" : c.destMode}
+        onChange={(e) => c.set({ destMode: e.target.value as "overwrite" | "sub" | "folder" })}
+        style={{ ...box, width: "100%" }}
+      >
+        <option value="overwrite" disabled={noHome}>{t("tools.destOverwrite")}</option>
+        <option value="sub" disabled={noHome}>{t("tools.destSub")}</option>
+        <option value="folder">{t("tools.destFolder")}</option>
+      </select>
+      {c.destMode === "overwrite" && !noHome && <Hint>{t("tools.destOverwriteHint")}</Hint>}
+      {needDest && (
+        <button data-censor-dest-pick onClick={() => void pick()} style={{ ...box, width: "100%", textAlign: "left" }}>
+          {c.dest || t("tools.destPick")}
+        </button>
+      )}
+      {needDest && !c.dest && <Hint>{t("tools.needDest")}</Hint>}
+    </Sec>
+  );
+}

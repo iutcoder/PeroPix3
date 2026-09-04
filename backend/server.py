@@ -2813,6 +2813,11 @@ class CensorApply(CensorSource):
     suffix: str = "_censored"
     # ★결과를 둘 폴더 (아웃풋 루트 기준). 비면 원본 옆에 둔다. v2 의 `censored` 폴더 자리다
     dest: str | None = None
+    #: 저장 자리 — **일괄변환과 같은 세 갈래**다 (`tools.MODES`, 사용자 지시 2026-09-04).
+    #  `overwrite` 원본 자리에 (옛 파일은 휴지통) · `sub` 첫 그림 아래 `output/` · `folder` 고른 폴더.
+    #  ★`sub`·`folder` 의 실제 폴더는 화면이 `dest` 로 준다 — 어느 것이 「첫 그림」인지는
+    #    한 장씩 오는 이 창구가 알 수 없기 때문이다 (일괄변환은 목록을 통째로 받는다).
+    mode: str = ""
     # 밖에서 떨군 그림에는 원본 경로가 없다. 저장할 이름을 화면이 준다
     name: str | None = None
 
@@ -2948,13 +2953,19 @@ def censor_image(body: CensorImage):
 
 @app.post("/api/censor/apply")
 def censor_apply(body: CensorApply):
-    """가린 그림을 **새 파일로** 저장한다 (원본은 그대로).
+    """가린 그림을 저장한다. 자리는 `mode` 가 정한다 (일괄변환과 같은 세 갈래).
 
-    ★덮어쓰기 경로를 만들지 말 것 — 생성물은 Anlas 가 든 원본이다.
+    ★★**덮어쓰기가 생겼다** (사용자 지시 2026-09-04: *"저장 방식을 파일 일괄변환이랑 동일한
+      선택지를 고를 수 있게"*). 여기 있던 *"덮어쓰기 경로를 만들지 말 것 — 생성물은 Anlas 가
+      든 원본이다"* 는 그 지시로 걷혔다. 대신 **지우지 않는다** — 옛 파일은 휴지통으로 가고
+      (`tools.retire`), 물러날 자리가 없으면 덮어쓰기를 **하지 않고 세운다.**
     ★박스가 **0개여도 저장한다.** 일괄 저장에서 "찾은 게 없는 장"이 결과 폴더에서 빠지면
       그 폴더가 원본 묶음의 대역이 되지 못한다 (v2 `completeCensoring` 도 그대로 넘긴다).
     ★★**픽셀은 화면이 그려 보낸다.** 여기서 다시 그리지 않는다 (`CensorApply` 의 ★★주)."""
-    _, src = _censor_open(body)
+    # ★★연 그림은 **바로 닫는다.** 자리(`src`)만 쓰는데 열어 둔 채로 두면 윈도우가 파일을
+    #   잡고 있어 **덮어쓰기가 휴지통으로 못 옮긴다** (실측 2026-09-04: WinError 32).
+    _probe, src = _censor_open(body)
+    _probe.close()
     raw_img = body.image.split(",", 1)[-1] if body.image else ""
     if not raw_img:
         raise HTTPException(400, "그린 그림이 없습니다")
@@ -2966,6 +2977,34 @@ def censor_apply(body: CensorApply):
     # 어디에 둘까. 폴더를 골랐으면 거기, 아니면 원본 옆
     stem = Path(body.name).stem if body.name else (src.stem if src else "censored")
     folder = src.parent if src else WS_ROOT.resolve()
+    # ★★**덮어쓰기** — 원본 자리에 같은 이름으로 선다 (꼬리표를 안 붙인다). 옛 파일은
+    #   지우지 않고 휴지통으로 간다 (`tools._retire` 와 같은 규칙: 뿌리 안이면 앱 휴지통,
+    #   밖이면 OS 휴지통). 물러날 자리가 없으면 **덮어쓰지 않고 세운다.**
+    if body.mode == "overwrite":
+        if src is None:
+            raise HTTPException(400, "원본 자리를 모르는 그림은 덮어쓸 수 없습니다. 저장 폴더를 정해 주세요.")
+        dst = src.parent / f"{src.stem}.png"
+        # ★생성 설정은 **물러나기 전에** 읽어 둔다 (휴지통으로 간 뒤에는 못 읽는다)
+        try:
+            old_bytes = src.read_bytes()
+            # ★★`with` 로 **반드시 닫는다** — 안 닫으면 윈도우가 파일을 잡고 있어 휴지통으로
+            #   못 옮긴다 (실측 2026-09-04: WinError 32 로 덮어쓰기가 통째로 실패했다)
+            with Image.open(io.BytesIO(old_bytes)) as _im:
+                keep_meta = (meta.read_raw(old_bytes), dict(_im.info))
+        except Exception:
+            keep_meta = None
+        gone = [q for q in {src, dst} if q.exists()]
+        if gone and not tools_mod.retire(WS_ROOT, gone):
+            raise HTTPException(400, "옛 파일을 휴지통으로 못 보내 덮어쓰기를 멈췄습니다.")
+        try:
+            if keep_meta is None:
+                raise ValueError("옮길 설정이 없다")
+            dst.write_bytes(meta.write(rendered, keep_meta[0], "PNG", 95, keep_meta[1]))
+        except Exception:
+            dst.write_bytes(rendered)
+        root = WS_ROOT.resolve()
+        rel = dst.relative_to(root) if str(dst).startswith(str(root)) else dst
+        return {"file": str(rel).replace("\\", "/"), "name": dst.name}
     if body.dest is not None:
         try:
             folder = files.under(WS_ROOT, body.dest)

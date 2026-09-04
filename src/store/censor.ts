@@ -79,6 +79,9 @@ type Saved = {
   /** 박스를 끄는 동안 덮개가 옅어지는 정도 — ★모든 방식 공통 (CensorSide 의 ★★주) */
   peek: number;
   dest: string;
+  /** 저장 자리 — **일괄변환과 같은 세 갈래** (사용자 지시 2026-09-04).
+   *  `overwrite` 원본 자리에 · `sub` 첫 그림 아래 `output/` · `folder` 고른 폴더. */
+  destMode: "overwrite" | "sub" | "folder";
 };
 
 const DEFAULTS: Saved = {
@@ -99,6 +102,8 @@ const DEFAULTS: Saved = {
   steamAlpha: 100,
   peek: 30,
   dest: "",
+  // ★기본은 일괄변환과 같은 `sub` — 원본을 건드리지 않는 쪽이 기본이어야 한다
+  destMode: "sub",
 };
 
 function load(): Saved {
@@ -147,6 +152,22 @@ const post = <T,>(path: string, body: unknown) =>
 /** 그림 하나를 가리키는 세 갈래를 요청 몸통으로 (`CensorSource`) */
 const sourceOf = (im: CensorImage) =>
   im.rel ? { rel: im.rel } : im.path ? { path: im.path } : { data: im.data };
+
+/** 그림이 든 폴더 (아웃풋 루트 기준 상대 경로거나 절대 경로). 자리를 모르면 빈 문자열 */
+const dirOf = (im: CensorImage) => {
+  const p = im.rel ?? im.path ?? "";
+  const cut = p.replace(/[\\/][^\\/]*$/, "");
+  return cut === p ? "" : cut;
+};
+
+/** 저장 창구에 실어 보낼 자리. ★**첫 그림 아래 `output/`** 은 여기서 정한다 —
+ *  한 장씩 오는 서버 창구는 어느 것이 첫 장인지 모른다 (일괄변환은 목록을 통째로 받는다). */
+function destOf(s: { destMode: string; dest: string }, list: CensorImage[]) {
+  if (s.destMode === "overwrite") return { mode: "overwrite" };
+  if (s.destMode === "folder") return { dest: s.dest || undefined };
+  const home = list.map(dirOf).find((d) => d !== "");
+  return { dest: home === undefined ? undefined : `${home}/output`.replace(/^\//, "") };
+}
 
 let seq = 1;
 
@@ -502,7 +523,7 @@ export const useCensor = create<S>((set, get) => ({
         const r = await post<{ file: string; name: string }>("/api/censor/apply", {
           ...sourceOf(im),
           name: im.name,
-          dest: get().dest || undefined,
+          ...destOf(get(), s.images),
           image: await blobToBase64(blob),
         });
         made.push({ id: `a${seq++}`, name: r.name, rel: r.file });
@@ -530,7 +551,7 @@ export const useCensor = create<S>((set, get) => ({
       const r = await post<{ file: string; name: string }>("/api/censor/apply", {
         ...sourceOf(im),
         name: im.name,
-        dest: s.dest || undefined,
+        ...destOf(s, [im]),
         image: await blobToBase64(blob),
       });
       const made: CensorImage = { id: `a${seq++}`, name: r.name, rel: r.file };
