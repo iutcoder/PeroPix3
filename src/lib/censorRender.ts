@@ -15,7 +15,7 @@
  *
  *  박스를 끄는 동안 일어나는 일은 `drawImage` 몇 번과 경로 채우기 하나뿐이다.
  */
-import { bucketAspect, plate, plateRGBA } from "./steam.ts";
+import { bucketAspect, bucketScale, cloudScale, plate, plateRGBA } from "./steam.ts";
 import { makeNoise } from "./noise.ts";
 import type { Plate } from "./steam.ts";
 
@@ -280,18 +280,20 @@ export class CensorRenderer {
     return `${boxes}|${s.expand}|${s.feather}|${s.steamBright}|${s.steamAlpha}|${scale.toFixed(3)}|${quick ? "q" : "f"}`;
   }
 
-  /** 박스 하나가 쓸 **v2 무늬 판**. 씨앗·부드럽게·비율에만 매이므로 캐시가 잘 듣는다.
-   *
-   *  ★구름 배율은 **박스 크기와 무관한 상수**다 (`CLOUD_SCALE`) — 한때 짧은 변으로 곡선을
-   *    태웠으나 걷어냈다 (사용자 지시 2026-09-05). 자세한 것은 `steam.ts` 의 그 상수 주석. */
+  /** 박스 하나가 쓸 **v2 무늬 판**. 씨앗·부드럽게·비율·배율에만 매이므로 캐시가 잘 듣는다 */
   private steamPlate(b: RenderBox, s: CoverSettings, scale: number): Plate {
     const [x1, y1, x2, y2] = b.box;
     const w = (x2 - x1 + s.expand * 2) * scale;
     const h = (y2 - y1 + s.expand * 2) * scale;
-    const key = `${b.seed}|${s.feather}|${bucketAspect(w, h)}`;
+    // ★배율은 **원본 픽셀의 짧은 변**으로 정한다 (화면 배율이 아니라) — 확대해도 구름이 안 변한다
+    const shortSrc = Math.min(x2 - x1, y2 - y1) + s.expand * 2;
+    const key = `${b.seed}|${s.feather}|${bucketAspect(w, h)}|${bucketScale(cloudScale(shortSrc))}`;
     let p = this.plates.get(key);
     if (!p) {
-      p = plate({ seed: b.seed, feather: s.feather, aspect: bucketAspect(w, h) });
+      p = plate({
+        seed: b.seed, feather: s.feather,
+        aspect: bucketAspect(w, h), scale: bucketScale(cloudScale(shortSrc)),
+      });
       this.plates.set(key, p);
     }
     return p;
