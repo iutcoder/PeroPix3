@@ -654,10 +654,10 @@ function fillConf(cur: Record<string, number>, classes: string[], base: number) 
 
 function save(s: Saved) {
   const { model, targets, labelConf, conf, floor, method, color, expand, feather, mosaic,
-    mosaicOpacity, blur, steamBright, steamAlpha, peek, dest } = s;
+    mosaicOpacity, blur, steamBright, steamAlpha, peek, dest, destMode } = s;
   try {
     localStorage.setItem(KEY, JSON.stringify({ model, targets, labelConf, conf, floor, method,
-      color, expand, feather, mosaic, mosaicOpacity, blur, steamBright, steamAlpha, peek, dest }));
+      color, expand, feather, mosaic, mosaicOpacity, blur, steamBright, steamAlpha, peek, dest, destMode }));
   } catch {}
 }
 

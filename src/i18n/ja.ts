@@ -818,6 +818,7 @@ export const ja: Dict = {
   act: {
     settings: "設定を読み込む",
     clone: "新しいタブに複製",
+    send: "送る",
     cloned: "新しいタブに複製しました",
     showPrompt: "プロンプトを見る",
     tagger: "タガーに送る（画像からタグを自動抽出）",

@@ -1,4 +1,5 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { Icon } from "../components/Icon";
 import { useI18n } from "../i18n";
 import { fitSizeToBase, useGen } from "../store/gen";
@@ -369,17 +370,6 @@ export function ImageActions({
         {/* ★아이콘만 쓰는 자리는 **이름을 툴팁이 말한다** (사용자 지시 2026-08-19).
             글자로 남긴 것: i2i · 인페인트 · 업스케일(값이 붙는다) — 그림만으로는 뜻이 안 잡히는
             것들이다. 프롬프트 보기·설정·복제는 2026-08-29 에 아이콘으로 옮겼다 (위 ★★주). */}
-        {onClone && (
-          <button
-            data-act-clone
-            onClick={() => void runClone()}
-            disabled={busy}
-            data-tip={t("act.clone")}
-            style={iconBtn}
-          >
-            {Icon.duplicate}
-          </button>
-        )}
 
         {!isMulti && (
           <>
@@ -448,6 +438,11 @@ export function ImageActions({
             </span>
           </button>
         )}
+        {/* ★★**이미지 변형 무리의 끝** (사용자 지시 2026-09-04). 앞은 이 그림을 재료로
+            다시 그리는 것들(i2i·인페인트·강화·업스케일), 뒤는 그림을 **어디로 보내거나 여는**
+            것들이다 — 성격이 달라 눈으로도 갈라 둔다. */}
+        <span data-act-sep style={{ width: 1, alignSelf: "stretch", background: "var(--line)" }} />
+
         {revealPath && !isMulti && (
           <button
             data-act-reveal
@@ -471,30 +466,18 @@ export function ImageActions({
             {Icon.folderOpen}
           </button>
         )}
-        {onKeep && (
-          <button
-            data-act-keep
-            onClick={() => void onKeep()}
-            /* ★아이콘만 있는 단추라 툴팁이 **이름**을 맡는다 — 설명은 걷었다 (2026-08-26).
-               ★문구를 코드에서 잇지 않는다 — 잇는 기호와 어순이 번역을 안 탄다 */
-            data-tip={t("gallery.keep")}
-            style={iconBtn}
-          >
-            {Icon.images}
-          </button>
-        )}
-        {onConvert && (
-          /* ★생성 직후 메타데이터를 지워 내보내는 길 (사용자 지시 2026-08-29) —
-             파일 관리의 「일괄 이름 변환으로 보낸다」와 같은 창구로 간다 */
-          <button
-            data-act-convert
-            onClick={() => void onConvert()}
-            data-tip={t("tools.sendConvert")}
-            style={iconBtn}
-          >
-            {Icon.external}
-          </button>
-        )}
+        {/* ★★**「어디로 보낼까」는 한 단추로 묶는다** (사용자 지시 2026-09-04).
+            탭·갤러리·일괄변환은 전부 *이 그림을 다른 자리로 보내는* 같은 몸짓이라, 아이콘
+            셋으로 늘어놓으면 줄만 길고 무엇이 무엇인지 아이콘으로는 안 잡힌다.
+            ★단추는 일괄변환이 쓰던 아이콘, 갈래는 **글자**로 (같은 지시). */}
+        <SendMenu
+          busy={busy}
+          items={[
+            onClone && { mark: "clone", label: t("act.clone"), run: runClone },
+            onKeep && { mark: "keep", label: t("gallery.keep"), run: onKeep },
+            onConvert && { mark: "convert", label: t("tools.sendConvert"), run: onConvert },
+          ].filter((x): x is SendItem => !!x)}
+        />
         {extra}
 
         {/* ★시드·해상도는 **맨 뒤 우측**이다 (페로픽스파이 `.result-meta .seed`,
@@ -736,3 +719,105 @@ const btn: React.CSSProperties = {
   padding: "3px var(--sp-3)",
   fontSize: "var(--text-2xs)",
 };
+
+type SendItem = { mark: string; label: string; run: () => void | Promise<void> };
+
+/** 「보내기」 — 이 그림을 **다른 자리로** 보내는 갈래를 한 단추에 모은다.
+ *
+ *  ★목록은 `document.body` 에 띄운다 (portal). 이 줄은 그림 위에 겹쳐 있고 `overflow` 가
+ *    걸린 조상이 있어서, 안에서 펼치면 잘린다.
+ *  ★갈 곳이 하나뿐이면 **메뉴를 안 연다** — 한 줄짜리 목록은 누르는 수만 늘린다.
+ */
+function SendMenu({ busy, items }: { busy: boolean; items: SendItem[] }) {
+  const t = useI18n((s) => s.t);
+  const [open, setOpen] = useState(false);
+  const [at, setAt] = useState<{ x: number; y: number } | null>(null);
+  const ref = useRef<HTMLButtonElement | null>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const close = (e: Event) => {
+      if (e.target instanceof Node && ref.current?.contains(e.target)) return;
+      setOpen(false);
+    };
+    const key = (e: KeyboardEvent) => e.key === "Escape" && setOpen(false);
+    document.addEventListener("pointerdown", close);
+    document.addEventListener("keydown", key);
+    window.addEventListener("scroll", close, true);
+    return () => {
+      document.removeEventListener("pointerdown", close);
+      document.removeEventListener("keydown", key);
+      window.removeEventListener("scroll", close, true);
+    };
+  }, [open]);
+
+  if (!items.length) return null;
+
+  const fire = (it: SendItem) => {
+    setOpen(false);
+    void it.run();
+  };
+
+  return (
+    <>
+      <button
+        ref={ref}
+        data-act-send
+        disabled={busy}
+        data-tip={t("act.send")}
+        onClick={() => {
+          if (items.length === 1) return fire(items[0]);
+          const r = ref.current?.getBoundingClientRect();
+          if (r) setAt({ x: r.left, y: r.top });
+          setOpen((v) => !v);
+        }}
+        style={iconBtn}
+      >
+        {Icon.external}
+      </button>
+      {open && at
+        && createPortal(
+          <div
+            data-act-send-menu
+            style={{
+              position: "fixed",
+              // ★단추 **위쪽**에 편다 — 이 줄은 그림 아래에 붙어 있어 아래로 펴면 화면 밖이다
+              left: at.x,
+              bottom: window.innerHeight - at.y + 6,
+              zIndex: 60,
+              minWidth: 150,
+              padding: "var(--sp-1)",
+              display: "flex",
+              flexDirection: "column",
+              gap: 1,
+              background: "var(--panel)",
+              border: "1px solid var(--line)",
+              borderRadius: "var(--r-2)",
+              boxShadow: "0 6px 20px rgba(0,0,0,.28)",
+            }}
+          >
+            {items.map((it) => (
+              <button
+                key={it.mark}
+                data-act-send-to={it.mark}
+                onClick={() => fire(it)}
+                style={{
+                  textAlign: "left",
+                  padding: "6px var(--sp-3)",
+                  borderRadius: "var(--r-1)",
+                  border: "1px solid transparent",
+                  background: "transparent",
+                  color: "var(--ink)",
+                  fontSize: "var(--text-2xs)",
+                  whiteSpace: "nowrap",
+                }}
+              >
+                {it.label}
+              </button>
+            ))}
+          </div>,
+          document.body,
+        )}
+    </>
+  );
+}

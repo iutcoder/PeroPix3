@@ -395,15 +395,19 @@ function SceneActions() {
         }}
         /* ★일괄 변환으로 보내기 (사용자 지시 2026-08-29: *"생성하고 바로 메타데이터 지워서
              쓰게"*) — 파일 관리의 「일괄 이름 변환으로 보낸다」와 같은 창구다 (`useConvertQueue`).
-           ★목록을 **교체**한다 (파일 관리와 같은 어법) — 이 버튼은 「지금 이 한 장」의 몸짓이다.
+           ★★**기존 목록에 더한다** (사용자 지시 2026-09-04). 예전에는 목록을 교체해서,
+             여러 그림을 하나씩 모으려면 한 번에 골라야 했다 — 보낼 때마다 앞의 것이 사라졌다.
+           ★같은 파일은 다시 안 넣는다 — 두 번 보내면 목록에 두 줄이 서고 결과도 두 벌이 된다.
            ★메타 제거 여부는 변환 도구의 체크가 정한다 (설정이 저장되므로 한 번 켜면 유지). */
         onConvert={async () => {
           // ★여러 장 골랐으면 전부 싣는다 (사용자 지시 2026-08-29)
           const files = multiFiles.length > 1 ? multiFiles : [await ensureSaved()].filter((x): x is string => !!x);
           if (!files.length) return;
-          useConvertQueue.setState({
-            items: files.map((f) => ({ name: f.split("/").pop() ?? f, rel: `${ws}/${f}` })),
-          });
+          const had = new Set(useConvertQueue.getState().items.map((i) => i.rel ?? i.path ?? i.name));
+          const add = files
+            .map((f) => ({ name: f.split("/").pop() ?? f, rel: `${ws}/${f}` }))
+            .filter((i) => !had.has(i.rel));
+          if (add.length) useConvertQueue.getState().add(add);
           useUi.getState().setMode("utility");
           useUi.getState().setView("tab", "tools", "convert" as never);
         }}

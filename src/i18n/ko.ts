@@ -840,6 +840,7 @@ export const ko: Dict = {
   act: {
     settings: "설정 불러오기",
     clone: "새 탭으로 복제",
+    send: "보내기",
     cloned: "새 탭으로 복제했습니다",
     showPrompt: "프롬프트 보기",
     /* ★도구 이름을 그대로 쓴다 (사용자 지시 2026-08-29: *"태그뽑기라고 하면 뭔지 모를 것

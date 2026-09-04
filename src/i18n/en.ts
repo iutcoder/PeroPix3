@@ -820,6 +820,7 @@ export const en = {
   act: {
     settings: "Load settings",
     clone: "Duplicate into a new tab",
+    send: "Send to…",
     cloned: "Duplicated into a new tab",
     showPrompt: "View prompt",
     tagger: "Send to Tagger (auto-extract tags from this image)",
