@@ -196,13 +196,20 @@ export function warmFields(feather: number, seeds: number, resList: number[]) {
   warmed.add(tag);
   const todo: [number, number][] = [];
   for (const res of resList) for (let seed = 1; seed <= seeds; seed++) todo.push([seed, res]);
+  /* ★한가할 때만 (`requestIdleCallback`). 타이머로 돌리면 첫 획을 긋는 프레임 사이에 20ms 짜리 굽기가
+     끼어 그 프레임이 튄다 (사용자 제보 2026-09-05: "그리는 도중의 잔렉"). 없는 환경이면 타이머로. */
+  const later = (fn: () => void) => {
+    const ric = (globalThis as { requestIdleCallback?: (cb: () => void, o?: { timeout: number }) => void }).requestIdleCallback;
+    if (ric) ric(fn, { timeout: 2000 });
+    else setTimeout(fn, 50);
+  };
   const step = () => {
     const next = todo.shift();
     if (!next) return;
     noiseField(next[0], feather, next[1]);
-    setTimeout(step, 0);
+    later(step);
   };
-  setTimeout(step, 0);
+  later(step);
 }
 
 export function plate(key: PlateKey): Plate {

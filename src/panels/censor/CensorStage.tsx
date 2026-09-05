@@ -40,6 +40,8 @@ export function CensorStage() {
   /** 손을 뗀 시각 — 제 해상도 덮개가 완성될 때까지 걸린 시간을 콘솔에 남긴다 (사용자 제보 2026-09-05:
    *  스팀에서 손을 떼는 순간 0.5초 멈춤. 재현이 안 되어 실제 앱에서 잰다) */
   const upAt = useRef(0);
+  /** 획 도중 프레임마다 든 시간 — 붓 처리·윤곽·굽기. 손을 뗄 때 한 줄로 찍고 비운다 */
+  const strokeStats = useRef({ n: 0, ms: [] as number[], outline: 0, draw: 0, brush: 0 });
 
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   /** 긋는 동안 보이는 칠한 칸의 윤곽 (`outlinePath`). ★ref 로 `d` 를 바로 쓴다 — 긋는 중엔 리액트가 안 돈다 */
@@ -67,6 +69,7 @@ export function CensorStage() {
     /* ★★긋는 동안만 **칠한 칸의 윤곽**을 얹는다 (사용자 지시 2026-09-05: *"그리는 중에는 박스
        경계선이 보이게 — 어떻게 칠해서 연결되고 있는지 확인할 수 있게"*). 구름은 이어진 칸을
        한 덩이로 뭉개므로, 어디가 붙었고 어디가 떨어졌는지는 이 선이 말해 준다. */
+    const tOutline = performance.now();
     outlineRef.current?.setAttribute("d", st.editing && st.paint[cur.id] ? outlinePath(st.paint[cur.id]) : "");
     const dpr = Math.min(2, window.devicePixelRatio || 1);
     const shown = el.clientWidth;
@@ -76,10 +79,20 @@ export function CensorStage() {
        손을 떼면 `editing` 이 꺼지고 이 함수가 한 번 더 돌아 제 해상도로 다시 굽는다. */
     const t0 = performance.now();
     r.draw(cv, toRenderBoxes(st.paint[cur.id]), coverOf(st), (shown * dpr) / sz.w, false, st.editing);
-    if (upAt.current && !st.editing) {
-      const now = performance.now();
-      console.debug(`[censor] 손 뗌 → 덮개 완료 ${(now - upAt.current).toFixed(0)}ms (그리기 ${(now - t0).toFixed(0)}ms, 캔버스 ${cv.width}×${cv.height})`);
+    const now = performance.now();
+    const ss = strokeStats.current;
+    if (st.editing) {
+      ss.n++;
+      ss.ms.push(now - tOutline);
+      ss.outline = Math.max(ss.outline, t0 - tOutline);
+      ss.draw = Math.max(ss.draw, now - t0);
+    } else if (upAt.current) {
+      // ★console.info — debug 등급은 개발자 도구 기본 필터에 안 보인다 (사용자: "콘솔창에 아무 로그도 안 찍힘")
+      const sorted = [...ss.ms].sort((a, b) => a - b);
+      const med = sorted[sorted.length >> 1] ?? 0, max = sorted[sorted.length - 1] ?? 0;
+      console.info(`[censor] 획 ${ss.n}점: 프레임 중앙값 ${med.toFixed(1)}ms·최대 ${max.toFixed(1)}ms (붓 최대 ${ss.brush.toFixed(1)}, 윤곽 최대 ${ss.outline.toFixed(1)}, 굽기 최대 ${ss.draw.toFixed(1)}) | 손 뗌 → 덮개 완료 ${(now - upAt.current).toFixed(0)}ms (그리기 ${(now - t0).toFixed(0)}ms, 캔버스 ${cv.width}×${cv.height})`);
       upAt.current = 0;
+      strokeStats.current = { n: 0, ms: [], outline: 0, draw: 0, brush: 0 };
     }
   }, []);
 
@@ -172,7 +185,9 @@ export function CensorStage() {
     /* ★★**그 자리에서 다시 그린다.** 리액트가 다시 그려 주기를 기다리지 않는다 —
        칸은 제자리에서 바뀌었고 `paint` 는 스토어를 `getState()` 로 읽으므로 바로 반영된다.
        서버 왕복이 없으므로 프레임마다 불러도 손이 안 걸린다. */
+    const tb = performance.now();
     useCensor.getState().strokeAt(cell, s.last, s.erase);
+    strokeStats.current.brush = Math.max(strokeStats.current.brush, performance.now() - tb);
     s.last = cell;
     paint();
   };

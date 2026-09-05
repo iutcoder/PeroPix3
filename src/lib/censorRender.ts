@@ -95,9 +95,11 @@ export function erodeAlpha(a: Uint8Array | Uint8ClampedArray, W: number, H: numb
 /** 박스별 v2 무늬 판 — 씨앗·부드럽게·비율·배율·해상도에만 매인다. ★그림과 무관하므로 **렌더러가
  *  아니라 모듈**이 든다 — 그림을 넘겨 렌더러가 새로 생겨도 판은 그대로 쓴다. 개수만 막는다. */
 const plates = new Map<string, Plate>();
-/** 128 판은 32KB, 256 판은 130KB — 512 장이면 넉넉히 잡아도 70MB 아래다. 비율·배율 버킷이 많아
- *  획을 긋다 보면 수백 장이 생기므로 (256 이면 밀려나 다시 굽는 일이 잦았다) 이만큼 둔다 */
-const PLATES_MAX = 512;
+/** 128 판은 32KB, 256 판은 130KB. 비율·배율 버킷이 많아 획을 긋다 보면 조각 하나에 열쇠가 둘(끄는
+ *  동안 128, 손 떼면 256)씩 생기므로 넉넉히 둔다. ★★버릴 때는 **가장 오래 안 쓴 것**부터(LRU) —
+ *  넣은 순서로 버리면 상한을 넘는 순간부터 매 프레임 「버리고 다시 굽기」가 돌아 획이 끊긴다
+ *  (사용자 제보 2026-09-05: 칠한 곳이 넓을수록 그리는 도중 잔렉). */
+const PLATES_MAX = 1024;
 
 /** 그림 한 장에 딸린 렌더러. 재료 캐시를 들고 있으므로 **그림마다 하나** 만든다. */
 export class CensorRenderer {
@@ -355,11 +357,15 @@ export class CensorRenderer {
     const res = quick || need <= 100 ? 128 : 256;
     const key = `${b.seed}|${s.feather}|${bucketAspect(w, h)}|${k}|${res}`;
     let p = plates.get(key);
-    if (!p) {
-      p = plate({ seed: b.seed, feather: s.feather, aspect: bucketAspect(w, h), scale: k, res });
-      if (plates.size >= PLATES_MAX) plates.delete(plates.keys().next().value!);
+    if (p) {
+      // LRU — 맞은 것을 맨 뒤로 보낸다 (Map 은 넣은 순서를 지킨다)
+      plates.delete(key);
       plates.set(key, p);
+      return p;
     }
+    p = plate({ seed: b.seed, feather: s.feather, aspect: bucketAspect(w, h), scale: k, res });
+    if (plates.size >= PLATES_MAX) plates.delete(plates.keys().next().value!);
+    plates.set(key, p);
     return p;
   }
 
@@ -461,7 +467,7 @@ export class CensorRenderer {
     // 이번에 안 쓴 덩어리(모양이 바뀐 것의 옛 열쇠)는 버린다 — 캐시는 늘 「지금 있는 덩어리」만큼이다
     for (const k of this.steamGroups.keys()) if (!used.has(k)) this.steamGroups.delete(k);
     if (tm) {
-      console.debug(`[censor] 스팀 제 해상도 굽기: 덩어리 ${groups.size} 중 다시 구움 ${rebaked} (조각 ${tm.pieces}/${items.length}), 합계 ${(performance.now() - t0).toFixed(0)}ms — 무늬 ${tm.lum.toFixed(0)}ms, 판 ${tm.plates.toFixed(0)}ms (새 판 ${plates.size - platesBefore}), 누적 ${tm.acc.toFixed(0)}ms, 색 입히기 ${tm.rgba.toFixed(0)}ms`);
+      console.info(`[censor] 스팀 제 해상도 굽기: 덩어리 ${groups.size} 중 다시 구움 ${rebaked} (조각 ${tm.pieces}/${items.length}), 합계 ${(performance.now() - t0).toFixed(0)}ms — 무늬 ${tm.lum.toFixed(0)}ms, 판 ${tm.plates.toFixed(0)}ms (새 판 ${plates.size - platesBefore}), 누적 ${tm.acc.toFixed(0)}ms, 색 입히기 ${tm.rgba.toFixed(0)}ms`);
     }
   }
 
