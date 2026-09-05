@@ -185,7 +185,7 @@ export class CensorRenderer {
   /** 재료 — 그림 전체를 덮은 한 장. 열쇠는 `방식|수치|그릴 크기` */
   private layers = new Map<string, HTMLCanvasElement>();
   /** 구운 구름 한 장 — 열쇠는 **모양과 설정**이다 (`steamKey`) */
-  /** 구름 무리별로 합친 캔버스 — 열쇠는 그 무리의 덩어리 열쇠들·설정 (`drawSteam` ②). `full` 이 거짓이면 저해상도 덩어리가 섞여 있다 */
+  /** 덩어리별 캔버스 — 덮임에 색을 입힌 것. 열쇠는 덩어리 열쇠·색 설정 (`drawSteam` ②). `full` 이 거짓이면 저해상도 */
   private steamGroups = new Map<string, SteamEntry>();
   /** 칠 덩어리별로 쌓은 덮임 — 열쇠는 그 덩어리의 박스·설정·배율 (`steamKey`). `full` 이 거짓이면 끄는 동안의 저해상도 */
   private blobs = new Map<string, BlobEntry>();
@@ -531,15 +531,18 @@ export class CensorRenderer {
    *    눈에 차이가 없고, 박스를 끄는 동안 매 프레임 다시 만들 수 있어야 한다 (이 앱이 한 번
    *    겪은 문제다 — 2026-08-23 「반응성이 매우 안 좋음」).
    *
-   *  ★★★**두 층으로 캐시한다 — 칠 덩어리와 구름 무리** (사용자 지적 2026-09-05, 두 번째: *"겹치게 안 그린
-   *    것도 다시 그리는 거 같은데? 그리기를 완료하면 화면의 모든 안개가 순차적으로 렌더되는 것처럼 보임"*).
-   *    한 층(구름 사각형이 겹치는 조각끼리 묶어 통째로 굽기)으로 했더니, 구름은 상자보다 두 배쯤 퍼지므로
-   *    서로 멀리 떨어진 상자 다섯이 **한 무리**로 묶였다 (하네스 실측) — 어느 획이든 화면 전체를 다시 구웠다.
-   *      · **칠 덩어리**(`blobs`): 사각형이 **닿는** 조각끼리. 조각 판을 쌓는 느린 일은 여기서만 한다.
-   *        손을 떼면 손댄 덩어리의 열쇠만 바뀌어 그것만 다시 굽는다 (뒤에서, 몇 ms 씩 나눠).
-   *      · **구름 무리**(`steamGroups`): 구름 사각형이 겹치는 덩어리끼리. 덩어리 덮임들을 **최대값으로 합쳐**
-   *        밝기·진하기를 입힌 캔버스 한 장 — 이 합치기는 격자 픽셀당 몇 번의 덧셈이라 매번 해도 싸다.
-   *    무리 안에서 최대값으로 합치므로 겹친 자리가 밝아지지 않는 것은 전과 같다.
+   *  ★★★**칠 덩어리 단위로 굽고, 덩어리마다 한 장이다** (사용자 결정 2026-09-05: *"구름은 실제 구름 닿는 거
+   *    기준 말고 브러시 영역 기준으로 묶는 게 나을 거 같은데"*).
+   *    처음에는 구름 사각형이 겹치는 조각끼리 묶어 통째로 구웠는데, 구름은 상자보다 두 배쯤 퍼지므로 서로
+   *    멀리 떨어진 상자 다섯이 **한 무리**로 묶였다 (하네스 실측) — 어느 획이든 화면 전체를 다시 구웠다
+   *    (*"겹치게 안 그린 것도 다시 그리는 거 같은데? 그리기를 완료하면 화면의 모든 안개가 순차적으로 렌더되는
+   *    것처럼 보임"*). 그래서 묶는 기준을 **사각형이 닿는 조각끼리**(= 붓이 이어 칠한 덩어리)로 바꿨다.
+   *      · **칠 덩어리**(`blobs`): 조각 판을 쌓는 느린 일. 손을 떼면 손댄 덩어리의 열쇠만 바뀌어 그것만
+   *        다시 굽는다 (뒤에서, 몇 ms 씩 나눠).
+   *      · **덩어리 캔버스**(`steamGroups`): 덮임에 밝기·진하기를 입힌 한 장. 덩어리가 다 구워지면 바꿔 끼운다.
+   *    ★한 덩어리 안에서는 조각 판을 최대값으로 합치므로 겹친 자리가 밝아지지 않는다. 떨어진 두 덩어리의
+   *      구름 자락이 겹치는 자리는 캔버스가 겹쳐 그려져 조금 진해질 수 있다 — 자락은 옅어 눈에 잘 안 띈다
+   *      (사용자가 이 쪽을 골랐다).
    *  ★★**제 해상도 굽기는 뒤에서 나눠 굽는다** (사용자 로그 2026-09-05: 조각 300개에 손을 뗀 굽기 50~146ms,
    *    그 사이 커서가 멈춘다). 손을 떼면 우선 저해상도로 바로 보여 주고, 제 해상도는 `startBake` 가 조각을
    *    몇 ms 씩 나눠 한가한 틈에 굽는다. 다 구워지면 `onReady` 로 무대가 다시 그려 바꿔 끼운다.
@@ -599,12 +602,14 @@ export class CensorRenderer {
 
     // ① 칠 덩어리 — 사각형이 닿는 조각끼리 (1px 틈까지). 조각 판을 쌓는 느린 일은 덩어리 열쇠로 캐시한다
     const blobOf = new Map<number, string>();       // 조각 → 덩어리 열쇠
+    const groupsHead = new Map<string, number>();   // 덩어리 열쇠 → 첫 조각 (씨앗은 여기서 딴다)
     let quickBaked = 0, syncBaked = 0, scheduled = 0;
     const t0 = performance.now();
     for (const idx of union(boxes, 1).values()) {
       const key = prefix + "b|" + this.steamKey(idx.map((i) => live[i]), s, scale);
       used.add(key);
       for (const i of idx) blobOf.set(i, key);
+      groupsHead.set(key, idx[0]);
       const gItems = idx.map((i) => items[i]);
       const gRects = idx.map((i) => rects[i]);
       let e = this.blobs.get(key);
@@ -618,25 +623,23 @@ export class CensorRenderer {
       }
     }
 
-    // ② 구름 무리 — 구름 사각형이 겹치는 조각끼리. 덩어리 덮임을 최대값으로 합쳐 한 장으로
+    // ② 덩어리마다 캔버스 한 장 — 덮임에 밝기·진하기를 입힌다. 덩어리가 다 구워지면(full) 한 번 더 만들어 바꿔 끼운다
     let composed = 0;
-    for (const idx of union(rects, 0).values()) {
-      const keys = [...new Set(idx.map((i) => blobOf.get(i)!))].sort();
-      const key = prefix + "g|" + keys.join("&") + `|${s.expand}|${s.feather}|${s.steamBright}|${s.steamAlpha}|${scale.toFixed(3)}`;
+    for (const [i, blobKey] of blobOf) {
+      if (i !== groupsHead.get(blobKey)) continue;      // 덩어리의 첫 조각에서 한 번만
+      const key = prefix + "g|" + blobKey + `|${s.expand}|${s.steamBright}|${s.steamAlpha}`;
       used.add(key);
-      const parts = keys.map((k) => this.blobs.get(k)!);
-      const allFull = parts.every((p) => p.full);
+      const part = this.blobs.get(blobKey)!;
       let e = this.steamGroups.get(key);
-      // 없거나, 저해상도 덩어리가 섞여 있었는데 이제 다 구워졌으면 다시 합친다
-      if (!e || (!e.full && allFull)) {
-        e = this.composite(idx.map((i) => items[i]), idx.map((i) => rects[i]), parts, s, scale, allFull);
+      if (!e || (!e.full && part.full)) {
+        e = this.composite(items[i], part, s, scale);
         this.steamGroups.set(key, e);
         composed++;
       }
       ctx.drawImage(e.cv, e.x, e.y, e.w, e.h);
     }
     if (!quick && !sync && !prefix) {
-      console.info(`[censor] 손 뗌: 칠 덩어리 ${blobOf.size ? new Set(blobOf.values()).size : 0} (조각 ${items.length}) — 저해상도 즉시 ${quickBaked}, 뒤에서 제 해상도 예약 ${scheduled}, 무리 합치기 ${composed}, ${(performance.now() - t0).toFixed(0)}ms`);
+      console.info(`[censor] 손 뗌: 칠 덩어리 ${groupsHead.size} (조각 ${items.length}) — 저해상도 즉시 ${quickBaked}, 뒤에서 제 해상도 예약 ${scheduled}, 색 입히기 ${composed}, ${(performance.now() - t0).toFixed(0)}ms`);
     }
     return used;
   }
@@ -733,48 +736,21 @@ export class CensorRenderer {
     if (tm) tm.acc += lap(tm);
   }
 
-  /** 구름 무리 한 장 — 덩어리 덮임들을 무리 격자에 **최대값으로** 옮겨 쌓고, 깎고(음수 범위), 색을 입힌다.
-   *  ★덩어리마다 작업 해상도가 다르므로 이중선형으로 다시 표본한다 (덮임은 부드러워 늘려도 티가 안 난다) */
-  private composite(gItems: SteamItem[], gRects: number[][], parts: BlobEntry[], s: CoverSettings, scale: number, full: boolean): SteamEntry {
-    const { x0, y0, W, H } = bboxOf(gRects);
-    const long = Math.max(W, H);
-    const k = Math.min(1, (full ? STEAM_WORK : STEAM_WORK_QUICK) / long);
-    const gw = Math.max(8, Math.round(W * k));
-    const gh = Math.max(8, Math.round(H * k));
-    const sx = gw / W, sy = gh / H;
-    const cover = new Uint8Array(gw * gh);
-    for (const b of parts) {
-      // 이 덩어리가 무리 격자에서 차지하는 자리
-      const bx0 = Math.max(0, Math.floor((b.x0 - x0) * sx)), bx1 = Math.min(gw - 1, Math.ceil((b.x0 + b.W - x0) * sx));
-      const by0 = Math.max(0, Math.floor((b.y0 - y0) * sy)), by1 = Math.min(gh - 1, Math.ceil((b.y0 + b.H - y0) * sy));
-      for (let y = by0; y <= by1; y++) {
-        const fy = ((y + 0.5) / sy + y0 - b.y0) * b.sy - 0.5;
-        if (fy < 0 || fy > b.gh - 1) continue;
-        const iy = Math.floor(fy), ty = fy - iy, jy = Math.min(b.gh - 1, iy + 1);
-        for (let x = bx0; x <= bx1; x++) {
-          const fx = ((x + 0.5) / sx + x0 - b.x0) * b.sx - 0.5;
-          if (fx < 0 || fx > b.gw - 1) continue;
-          const ix = Math.floor(fx), tx = fx - ix, jx = Math.min(b.gw - 1, ix + 1);
-          const cv = (b.cover[iy * b.gw + ix] * (1 - tx) + b.cover[iy * b.gw + jx] * tx) * (1 - ty)
-            + (b.cover[jy * b.gw + ix] * (1 - tx) + b.cover[jy * b.gw + jx] * tx) * ty;
-          if (cv <= 0) continue;
-          const i = y * gw + x;
-          cover[i] = mergeCover(cover[i], cv);
-        }
-      }
-    }
+  /** 덩어리 캔버스 한 장 — 쌓은 덮임을 깎고(음수 범위) 밝기·진하기를 입힌다. 덮임 배열은 그대로 두고 사본을 깎는다 */
+  private composite(head: SteamItem, part: BlobEntry, s: CoverSettings, scale: number): SteamEntry {
+    const { x0, y0, W, H, k, gw, gh } = part;
+    let cover = part.cover;
     // ★음수 「범위」— 모은 덮임을 격자 단위로 깎는다 (화면 px → 격자 px 는 k)
-    if (s.expand < 0) erodeAlpha(cover, gw, gh, -s.expand * scale * k);
+    if (s.expand < 0) { cover = new Uint8Array(cover); erodeAlpha(cover, gw, gh, -s.expand * scale * k); }
 
-    /* ★★**밝기 무늬는 무리 격자에서 한 번 만든다** (판마다가 아니라).
+    /* ★★**밝기 무늬는 덩어리 격자에서 한 번 만든다** (판마다가 아니라).
        판의 것을 쓰면 두 구름이 만나는 자리에서 무늬가 갈려 **각진 선**이 드러난다
        (2026-09-05 렌더 대조). v2 의 밝기는 230~255 의 좁은 흔들림이라, 어느 좌표에서
-       만들든 구름의 성격은 같다 — 갈리지 않는 쪽이 낫다. 무리끼리는 구름이 안 닿으므로
-       무리마다 따로 만들어도 갈릴 자리가 없다.
+       만들든 구름의 성격은 같다 — 갈리지 않는 쪽이 낫다.
        ★계산은 v2 원문 그대로다 (3옥타브 · 0.5~1 로 압축). 파장만 격자 단위로 환산한다. */
     const lum = new Uint8Array(gw * gh);
     {
-      const n = makeNoise(gItems[0].b.seed);
+      const n = makeNoise(head.b.seed);
       const ff = 1 + Math.min(50, Math.max(0, s.feather)) / 25;
       const ns = (Math.max(gw, gh) / 2) * ff;
       for (let y = 0; y < gh; y++) {
@@ -790,7 +766,7 @@ export class CensorRenderer {
     const img = g.createImageData(gw, gh);
     img.data.set(plateRGBA({ cover, lum }, s.steamBright, s.steamAlpha));
     g.putImageData(img, 0, 0);
-    return { cv, x: x0, y: y0, w: W, h: H, full };
+    return { cv, x: x0, y: y0, w: W, h: H, full: part.full };
   }
 
   /** 저장용 — **원본 크기**로 한 장 굽는다. 화면에 쓰는 것과 같은 `draw` 를 지난다 */
