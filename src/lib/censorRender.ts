@@ -109,7 +109,8 @@ export class CensorRenderer {
   /** 재료 — 그림 전체를 덮은 한 장. 열쇠는 `방식|수치|그릴 크기` */
   private layers = new Map<string, HTMLCanvasElement>();
   /** 구운 구름 한 장 — 열쇠는 **모양과 설정**이다 (`steamKey`) */
-  private steamCache: { key: string; cv: HTMLCanvasElement; x: number; y: number; w: number; h: number } | null = null;
+  /** 덩어리별로 구운 구름 — 열쇠는 그 덩어리의 박스·설정·배율 (`steamKey`). `full` 이 거짓이면 끄는 동안의 저해상도 */
+  private steamGroups = new Map<string, { cv: HTMLCanvasElement; x: number; y: number; w: number; h: number; full: boolean }>();
   /** 매 프레임 새로 만들지 않으려고 들고 있는 석 장 (모양 · 여백을 두른 모양 · 오려낸 재료) */
   private maskCv: HTMLCanvasElement | null = null;
   private padCv: HTMLCanvasElement | null = null;
@@ -124,7 +125,7 @@ export class CensorRenderer {
   /** 설정이 바뀌면 재료를 버린다. ★모양만 바뀔 때는 **부르지 않는다** — 그게 빠른 이유다 */
   invalidate() {
     this.layers.clear();
-    this.steamCache = null;
+    this.steamGroups.clear();
   }
 
   /** 무늬까지 버린다 (「부드럽게」가 바뀌었을 때) */
@@ -319,11 +320,11 @@ export class CensorRenderer {
   }
 
   /** 이 구름이 무엇으로 만들어졌나 — 모양이 바뀌면 다시 굽는다 */
-  private steamKey(list: RenderBox[], s: CoverSettings, scale: number, quick: boolean) {
+  private steamKey(list: RenderBox[], s: CoverSettings, scale: number) {
     const boxes = list
       .map((b) => `${b.seed}:${b.box.map((v) => Math.round(v)).join(",")}:${(b.rotation ?? 0).toFixed(3)}`)
       .join("|");
-    return `${boxes}|${s.expand}|${s.feather}|${s.steamBright}|${s.steamAlpha}|${scale.toFixed(3)}|${quick ? "q" : "f"}`;
+    return `${boxes}|${s.expand}|${s.feather}|${s.steamBright}|${s.steamAlpha}|${scale.toFixed(3)}`;
   }
 
   /** 박스 하나가 쓸 **v2 무늬 판**. 씨앗·부드럽게·비율·배율에만 매이므로 캐시가 잘 듣는다 */
@@ -380,14 +381,24 @@ export class CensorRenderer {
    *  ★★**낮은 해상도에서 모아 늘려 그린다.** 구름은 부드러워서 원본의 1/3 로 만들어도
    *    눈에 차이가 없고, 박스를 끄는 동안 매 프레임 다시 만들 수 있어야 한다 (이 앱이 한 번
    *    겪은 문제다 — 2026-08-23 「반응성이 매우 안 좋음」).
-   *  ★모양이 안 바뀌면 구운 것을 그대로 쓴다 (`steamCache`).
+   *  ★모양이 안 바뀐 덩어리는 구운 것을 그대로 쓴다 (`steamGroups`).
+   *
+   *  ★★**덩어리 단위로 굽는다** (사용자 지적 2026-09-05: *"겹치지 않은 것도 다시 굽냐"* — 그랬다.
+   *    칠한 곳이 넓어질수록 손을 뗄 때마다 전부를 다시 쌓아 느려졌다). 구름 사각형이 겹치는 조각끼리
+   *    묶으면(union-find) 덩어리끼리는 구름이 안 닿으므로 따로 구워 겹쳐 그려도 결과가 같다.
+   *    손을 떼면 방금 손댄 덩어리만 다시 굽고, 나머지는 구워 둔 것을 그대로 붙인다. 끄는 동안에는
+   *    저해상도로 구운 것을, 손을 떼면 제 해상도로 다시 굽는다 — 손대지 않은 덩어리의 제 해상도
+   *    구름은 끄는 동안에도 그대로 쓴다 (열쇠에 해상도가 없다).
    */
   private drawSteam(
     ctx: CanvasRenderingContext2D, list: RenderBox[], s: CoverSettings, scale: number,
     quick = false,
   ) {
     const live = list.filter((b) => b.box[2] > b.box[0] && b.box[3] > b.box[1]);
-    if (!live.length) return;
+    if (!live.length) {
+      this.steamGroups.clear();
+      return;
+    }
 
     /** 박스 하나가 화면에서 차지하는 자리 — 두 번 쓰므로 미리 뽑는다. 판은 작업 해상도가 정해진 뒤에 */
     const items = live.map((b) => {
@@ -396,22 +407,76 @@ export class CensorRenderer {
         b,
         cx: ((x1 + x2) / 2) * scale,
         cy: ((y1 + y2) / 2) * scale,
-        // ★음수 「범위」는 여기서 안 쓴다 — 다 모은 덮임을 깎는다 (아래 `erodeAlpha`)
+        // ★음수 「범위」는 여기서 안 쓴다 — 다 모은 덮임을 깎는다 (`bakeSteam` 의 `erodeAlpha`)
         w: (x2 - x1 + Math.max(0, s.expand) * 2) * scale,
         h: (y2 - y1 + Math.max(0, s.expand) * 2) * scale,
         rot: b.rotation ?? 0,
         span: spanOf(this.steamScale(b, s)),
       };
     });
-
-    // 구름들이 차지하는 자리 — 판은 박스의 `span` 배로 그려진다
-    let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
-    for (const it of items) {
+    // 구름 하나가 화면에서 차지하는 사각형 — 판은 박스의 `span` 배로 그려진다 (회전은 외접원)
+    const rects = items.map((it) => {
       const hw = (it.w * it.span) / 2;
       const hh = (it.h * it.span) / 2;
       const r = Math.abs(it.rot) > 1e-6 ? Math.hypot(hw, hh) : 0;
-      x0 = Math.min(x0, it.cx - (r || hw)); y0 = Math.min(y0, it.cy - (r || hh));
-      x1 = Math.max(x1, it.cx + (r || hw)); y1 = Math.max(y1, it.cy + (r || hh));
+      return [it.cx - (r || hw), it.cy - (r || hh), it.cx + (r || hw), it.cy + (r || hh)];
+    });
+
+    // 구름이 겹치는 조각끼리 덩어리로 (union-find)
+    const parent = items.map((_, i) => i);
+    const find = (i: number): number => (parent[i] === i ? i : (parent[i] = find(parent[i])));
+    for (let i = 0; i < rects.length; i++) {
+      const a = rects[i];
+      for (let j = i + 1; j < rects.length; j++) {
+        const b = rects[j];
+        if (a[0] <= b[2] && b[0] <= a[2] && a[1] <= b[3] && b[1] <= a[3]) parent[find(i)] = find(j);
+      }
+    }
+    const groups = new Map<number, number[]>();
+    for (let i = 0; i < items.length; i++) {
+      const r = find(i);
+      const g = groups.get(r);
+      if (g) g.push(i);
+      else groups.set(r, [i]);
+    }
+
+    // 계측 — 제 해상도(손을 뗀 뒤) 굽기만 콘솔에 남긴다 (사용자 제보 2026-09-05: 그 순간 0.5초 멈춤)
+    const tm = quick ? null : { t: performance.now(), plates: 0, lum: 0, acc: 0, rgba: 0, pieces: 0 };
+    const platesBefore = plates.size;
+    const t0 = performance.now();
+    const used = new Set<string>();
+    let rebaked = 0;
+    for (const idx of groups.values()) {
+      const key = this.steamKey(idx.map((i) => live[i]), s, scale);
+      used.add(key);
+      let e = this.steamGroups.get(key);
+      // ★끄는 동안(quick)은 있는 것이면 무엇이든 쓰고, 손을 떼면 제 해상도가 아닌 것만 다시 굽는다
+      if (!e || (!quick && !e.full)) {
+        e = this.bakeSteam(idx.map((i) => items[i]), idx.map((i) => rects[i]), s, scale, quick, tm);
+        this.steamGroups.set(key, e);
+        rebaked++;
+      }
+      ctx.drawImage(e.cv, e.x, e.y, e.w, e.h);
+    }
+    // 이번에 안 쓴 덩어리(모양이 바뀐 것의 옛 열쇠)는 버린다 — 캐시는 늘 「지금 있는 덩어리」만큼이다
+    for (const k of this.steamGroups.keys()) if (!used.has(k)) this.steamGroups.delete(k);
+    if (tm) {
+      console.debug(`[censor] 스팀 제 해상도 굽기: 덩어리 ${groups.size} 중 다시 구움 ${rebaked} (조각 ${tm.pieces}/${items.length}), 합계 ${(performance.now() - t0).toFixed(0)}ms — 무늬 ${tm.lum.toFixed(0)}ms, 판 ${tm.plates.toFixed(0)}ms (새 판 ${plates.size - platesBefore}), 누적 ${tm.acc.toFixed(0)}ms, 색 입히기 ${tm.rgba.toFixed(0)}ms`);
+    }
+  }
+
+  /** 덩어리 하나를 굽는다 — 그 덩어리의 구름 사각형들을 감싸는 자리에, 작업 해상도로 */
+  private bakeSteam(
+    gItems: { b: RenderBox; cx: number; cy: number; w: number; h: number; rot: number; span: number }[],
+    gRects: number[][], s: CoverSettings, scale: number, quick: boolean,
+    tm: { t: number; plates: number; lum: number; acc: number; rgba: number; pieces: number } | null,
+  ) {
+    const lap = () => { const n = performance.now(); const d = n - tm!.t; tm!.t = n; return d; };
+    if (tm) { tm.t = performance.now(); tm.pieces += gItems.length; }
+    let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+    for (const r of gRects) {
+      x0 = Math.min(x0, r[0]); y0 = Math.min(y0, r[1]);
+      x1 = Math.max(x1, r[2]); y1 = Math.max(y1, r[3]);
     }
     x0 = Math.floor(x0 - 1); y0 = Math.floor(y0 - 1);
     x1 = Math.ceil(x1 + 1); y1 = Math.ceil(y1 + 1);
@@ -423,97 +488,83 @@ export class CensorRenderer {
     const k = Math.min(1, (quick ? STEAM_WORK_QUICK : STEAM_WORK) / long);
     const gw = Math.max(8, Math.round(W * k));
     const gh = Math.max(8, Math.round(H * k));
-    const key = this.steamKey(live, s, scale, quick);
+    const sx = gw / W, sy = gh / H;
+    const cover = new Uint8Array(gw * gh);
 
-    let baked = this.steamCache && this.steamCache.key === key ? this.steamCache : null;
-    if (!baked) {
-      // 계측 — 제 해상도(손을 뗀 뒤) 굽기만 콘솔에 남긴다 (사용자 제보 2026-09-05: 그 순간 0.5초 멈춤)
-      const tm = quick ? null : { t: performance.now(), plates: 0, lum: 0, acc: 0, rgba: 0, newPlates: 0 };
-      const lap = () => { const n = performance.now(); const d = n - tm!.t; tm!.t = n; return d; };
-      const platesBefore = plates.size;
-      const sx = gw / W, sy = gh / H;
-      const cover = new Uint8Array(gw * gh);
-
-      /* ★★**밝기 무늬는 격자 전체에서 한 번 만든다** (판마다가 아니라).
-         판의 것을 쓰면 두 구름이 만나는 자리에서 무늬가 갈려 **각진 선**이 드러난다
-         (2026-09-05 렌더 대조). v2 의 밝기는 230~255 의 좁은 흔들림이라, 어느 좌표에서
-         만들든 구름의 성격은 같다 — 갈리지 않는 쪽이 낫다.
-         ★계산은 v2 원문 그대로다 (3옥타브 · 0.5~1 로 압축). 파장만 격자 단위로 환산한다. */
-      const lum = new Uint8Array(gw * gh);
-      {
-        const n = makeNoise(live[0].seed);
-        const ff = 1 + Math.min(50, Math.max(0, s.feather)) / 25;
-        const ns = (Math.max(gw, gh) / 2) * ff;
-        for (let y = 0; y < gh; y++) {
-          for (let x = 0; x < gw; x++) {
-            const bn = n(x / ns, y / ns) + n((x / ns) * 2, (y / ns) * 2) * 0.5
-              + n((x / ns) * 4, (y / ns) * 4) * 0.25;
-            lum[y * gw + x] = Math.round((0.5 + ((bn / 1.75 + 1) / 2) * 0.5) * 255);
-          }
+    /* ★★**밝기 무늬는 덩어리 격자에서 한 번 만든다** (판마다가 아니라).
+       판의 것을 쓰면 두 구름이 만나는 자리에서 무늬가 갈려 **각진 선**이 드러난다
+       (2026-09-05 렌더 대조). v2 의 밝기는 230~255 의 좁은 흔들림이라, 어느 좌표에서
+       만들든 구름의 성격은 같다 — 갈리지 않는 쪽이 낫다. 덩어리끼리는 구름이 안 닿으므로
+       덩어리마다 따로 만들어도 갈릴 자리가 없다.
+       ★계산은 v2 원문 그대로다 (3옥타브 · 0.5~1 로 압축). 파장만 격자 단위로 환산한다. */
+    const lum = new Uint8Array(gw * gh);
+    {
+      const n = makeNoise(gItems[0].b.seed);
+      const ff = 1 + Math.min(50, Math.max(0, s.feather)) / 25;
+      const ns = (Math.max(gw, gh) / 2) * ff;
+      for (let y = 0; y < gh; y++) {
+        for (let x = 0; x < gw; x++) {
+          const bn = n(x / ns, y / ns) + n((x / ns) * 2, (y / ns) * 2) * 0.5
+            + n((x / ns) * 4, (y / ns) * 4) * 0.25;
+          lum[y * gw + x] = Math.round((0.5 + ((bn / 1.75 + 1) / 2) * 0.5) * 255);
         }
-      }
-      if (tm) tm.lum = lap();
-
-      for (const it of items) {
-        if (tm) tm.acc += lap();
-        const p = this.steamPlate(it.b, s, scale, quick);
-        if (tm) tm.plates += lap();
-        // 이 판이 격자에서 차지하는 크기·자리
-        const dw = it.w * p.span * sx, dh = it.h * p.span * sy;
-        const cx = (it.cx - x0) * sx, cy = (it.cy - y0) * sy;
-        // 격자 → 판 좌표는 **회전의 역**이다
-        const cos = Math.cos(-it.rot), sin = Math.sin(-it.rot);
-        const rad = Math.hypot(dw, dh) / 2;
-        const gx0 = Math.max(0, Math.floor(cx - rad)), gx1 = Math.min(gw - 1, Math.ceil(cx + rad));
-        const gy0 = Math.max(0, Math.floor(cy - rad)), gy1 = Math.min(gh - 1, Math.ceil(cy + rad));
-
-        for (let y = gy0; y <= gy1; y++) {
-          for (let x = gx0; x <= gx1; x++) {
-            const ux = x + 0.5 - cx, uy = y + 0.5 - cy;
-            const rx = ux * cos - uy * sin, ry = ux * sin + uy * cos;
-            // 판 픽셀 자리 (가장자리 반 픽셀을 빼고 잡는다)
-            const fx = (rx / dw + 0.5) * p.pw - 0.5;
-            const fy = (ry / dh + 0.5) * p.ph - 0.5;
-            if (fx < 0 || fy < 0 || fx > p.pw - 1 || fy > p.ph - 1) continue;
-            // 이중선형 — 판을 늘려 쓰므로 최근접이면 계단이 진다
-            const ix = Math.floor(fx), iy = Math.floor(fy);
-            const tx = fx - ix, ty = fy - iy;
-            const jx = Math.min(p.pw - 1, ix + 1), jy = Math.min(p.ph - 1, iy + 1);
-            const cv = (p.cover[iy * p.pw + ix] * (1 - tx) + p.cover[iy * p.pw + jx] * tx) * (1 - ty)
-              + (p.cover[jy * p.pw + ix] * (1 - tx) + p.cover[jy * p.pw + jx] * tx) * ty;
-            if (cv <= 0) continue;
-            const i = y * gw + x;
-            const was = cover[i];
-            /* ★★**더 진한 쪽을 남긴다** — 더하면 겹친 자리가 밝은 띠가 된다.
-               ★그냥 최대값만 쓰면 두 구름이 만나는 선이 각지게 드러나므로, 두 값이 엇비슷한
-                 자리에서만 조금 부풀려 둥글린다 — 많아야 `SMAX/4`(≈10/255)라 밝아 보이지 않는다.
-               ★안 닿았던 자리(was 0)는 그대로 넣는다 (안 그러면 배경이 옅게 덮인다) */
-            const hi = cv > was ? cv : was;
-            if (was > 0) {
-              const t = Math.max(0, (SMAX - Math.abs(cv - was)) / SMAX);
-              cover[i] = Math.min(255, Math.round(hi + t * t * SMAX * 0.25));
-            } else cover[i] = Math.round(hi);
-          }
-        }
-      }
-
-      if (tm) tm.acc += lap();
-      // ★음수 「범위」— 모은 덮임을 격자 단위로 깎는다 (화면 px → 격자 px 는 k)
-      if (s.expand < 0) erodeAlpha(cover, gw, gh, -s.expand * scale * k);
-
-      const cv = c2d(gw, gh);
-      const g = cv.getContext("2d")!;
-      const img = g.createImageData(gw, gh);
-      img.data.set(plateRGBA({ cover, lum }, s.steamBright, s.steamAlpha));
-      g.putImageData(img, 0, 0);
-      baked = { key, cv, x: x0, y: y0, w: W, h: H };
-      this.steamCache = baked;
-      if (tm) {
-        tm.rgba = lap();
-        console.debug(`[censor] 스팀 제 해상도 굽기: 조각 ${items.length}, 격자 ${gw}×${gh}, 무늬 ${tm.lum.toFixed(0)}ms, 판 ${tm.plates.toFixed(0)}ms (새 판 ${plates.size - platesBefore}), 누적 ${tm.acc.toFixed(0)}ms, 색 입히기 ${tm.rgba.toFixed(0)}ms`);
       }
     }
-    ctx.drawImage(baked.cv, baked.x, baked.y, baked.w, baked.h);
+    if (tm) tm.lum += lap();
+
+    for (const it of gItems) {
+      if (tm) tm.acc += lap();
+      const p = this.steamPlate(it.b, s, scale, quick);
+      if (tm) tm.plates += lap();
+      // 이 판이 격자에서 차지하는 크기·자리
+      const dw = it.w * p.span * sx, dh = it.h * p.span * sy;
+      const cx = (it.cx - x0) * sx, cy = (it.cy - y0) * sy;
+      // 격자 → 판 좌표는 **회전의 역**이다
+      const cos = Math.cos(-it.rot), sin = Math.sin(-it.rot);
+      const rad = Math.hypot(dw, dh) / 2;
+      const gx0 = Math.max(0, Math.floor(cx - rad)), gx1 = Math.min(gw - 1, Math.ceil(cx + rad));
+      const gy0 = Math.max(0, Math.floor(cy - rad)), gy1 = Math.min(gh - 1, Math.ceil(cy + rad));
+
+      for (let y = gy0; y <= gy1; y++) {
+        for (let x = gx0; x <= gx1; x++) {
+          const ux = x + 0.5 - cx, uy = y + 0.5 - cy;
+          const rx = ux * cos - uy * sin, ry = ux * sin + uy * cos;
+          // 판 픽셀 자리 (가장자리 반 픽셀을 빼고 잡는다)
+          const fx = (rx / dw + 0.5) * p.pw - 0.5;
+          const fy = (ry / dh + 0.5) * p.ph - 0.5;
+          if (fx < 0 || fy < 0 || fx > p.pw - 1 || fy > p.ph - 1) continue;
+          // 이중선형 — 판을 늘려 쓰므로 최근접이면 계단이 진다
+          const ix = Math.floor(fx), iy = Math.floor(fy);
+          const tx = fx - ix, ty = fy - iy;
+          const jx = Math.min(p.pw - 1, ix + 1), jy = Math.min(p.ph - 1, iy + 1);
+          const cv = (p.cover[iy * p.pw + ix] * (1 - tx) + p.cover[iy * p.pw + jx] * tx) * (1 - ty)
+            + (p.cover[jy * p.pw + ix] * (1 - tx) + p.cover[jy * p.pw + jx] * tx) * ty;
+          if (cv <= 0) continue;
+          const i = y * gw + x;
+          const was = cover[i];
+          /* ★★**더 진한 쪽을 남긴다** — 더하면 겹친 자리가 밝은 띠가 된다.
+             ★그냥 최대값만 쓰면 두 구름이 만나는 선이 각지게 드러나므로, 두 값이 엇비슷한
+               자리에서만 조금 부풀려 둥글린다 — 많아야 `SMAX/4`(≈10/255)라 밝아 보이지 않는다.
+             ★안 닿았던 자리(was 0)는 그대로 넣는다 (안 그러면 배경이 옅게 덮인다) */
+          const hi = cv > was ? cv : was;
+          if (was > 0) {
+            const t = Math.max(0, (SMAX - Math.abs(cv - was)) / SMAX);
+            cover[i] = Math.min(255, Math.round(hi + t * t * SMAX * 0.25));
+          } else cover[i] = Math.round(hi);
+        }
+      }
+    }
+    if (tm) tm.acc += lap();
+    // ★음수 「범위」— 모은 덮임을 격자 단위로 깎는다 (화면 px → 격자 px 는 k)
+    if (s.expand < 0) erodeAlpha(cover, gw, gh, -s.expand * scale * k);
+
+    const cv = c2d(gw, gh);
+    const g = cv.getContext("2d")!;
+    const img = g.createImageData(gw, gh);
+    img.data.set(plateRGBA({ cover, lum }, s.steamBright, s.steamAlpha));
+    g.putImageData(img, 0, 0);
+    if (tm) tm.rgba += lap();
+    return { cv, x: x0, y: y0, w: W, h: H, full: !quick };
   }
 
   /** 저장용 — **원본 크기**로 한 장 굽는다. 화면에 쓰는 것과 같은 `draw` 를 지난다 */
