@@ -797,6 +797,8 @@ export const ko: Dict = {
     feather: "부드럽게",
     steamBright: "밝기",
     steamAlpha: "진하기",
+    steamFade: "경사",
+    steamFadeHint: "올릴수록 안개가 안쪽부터 서서히 옅어집니다. 칠한 넓이는 그대로이고, 많이 올리면 칠한 가장자리가 덜 가려질 수 있습니다.",
     peek: "들춰보기",
     peekHint: "박스를 끌고 있는 동안만 덮개가 옅어져 아래가 보입니다.",
     tools: "도구",

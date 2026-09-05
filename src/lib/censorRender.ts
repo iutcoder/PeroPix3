@@ -15,7 +15,7 @@
  *
  *  박스를 끄는 동안 일어나는 일은 `drawImage` 몇 번과 경로 채우기 하나뿐이다.
  */
-import { SEEDS, bucketAspect, bucketScale, cloudScale, plate, plateRGBA, prepRegion, regionCoverRows, regionReach, spanOf, warmFields } from "./steam.ts";
+import { SEEDS, bucketAspect, bucketScale, cloudScale, fadeStartOf, plate, plateRGBA, prepRegion, regionCoverRows, regionReach, spanOf, warmFields } from "./steam.ts";
 import { makeNoise } from "./noise.ts";
 import { methodIndex, rectEmpty, type Mask, type Rect } from "./censorMask.ts";
 import type { Plate, RegionCloud } from "./steam.ts";
@@ -42,6 +42,8 @@ export type CoverSettings = {
   blur: number;
   steamBright: number;
   steamAlpha: number;
+  /** 스팀 「경사」 0~100 — 알파 경사의 시작점을 안쪽으로 (`steam.fadeStartOf`). 칠한 넓이는 안 변한다 */
+  steamFade: number;
 };
 
 export type RenderBox = {
@@ -469,7 +471,7 @@ export class CensorRenderer {
     const boxes = list
       .map((b) => `${b.seed}:${b.box.map((v) => Math.round(v)).join(",")}:${(b.rotation ?? 0).toFixed(3)}`)
       .join("|");
-    return `${boxes}|${s.expand}|${s.feather}|${s.steamBright}|${s.steamAlpha}|${scale.toFixed(3)}`;
+    return `${boxes}|${s.expand}|${s.feather}|${s.steamBright}|${s.steamAlpha}|${s.steamFade}|${scale.toFixed(3)}`;
   }
 
   /** 박스 하나가 쓸 **v2 무늬 판**. 씨앗·부드럽게·비율·배율에만 매이므로 캐시가 잘 듣는다 */
@@ -498,7 +500,8 @@ export class CensorRenderer {
          이미 구워져 있고, 밭은 `warmFields` 가 미리 굽는다. */
     const need = Math.max(w, h) * spanOf(k);
     const res = quick || need <= 100 ? 128 : 256;
-    const key = `${b.seed}|${s.feather}|${bucketAspect(w, h)}|${k}|${res}`;
+    const start = fadeStartOf(s.steamFade);
+    const key = `${b.seed}|${s.feather}|${bucketAspect(w, h)}|${k}|${res}|${start}`;
     let p = plates.get(key);
     if (p) {
       // LRU — 맞은 것을 맨 뒤로 보낸다 (Map 은 넣은 순서를 지킨다)
@@ -506,7 +509,7 @@ export class CensorRenderer {
       plates.set(key, p);
       return p;
     }
-    p = plate({ seed: b.seed, feather: s.feather, aspect: bucketAspect(w, h), scale: k, res });
+    p = plate({ seed: b.seed, feather: s.feather, aspect: bucketAspect(w, h), scale: k, res, start });
     if (plates.size >= PLATES_MAX) plates.delete(plates.keys().next().value!);
     plates.set(key, p);
     return p;
@@ -750,7 +753,7 @@ export class CensorRenderer {
             }
           }
           // ② 거리장·굵기·노이즈. 씨앗은 첫 조각의 것 (자라도 왼쪽 위 씨앗이라 그대로)
-          cloud = prepRegion(inside, gw, gh, gItems[0].b.seed, s.feather, kg * scale, ex * kg);
+          cloud = prepRegion(inside, gw, gh, gItems[0].b.seed, s.feather, kg * scale, ex * kg, fadeStartOf(s.steamFade));
           return false;
         }
         // ③ 줄 묶음마다 덮임

@@ -778,6 +778,8 @@ export const en = {
     feather: "Soften",
     steamBright: "Brightness",
     steamAlpha: "Opacity",
+    steamFade: "Gradient",
+    steamFadeHint: "Higher values start the fade further inside. The covered area stays the same; very high values may leave the painted edge less covered.",
     peek: "Peek",
     peekHint: "While you drag a box the cover fades so you can see underneath.",
     tools: "Tools",

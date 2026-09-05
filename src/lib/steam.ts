@@ -117,10 +117,25 @@ export type Plate = {
 };
 
 /** 이 판이 무엇으로 만들어졌나 — 캐시 열쇠 */
+/** 알파 경사의 끝 — v2 원문 1.15. ★끝은 못 박는다: 여기를 늘리면 칠한 넓이가 넓어진다 (2026-09-06 실측,
+ *  사용자: *"그라데이션 경사를 완만하게 하려고 했더니 색칠 영역이 넓어짐"*). 완만함은 **시작점**으로 조절한다 */
+export const FADE_END = 1.15;
+/** 알파 경사의 시작 (여기까지 100%) — v2 원문 0.6. 「경사」 슬라이더가 여기를 안쪽으로 당긴다 (`fadeStartOf`) */
+export const FADE_START = 0.6;
+
+/** 「경사」(0~100) → 경사 시작점. 0 이면 v2 그대로(0.6), 100 이면 0.1 — 칠한 넓이는 같고 100% 인 속만 좁아진다.
+ *  ★붓 경계는 u = 1/k (배율 1.5~2.1 → 0.48~0.67) 에 있다. 시작점이 그 안으로 들어가면 칠한 가장자리가 100% 에
+ *    못 미치기 시작한다 — 그것이 이 슬라이더의 트레이드오프다 (사용자 결정 2026-09-06: 별도 수치로 조절). */
+export function fadeStartOf(grade: number) {
+  return FADE_START - (Math.min(100, Math.max(0, grade)) / 100) * 0.5;
+}
+
 export type PlateKey = {
   seed: number;
   feather: number;
   aspect: number;
+  /** 알파 경사 시작점 (`fadeStartOf`). 없으면 v2 원문 0.6 */
+  start?: number;
   /** 구름 배율 — `cloudScale(짧은 변)` 을 `bucketScale` 로 뭉갠 값 */
   scale: number;
   /** 판의 긴 변 (픽셀). 없으면 `PLATE_MAX`.
@@ -227,6 +242,7 @@ export function plate(key: PlateKey): Plate {
   const expandY = hs * EXPAND;
 
   const field = noiseField(seed, feather, max);
+  const start = key.start ?? FADE_START;
   // ★「부드럽게」가 하는 일 둘 (v2 그대로): 무늬를 성기게(1x~3x, `noiseField`) · 윤곽 흔들림을 약하게(100%~20%)
   const strength = 1 - Math.min(50, Math.max(0, feather)) / 62.5;
 
@@ -257,9 +273,9 @@ export function plate(key: PlateKey): Plate {
       const warped = dist + field.en[fi] * 0.25 * strength;
 
       let a = 0;
-      if (warped < 0.6) a = 255;
-      else if (warped < 1.15) {
-        const t = (warped - 0.6) / 0.55;
+      if (warped < start) a = 255;
+      else if (warped < FADE_END) {
+        const t = (warped - start) / (FADE_END - start);
         a = Math.round((1 - t * t * (3 - 2 * t)) * 255);
       }
       if (edge < fadeEnd) a = Math.round(a * Math.max(0, Math.min(1, (edge - safe) / (fadeEnd - safe))));
@@ -388,12 +404,14 @@ export type RegionCloud = {
   strength: number;
   /** 경계를 밖으로 미는 몫 (양수 「범위」, 격자 px) */
   shift: number;
+  /** 알파 경사 시작점 (`fadeStartOf`) */
+  start: number;
 };
 
 /** 영역 구름 준비 — 거리장을 만들고 굵기를 잰다. `inside` 는 격자에서 칠해진 픽셀(1).
  *  `thickPx` 를 주면 굵기의 반을 그 값으로 못 박는다 (격자 px). 안 주면 안쪽 거리의 최대 */
 export function prepRegion(
-  inside: Uint8Array, w: number, h: number, seed: number, feather: number, gridPerImage: number, shift = 0,
+  inside: Uint8Array, w: number, h: number, seed: number, feather: number, gridPerImage: number, shift = 0, start = FADE_START,
 ): RegionCloud {
   const dOut = edt(inside, w, h, 1);
   const dIn = edt(inside, w, h, 0);
@@ -416,12 +434,12 @@ export function prepRegion(
      `res/2·ff` 이므로 격자 px 를 그 비로 밭 px 로 옮겨 읽는다 (밭보다 넓으면 거울처럼 접어 이어 붙인다). */
   const res = 256;
   const field = noiseField(seed, feather, res);
-  return { w, h, R, k, signed, en: field.en, res, fieldScale: ((res / 2) * ff) / ns, strength, shift };
+  return { w, h, R, k, signed, en: field.en, res, fieldScale: ((res / 2) * ff) / ns, strength, shift, start };
 }
 
 /** 줄 `y0..y1` 의 덮임을 채운다 (배경 굽기가 몇 줄씩 나눠 부른다). `out` 은 `w*h` */
 export function regionCoverRows(c: RegionCloud, y0: number, y1: number, out: Uint8Array) {
-  const { w, R, k, signed, en, res, fieldScale, strength, shift } = c;
+  const { w, R, k, signed, en, res, fieldScale, strength, shift, start } = c;
   const kR = k * R;
   const amp = 0.25 * strength;
   const period = 2 * res;
@@ -433,13 +451,13 @@ export function regionCoverRows(c: RegionCloud, y0: number, y1: number, out: Uin
       const i = y * w + x;
       const u = (R + signed[i] - shift) / kR;
       // 노이즈로도 못 넘는 자리는 셈을 건너뛴다 — 깊은 속은 100%, 먼 밖은 0
-      if (u >= 1.15 + amp + 0.01) { out[i] = 0; continue; }
-      if (u < 0.6 - amp - 0.01) { out[i] = 255; continue; }
+      if (u >= FADE_END + amp + 0.01) { out[i] = 0; continue; }
+      if (u < start - amp - 0.01) { out[i] = 255; continue; }
       const warped = u + en[fy + fold(Math.floor(x * fieldScale))] * amp;
       let a = 0;
-      if (warped < 0.6) a = 255;
-      else if (warped < 1.15) {
-        const t = (warped - 0.6) / 0.55;
+      if (warped < start) a = 255;
+      else if (warped < FADE_END) {
+        const t = (warped - start) / (FADE_END - start);
         a = Math.round((1 - t * t * (3 - 2 * t)) * 255);
       }
       out[i] = a;
@@ -449,5 +467,5 @@ export function regionCoverRows(c: RegionCloud, y0: number, y1: number, out: Uin
 
 /** 구름이 영역 경계 밖으로 뻗을 수 있는 최대 거리 (격자 px) — 격자를 이만큼 넓혀 잡는다 */
 export function regionReach(R: number, k: number, shift = 0) {
-  return (1.15 + 0.25) * k * R - R + shift + 2;
+  return (FADE_END + 0.25) * k * R - R + shift + 2;
 }

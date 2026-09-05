@@ -85,6 +85,8 @@ type Saved = {
   blur: number;
   steamBright: number;
   steamAlpha: number;
+  /** 스팀 「경사」 0~100 — 알파 경사의 시작점을 안쪽으로 당겨 완만하게. 칠한 넓이는 그대로 (사용자 결정 2026-09-06) */
+  steamFade: number;
   /** 붓을 끄는 동안 덮개가 옅어지는 정도 — ★모든 방식 공통 (CensorSide 의 ★★주) */
   peek: number;
   /** 붓 지름 (px). ★1px 단위 (사용자 지시 2026-09-05: *"8단위로만 되어서 불편. 1단위로"*) */
@@ -113,6 +115,8 @@ const DEFAULTS: Saved = {
   blur: 20,
   steamBright: 100,
   steamAlpha: 100,
+  // ★0 = v2 원문 (100% 가 0.6 까지). 올릴수록 속이 좁아지고 자락이 길어진다
+  steamFade: 0,
   peek: 30,
   // 40px. 젖꼭지 하나를 한두 번에 덮는 크기
   brushPx: 40,
@@ -788,10 +792,10 @@ function fillConf(cur: Record<string, number>, classes: string[], base: number) 
 
 function save(s: Saved) {
   const { model, targets, labelConf, conf, floor, method, color, expand, feather, mosaic,
-    mosaicOpacity, blur, steamBright, steamAlpha, peek, brushPx, brushShape, dest, destMode } = s;
+    mosaicOpacity, blur, steamBright, steamAlpha, steamFade, peek, brushPx, brushShape, dest, destMode } = s;
   try {
     localStorage.setItem(KEY, JSON.stringify({ model, targets, labelConf, conf, floor, method,
-      color, expand, feather, mosaic, mosaicOpacity, blur, steamBright, steamAlpha, peek, brushPx, brushShape, dest, destMode }));
+      color, expand, feather, mosaic, mosaicOpacity, blur, steamBright, steamAlpha, steamFade, peek, brushPx, brushShape, dest, destMode }));
   } catch {}
 }
 
@@ -807,6 +811,7 @@ export function coverOf(s: Saved): CoverSettings {
     blur: s.blur,
     steamBright: s.steamBright,
     steamAlpha: s.steamAlpha,
+    steamFade: s.steamFade,
   };
 }
 

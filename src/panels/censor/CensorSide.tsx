@@ -248,6 +248,13 @@ export function CensorSide() {
                   onChange={(e) => c.tune({ steamAlpha: Number(e.target.value) }, "draw")} style={{ flex: 1 }} />
                 <span style={num}>{c.steamAlpha}</span>
               </Line>
+              {/* ★「경사」— 자락의 100% 시작점을 안쪽으로 당긴다. 칠한 넓이는 그대로 (사용자 결정 2026-09-06:
+                  끝을 늘리면 영역이 넓어지므로 시작점을 밀고, 별도 수치로 조절) */}
+              <Line label={t("censor.steamFade")} help={t("censor.steamFadeHint")}>
+                <input type="range" data-censor-steam-fade min={0} max={100} value={c.steamFade}
+                  onChange={(e) => c.tune({ steamFade: Number(e.target.value) }, "draw")} style={{ flex: 1 }} />
+                <span style={num}>{c.steamFade}</span>
+              </Line>
             </>
           )}
           {/* ★「범위」— 음수면 합집합을 깎는다 (사용자 지시 2026-09-05: "넓히기를 음수도 가능하게. 이름을 범위로") */}

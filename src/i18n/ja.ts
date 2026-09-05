@@ -776,6 +776,8 @@ export const ja: Dict = {
     feather: "やわらかさ",
     steamBright: "明るさ",
     steamAlpha: "濃さ",
+    steamFade: "グラデーション",
+    steamFadeHint: "上げるほど内側から徐々に薄くなります。塗った範囲は変わらず、上げすぎると塗った縁の覆いが弱くなることがあります。",
     peek: "のぞき見",
     peekHint: "ボックスをドラッグしている間だけ覆いが薄くなり下が見えます。",
     tools: "ツール",
