@@ -418,13 +418,12 @@ export function restore(m: Mask, p: Patch) {
 /** 스팀용 **거친 격자** (`GRID`px 칸). 칸마다 0 또는 방식 번호 */
 export type Coarse = { w: number; h: number; cols: number; rows: number; cells: Uint8Array };
 
-/** 비트맵을 거친 격자로 줄인다. ★**칸의 가운데 픽셀이 켜졌을 때** 켠다 (사용자 지적 2026-09-05: 원형 붓 뒤로
- *  *"스팀의 칠해지는 영역이 좀 넓은 거 같아. 원래 90% 였는데 110%"* — 픽셀 하나라도 걸친 칸을 켜니 40px 붓이
- *  48px 칸 띠가 됐다). 가운데 표본은 변마다 **가장 가까운 칸 경계로 반올림**하는 것과 같아, 찾은 박스는 네
- *  귀가 반듯하고 붓 띠는 붓 굵기와 평균적으로 같다. (칸의 넓이 절반 기준은 박스 귀퉁이 칸(25%)을 꺼뜨려
- *  네모가 십자로 갈라졌다.)
- *  ★가는 획은 살린다 — 가운데를 비껴가도 **켜진 이웃이 하나도 없는** 칸은 켠다 (3px 획이 통째로 사라지지 않게).
- *  살린 칸의 방식은 픽셀이 가장 많은 쪽 */
+/** 비트맵을 거친 격자로 줄인다. ★**픽셀이 하나라도 켜진 칸은 켠다** — 가는 획도 구름을 얻고, 어떤 모양도 통째로
+ *  사라지지 않는다. 칸이 붓보다 넓어지는 몫은 `trimBox` 가 사각형을 실제 픽셀 범위로 줄여 되찾는다.
+ *  ★★칸을 덜 켜서 폭을 맞추려던 시도는 전부 접었다 (2026-09-05): 칸 넓이 절반 기준은 박스 귀퉁이 칸만 꺼져
+ *    네모가 십자로 갈라졌고, 칸 가운데 픽셀·가로세로 절반 기준은 40px 원의 바깥 줄이 2~3칸이라 가는 막대 두 장이
+ *    되어 구름이 십자로 섰다 (*"원형 브러시를 칠하면 십자로 스팀이 생겨"*). 칸은 넉넉히 켜고 사각형을 픽셀로
+ *    다듬는 쪽이 모양도 폭도 맞다. 방식이 섞인 칸은 픽셀이 가장 많은 쪽 */
 export function coarseOf(m: Mask): Coarse {
   const cols = Math.max(1, Math.ceil(m.w / GRID));
   const rows = Math.max(1, Math.ceil(m.h / GRID));
@@ -444,31 +443,32 @@ export function coarseOf(m: Mask): Coarse {
   }
   const c0 = b.x0 >> 3, c1 = Math.min(cols - 1, (b.x1 - 1) >> 3);
   const r0 = b.y0 >> 3, r1 = Math.min(rows - 1, (b.y1 - 1) >> 3);
-  const best = new Uint8Array(cols * rows);        // 픽셀은 있는데 가운데를 비껴간 칸 — 가장 많은 방식
   for (let r = r0; r <= r1; r++) {
-    const cy = Math.min(m.h - 1, r * GRID + (GRID >> 1));
     for (let c = c0; c <= c1; c++) {
       const i = r * cols + c;
-      const cx = Math.min(m.w - 1, c * GRID + (GRID >> 1));
-      const mid = cells[cy * m.w + cx];
-      if (mid) { out.cells[i] = mid; continue; }
       let top = 0, bv = 0;
-      for (let v = 1; v < K; v++) { const n = counts[i * K + v]; if (n > top) { top = n; bv = v; } }
-      best[i] = bv;
-    }
-  }
-  // 가운데를 비껴간 칸 — 켜진 이웃이 없으면(가는 획) 켠다. ★이웃 판정은 살리기 전 상태로 (살린 칸끼리 번갈아 꺼지지 않게)
-  const before = out.cells.slice();
-  for (let r = r0; r <= r1; r++) {
-    for (let c = c0; c <= c1; c++) {
-      const i = r * cols + c;
-      if (!best[i]) continue;
-      const on = (c > 0 && before[i - 1]) || (c < cols - 1 && before[i + 1])
-        || (r > 0 && before[i - cols]) || (r < rows - 1 && before[i + cols]);
-      if (!on) out.cells[i] = best[i];
+      for (let v = 1; v < K; v++) if (counts[i * K + v] > top) { top = counts[i * K + v]; bv = v; }
+      out.cells[i] = bv;
     }
   }
   return out;
+}
+
+/** 칸으로 덮은 사각형을 **그 안에 실제로 칠해진 픽셀의 범위**로 줄인다 (사용자 지적 2026-09-05: *"스팀의
+ *  칠해지는 영역이 좀 넓은 거 같아. 원래 90% 였는데 110%"* — 8px 칸으로 올림된 몫을 되찾는다).
+ *  찾은 박스는 제 좌표 그대로, 40px 붓 띠는 40px 로 돌아온다. 원형 붓 한 점은 칸 귀퉁이가 빠져 사각형 두 장이
+ *  되지만 둘 다 원의 범위로 줄어 도톰하게 겹친다 (가는 막대가 아니다).
+ *  ★비용은 둘레에 비례한다 — 켜진 칸으로만 이루어진 사각형이라 위·아래 첫 칸 줄과 좌·우 첫 칸 열 안에서 끝난다 */
+export function trimBox(m: Mask, v: number, box: [number, number, number, number]): [number, number, number, number] {
+  const { w, cells } = m;
+  let [x0, y0, x1, y1] = box;
+  const rowHas = (y: number) => { const row = y * w; for (let x = x0; x < x1; x++) if (cells[row + x] === v) return true; return false; };
+  const colHas = (x: number) => { for (let y = y0; y < y1; y++) if (cells[y * w + x] === v) return true; return false; };
+  while (y0 < y1 && !rowHas(y0)) y0++;
+  while (y1 > y0 && !rowHas(y1 - 1)) y1--;
+  while (x0 < x1 && !colHas(x0)) x0++;
+  while (x1 > x0 && !colHas(x1 - 1)) x1--;
+  return [x0, y0, x1, y1];
 }
 
 /** 거친 격자를 **큰 사각형들로 덮는다** — 방식이 같은 칸끼리, 사각형은 **겹쳐도 된다**.
@@ -596,9 +596,12 @@ export function splitSquarish(box: [number, number, number, number]): [number, n
   return out;
 }
 
-/** 스팀이 받는 모양으로 — 거친 격자로 줄여 큰 사각형으로 덮고, 길쭉한 것은 조각내서 */
+/** 스팀이 받는 모양으로 — 거친 격자로 줄여 큰 사각형으로 덮고, 픽셀 범위로 다듬고, 길쭉한 것은 조각내서 */
 export function toRenderBoxes(m: Mask | null | undefined): RenderBox[] {
   if (!m || rectEmpty(m.bounds)) return [];
-  return rectsOf(coarseOf(m)).flatMap((r) =>
-    splitSquarish(r.box).map((box) => ({ seed: seedOf(box), box, rotation: 0, method: r.method })));
+  return rectsOf(coarseOf(m)).flatMap((r) => {
+    const box = trimBox(m, methodIndex(r.method), r.box);
+    if (box[2] <= box[0] || box[3] <= box[1]) return [];
+    return splitSquarish(box).map((piece) => ({ seed: seedOf(piece), box: piece, rotation: 0, method: r.method }));
+  });
 }
