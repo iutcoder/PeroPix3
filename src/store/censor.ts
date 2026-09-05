@@ -516,10 +516,12 @@ export const useCensor = create<S>((set, get) => ({
         boxes[im.id] = boxes[im.id].filter((b) => !b.off && passes(b, s.labelConf, s.conf));
         /* ★★찾은 박스를 **격자에 굽는다** — 검열 중 탭이 고치는 것은 박스가 아니라 이 격자다
            (붓·지우개, 사용자 지시 2026-09-05). 구운 뒤로는 찾은 것과 칠한 것을 가르지 않는다.
-           ★이미 격자가 있으면 그대로 둔다 — 취소했다 다시 들어와도 손본 것이 남는다
-             (박스 시절에 `boxes[id]` 를 남겨 두던 것과 같은 뜻). */
+           ★★**언제나 새로 굽는다** (사용자 지적 2026-09-05: *"취소를 누르고 다시 검열을 누르면
+             이전 편집 상태가 그대로 나옴. 검열 시작을 눌러도 YOLO 가 체크한 박스만 살리고 모두
+             초기화"*). 전에는 격자가 있으면 그대로 두어 손본 것을 남겼는데, 그것이 「편집 상태가
+             보존되는 문제」였다. 탐지 결과(`boxes`)만 살고 칠한 것은 여기서 버려진다. */
         const sz = sizes[im.id];
-        if (!paint[im.id] && sz) paint[im.id] = burnBoxes(makeGrid(sz.w, sz.h), boxes[im.id], s.method);
+        if (sz) paint[im.id] = burnBoxes(makeGrid(sz.w, sz.h), boxes[im.id], s.method);
       } catch (e) {
         boxes[im.id] = boxes[im.id] ?? [];
         set({ error: String(e) });
@@ -602,7 +604,8 @@ export const useCensor = create<S>((set, get) => ({
   },
 
   cancelProcessing() {
-    set({ tab: "before", undos: [], staged: false, error: null });
+    // ★취소하면 칠한 것을 **무조건 버린다** (사용자 지시 2026-09-05). 탐지 결과는 남는다
+    set({ tab: "before", undos: [], paint: {}, staged: false, error: null });
     get().select(get().idx >= 0 ? get().idx : 0);
   },
 
