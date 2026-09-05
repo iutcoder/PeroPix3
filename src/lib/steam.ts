@@ -123,6 +123,11 @@ export type PlateKey = {
   aspect: number;
   /** 구름 배율 — `cloudScale(짧은 변)` 을 `bucketScale` 로 뭉갠 값 */
   scale: number;
+  /** 판의 긴 변 (픽셀). 없으면 `PLATE_MAX`.
+   *  ★★붓 조각처럼 **작게 그려지는 판은 작게 굽는다** (사용자 지적 2026-09-05: 획이 박스에
+   *    닿으면 앱이 멈춘다). 640px 판 하나가 40ms 라, 획 하나에 조각 수십 개면 초 단위가 된다.
+   *    128px 이면 25배 싸고, 40px 로 그려질 판에는 그만큼이면 충분하다. */
+  res?: number;
 };
 
 /** 가로세로비를 **5% 단위로 뭉갠다.** 늘리는 동안 판을 다시 만들지 않기 위한 것이고,
@@ -139,9 +144,10 @@ export function plate(key: PlateKey): Plate {
   const aspect = Math.max(0.05, key.aspect);
   const span = spanOf(Math.max(1, key.scale));
 
-  // 판 크기 — 긴 변이 `PLATE_MAX`. 그 안에서 구름 박스는 `1 / (1+2*EXPAND)` 를 차지한다
-  const tw = Math.max(8, aspect >= 1 ? PLATE_MAX : Math.round(PLATE_MAX * aspect));
-  const th = Math.max(8, aspect >= 1 ? Math.round(PLATE_MAX / aspect) : PLATE_MAX);
+  // 판 크기 — 긴 변이 `res`(없으면 `PLATE_MAX`). 그 안에서 구름 박스는 `1 / (1+2*EXPAND)` 를 차지한다
+  const max = Math.max(8, Math.min(PLATE_MAX, key.res ?? PLATE_MAX));
+  const tw = Math.max(8, aspect >= 1 ? max : Math.round(max * aspect));
+  const th = Math.max(8, aspect >= 1 ? Math.round(max / aspect) : max);
   const ws = tw / (1 + 2 * EXPAND);
   const hs = th / (1 + 2 * EXPAND);
   const expandX = ws * EXPAND;

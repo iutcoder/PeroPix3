@@ -15,7 +15,7 @@
  *
  *  박스를 끄는 동안 일어나는 일은 `drawImage` 몇 번과 경로 채우기 하나뿐이다.
  */
-import { bucketAspect, bucketScale, cloudScale, plate, plateRGBA } from "./steam.ts";
+import { bucketAspect, bucketScale, cloudScale, plate, plateRGBA, spanOf } from "./steam.ts";
 import { makeNoise } from "./noise.ts";
 import type { Plate } from "./steam.ts";
 
@@ -287,13 +287,17 @@ export class CensorRenderer {
     const h = (y2 - y1 + s.expand * 2) * scale;
     // ★배율은 **원본 픽셀의 짧은 변**으로 정한다 (화면 배율이 아니라) — 확대해도 구름이 안 변한다
     const shortSrc = Math.min(x2 - x1, y2 - y1) + s.expand * 2;
-    const key = `${b.seed}|${s.feather}|${bucketAspect(w, h)}|${bucketScale(cloudScale(shortSrc))}`;
+    const k = bucketScale(cloudScale(shortSrc));
+    /* ★★판 해상도는 **그려질 크기**에 맞춘다 (사용자 지적 2026-09-05: *"브러시처럼 쭉 그으면
+       앱이 정지된 수준"*). 붓 조각은 화면에서 수십 px 로 그려지는데 640px 판을 40ms 씩 굽고
+       있었다 — 획이 박스에 닿으면 조각이 수십 개라 프레임당 초 단위였다. 세 단으로 뭉갠다
+       (128 · 256 · 640) — 열쇠에 들어가므로 같은 조각이 커지면 그때 큰 판을 새로 굽는다. */
+    const need = Math.max(w, h) * spanOf(k);
+    const res = need <= 100 ? 128 : need <= 220 ? 256 : 640;
+    const key = `${b.seed}|${s.feather}|${bucketAspect(w, h)}|${k}|${res}`;
     let p = this.plates.get(key);
     if (!p) {
-      p = plate({
-        seed: b.seed, feather: s.feather,
-        aspect: bucketAspect(w, h), scale: bucketScale(cloudScale(shortSrc)),
-      });
+      p = plate({ seed: b.seed, feather: s.feather, aspect: bucketAspect(w, h), scale: k, res });
       this.plates.set(key, p);
     }
     return p;

@@ -53,8 +53,9 @@ export function countCells(g: Grid) {
 
 export const isEmpty = (g: Grid | null | undefined) => !g || countCells(g) === 0;
 
-/** 픽셀 자리 → 칸 (격자 안으로 가둔다) */
+/** 픽셀 자리 → 칸 (격자 안으로 가둔다). ★수가 아니면(그림이 아직 배치되기 전의 NaN) null */
 export function cellAt(g: Grid, x: number, y: number) {
+  if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
   return {
     gx: Math.max(0, Math.min(g.cols - 1, Math.floor(x / GRID))),
     gy: Math.max(0, Math.min(g.rows - 1, Math.floor(y / GRID))),
@@ -98,11 +99,15 @@ export function stroke(
 ) {
   const dx = Math.abs(b.gx - a.gx);
   const dy = Math.abs(b.gy - a.gy);
+  /* ★★수가 아닌 칸이 오면 **그냥 끝낸다.** `NaN === NaN` 이 영원히 거짓이라 아래 고리가 안
+     끝난다 — 무대가 아직 크기를 못 받아 좌표가 NaN 이던 시험에서 앱이 통째로 멈췄다
+     (2026-09-05). 걸음 수에도 천장을 둔다 (dx+dy 를 넘을 수 없다). */
+  if (!Number.isFinite(dx) || !Number.isFinite(dy)) return;
   const sx = a.gx < b.gx ? 1 : -1;
   const sy = a.gy < b.gy ? 1 : -1;
   let err = dx - dy;
   let { gx, gy } = a;
-  for (;;) {
+  for (let step = 0; step <= dx + dy; step++) {
     stamp(g, gx, gy, r, v);
     if (gx === b.gx && gy === b.gy) break;
     const e2 = 2 * err;
@@ -149,12 +154,25 @@ export function rectsOf(g: Grid): { method: string; box: [number, number, number
   return out;
 }
 
-/** 사각형의 구름 씨앗 — **왼쪽 위 모서리**에서 만든다.
+/** 씨앗 팔레트의 크기 — 사각형의 씨앗은 이 안의 하나다 */
+export const SEEDS = 8;
+
+/** 사각형의 구름 씨앗 — **왼쪽 위 모서리**에서 골라, `SEEDS` 개 중 하나.
  *  ★오른쪽·아래로 더 칠해 사각형이 자라도 씨앗이 그대로라 구름이 통째로 바뀌지 않는다.
- *    (박스 시절에는 박스마다 번호를 붙여 옮겨도 같은 구름이었다 — 붓에는 「옮기기」가 없다.) */
+ *    (박스 시절에는 박스마다 번호를 붙여 옮겨도 같은 구름이었다 — 붓에는 「옮기기」가 없다.)
+ *  ★★왜 팔레트인가 (사용자 지적 2026-09-05: *"기존 박스랑 연결되게 찍으면 엄청 느려짐"*):
+ *    무늬 판은 **씨앗별로** 캐시된다. 자리마다 다른 씨앗이면 획이 박스에 닿아 사각형이
+ *    다시 잘릴 때마다 새 씨앗이 수십 개 나와 판을 그만큼 새로 구웠다. 여덟이면 비율·배율
+ *    버킷과 곱해도 금방 다 채워져 그 뒤로는 캐시만 맞는다. 이웃끼리 같은 씨앗이어도 비율과
+ *    배율이 달라 같은 구름으로 보이지 않고, 최대값으로 합쳐지므로 되풀이가 드러나지 않는다. */
 export function seedOf(box: [number, number, number, number]) {
-  const a = Math.imul(box[0] | 0, 73856093) ^ Math.imul(box[1] | 0, 19349663);
-  return ((a >>> 0) % 1_000_000_007) + 1;
+  // ★칸 단위로 섞는다 — 픽셀(8의 배수)을 그대로 곱하면 낮은 비트가 늘 0 이라 팔레트가 하나로 뭉친다
+  const cx = Math.floor(box[0] / GRID), cy = Math.floor(box[1] / GRID);
+  let h = Math.imul(cx, 0x9e3779b1) ^ Math.imul(cy + 0x1000, 0x85ebca77);
+  h ^= h >>> 15;
+  h = Math.imul(h, 0x27d4eb2f);
+  h ^= h >>> 13;
+  return ((h >>> 0) % SEEDS) + 1;
 }
 
 /** 이 비율을 넘는 사각형은 조각낸다 (긴 변 ÷ 짧은 변) */
