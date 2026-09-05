@@ -3006,10 +3006,18 @@ def censor_apply(body: CensorApply):
         rel = dst.relative_to(root) if str(dst).startswith(str(root)) else dst
         return {"file": str(rel).replace("\\", "/"), "name": dst.name}
     if body.dest is not None:
-        try:
-            folder = files.under(WS_ROOT, body.dest)
-        except ValueError as e:
-            raise HTTPException(400, str(e))
+        # ★★**절대 경로면 그대로 쓴다** (일괄변환 `tools.convert` 와 같은 규칙). 「저장 폴더 지정」은 윈도우
+        #   폴더 찾기로 고른 절대 경로이고, 밖에서 가져온 그림의 `output/` 하위도 절대 경로다 — 루트 안만
+        #   받던 때는 그 둘이 전부 400 이었다 (사용자 제보 2026-09-06: "검열 완료를 누르면 아무 파일도
+        #   안 뜨고 어디에도 저장 안 됨"). 상대 경로는 예전대로 아웃풋 루트 아래.
+        p = Path(body.dest)
+        if p.is_absolute():
+            folder = p
+        else:
+            try:
+                folder = files.under(WS_ROOT, body.dest)
+            except ValueError as e:
+                raise HTTPException(400, str(e))
         folder.mkdir(parents=True, exist_ok=True)
     if src is None and not body.name:
         # 갈 곳도 이름도 없다. 옛 계약대로 바이트로 돌려준다
@@ -3133,6 +3141,23 @@ async def log_reveal():
     except Exception as e:
         say("error", "api", f"로그 열기 실패: {type(e).__name__}: {e}")
         raise HTTPException(500, str(e))
+
+
+class OpenDir(BaseModel):
+    path: str = ""
+
+
+@app.post("/api/files/open-dir")
+async def files_open_dir(body: OpenDir):
+    """**절대 경로 폴더**를 탐색기로 연다 — 검열의 「폴더 열기」가 저장 자리(고른 폴더·밖에서 가져온 그림의
+    `output/`)를 열 때. `files.reveal` 은 아웃풋 루트 안만 열어서 그 자리를 못 열었다.
+    ★있는 폴더만, 절대 경로만 연다 (파일이나 상대 경로는 400). `files.open_dir` 의 주석이 말하는 「사용자가
+      준 경로」란 자유 입력을 뜻한다 — 여기 오는 것은 OS 폴더 찾기로 고른 자리와 그림이 있는 폴더뿐이다."""
+    p = Path(body.path)
+    if not body.path or not p.is_absolute() or not p.is_dir():
+        raise HTTPException(400, "열 수 있는 폴더가 아닙니다")
+    await asyncio.to_thread(files.open_dir, p)
+    return {"ok": True}
 
 
 @app.post("/api/files/reveal")

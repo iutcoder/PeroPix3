@@ -1,6 +1,6 @@
 import { useEffect, useRef } from "react";
 import { useI18n } from "../i18n";
-import { BRUSH_MAX, useCensor, type Tab } from "../store/censor";
+import { BRUSH_MAX, dirOf, isAbsPath, savePathOf, useCensor, type Tab } from "../store/censor";
 import { useFiles, type FileNode } from "../store/files";
 import { useGen } from "../store/gen";
 import { fileMgrThumb } from "../lib/imgUrl";
@@ -111,6 +111,23 @@ export function Censor() {
     return () => window.removeEventListener("keydown", onKey);
   }, []);
 
+  /* 저장 자리 — 검열 전·중은 지금 설정이 가리키는 폴더, 검열 후는 보고 있는 장이 있는 폴더.
+     덮어쓰기는 원본 자리(그 장의 폴더). 루트 안은 `reveal`, 밖(절대 경로)은 `openDir` 로 연다. */
+  const curIm = c.cur();
+  const savePath = c.tab === "after" ? (curIm ? dirOf(curIm) : "") : savePathOf(c, c.images);
+  const saveLabel = c.tab === "after"
+    ? savePath || t("censor.openFolder")
+    : savePath === null ? t("tools.destOverwrite") : savePath || t("tools.needDest");
+  const openTarget = savePath === null ? (curIm ? dirOf(curIm) : "") : savePath;
+  const openSaveDir = async () => {
+    try {
+      if (isAbsPath(openTarget)) await useFiles.getState().openDir(openTarget);
+      else await useFiles.getState().reveal(openTarget);
+    } catch (e) {
+      toast(String(e), "warn");
+    }
+  };
+
   const Row = ({ node, depth }: { node: FileNode; depth: number }) => (
     <>
       <div
@@ -190,35 +207,21 @@ export function Censor() {
 
         <span style={{ flex: 1 }} />
 
-        {/* 저장 폴더. 결과가 갈 자리 (v2 의 `censored` 폴더 드롭다운) */}
-        <span style={{ fontSize: "var(--text-2xs)", color: "var(--ink-faint)" }}>{t("censor.dest")}</span>
-        <select
-          data-censor-dest
-          value={c.dest}
-          onChange={(e) => c.tune({ dest: e.target.value })}
-          style={{ ...box, maxWidth: 220 }}
+        {/* ★★저장 자리는 **읽기만** 보여 준다 (사용자 지시 2026-09-06: *"저장 위치 정하는 게 도구 안으로 들어왔으니까
+            상단에 저장 폴더 정하는 UI 는 사라져야 함, 새 폴더 추가 단추도. 현재 저장되는 경로랑 폴더 열기 단추만"*).
+            정하는 창구는 오른쪽 기둥의 「저장 위치」(`DestPicker`) 하나다 — 같은 값을 두 곳에서 고치게 두지 않는다. */}
+        <span
+          data-censor-save-path
+          title={savePath ?? ""}
+          style={{ fontSize: "var(--text-2xs)", color: "var(--ink-faint)", maxWidth: 360, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
         >
-          <option value="">{t("censor.destBeside")}</option>
-          {/* ★들여쓰기가 아니라 **온 경로**를 적는다. option 은 앞 공백을 접어 버려
-              층이 안 보이고, 저장할 자리는 끝 이름만으로는 못 가린다 */}
-          {flatten(tree).map((path) => (
-            <option key={path} value={path}>
-              {path}
-            </option>
-          ))}
-        </select>
-        <button
-          data-censor-mkdir
-          data-tip={t("censor.newFolder")}
-          onClick={() => void newFolder(c.dest, t)}
-          style={{ ...box, display: "grid", placeItems: "center", padding: "3px var(--sp-2)" }}
-        >
-          {Icon.folderPlus}
-        </button>
+          {saveLabel}
+        </span>
         <button
           data-censor-open-folder
           data-tip={t("censor.openFolder")}
-          onClick={() => void useFiles.getState().reveal(c.dest)}
+          disabled={!openTarget && openTarget !== ""}
+          onClick={() => void openSaveDir()}
           style={{ ...box, display: "grid", placeItems: "center", padding: "3px var(--sp-2)" }}
         >
           {Icon.folderOpen}
@@ -541,22 +544,4 @@ function Arrow({ side, disabled, onClick }: { side: "left" | "right"; disabled: 
       {side === "left" ? Icon.chevL : Icon.chevR}
     </button>
   );
-}
-
-/** 폴더 트리를 한 줄짜리 목록으로 (드롭다운에 들여쓰기로 그린다) */
-function flatten(tree: FileNode[]): string[] {
-  return tree.flatMap((n) => [n.path, ...flatten(n.children)]);
-}
-
-async function newFolder(parent: string, t: (k: string, p?: Record<string, string | number>) => string) {
-  const name = window.prompt(t("files.newFolderPrompt"), "censored");
-  if (!name) return;
-  try {
-    await useFiles.getState().mkdir(parent, name);
-    const path = parent ? `${parent}/${name}` : name;
-    useCensor.getState().tune({ dest: path });
-    toast(t("censor.folderMade", { n: name }));
-  } catch (e) {
-    toast(String(e), "warn");
-  }
 }

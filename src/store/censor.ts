@@ -171,8 +171,11 @@ const post = <T,>(path: string, body: unknown) =>
 const sourceOf = (im: CensorImage) =>
   im.rel ? { rel: im.rel } : im.path ? { path: im.path } : { data: im.data };
 
+/** 절대 경로인가 (드라이브 글자 또는 슬래시로 시작) */
+export const isAbsPath = (p: string) => /^(?:[A-Za-z]:[\\/]|[\\/])/.test(p);
+
 /** 그림이 든 폴더 (아웃풋 루트 기준 상대 경로거나 절대 경로). 자리를 모르면 빈 문자열 */
-const dirOf = (im: CensorImage) => {
+export const dirOf = (im: CensorImage) => {
   const p = im.rel ?? im.path ?? "";
   const cut = p.replace(/[\\/][^\\/]*$/, "");
   return cut === p ? "" : cut;
@@ -185,6 +188,27 @@ function destOf(s: { destMode: string; dest: string }, list: CensorImage[]) {
   if (s.destMode === "folder") return { dest: s.dest || undefined };
   const home = list.map(dirOf).find((d) => d !== "");
   return { dest: home === undefined ? undefined : `${home}/output`.replace(/^\//, "") };
+}
+
+/** 지금 설정으로 저장되는 **폴더** — 상단 표시용. 덮어쓰기면 null (원본 자리), 아직 갈 곳이 없으면 빈 문자열 */
+export function savePathOf(s: { destMode: string; dest: string }, list: CensorImage[]): string | null {
+  const d = destOf(s, list);
+  return "mode" in d ? null : d.dest ?? "";
+}
+
+/** 서버가 돌려준 저장 파일을 목록 항목으로 — 루트 밖(절대 경로)이면 `path`, 안이면 `rel` */
+const savedItem = (r: { file: string; name: string }): CensorImage =>
+  isAbsPath(r.file) ? { id: `a${seq++}`, name: r.name, path: r.file } : { id: `a${seq++}`, name: r.name, rel: r.file };
+
+/** 루트 밖에 저장된 장은 파일 관리 썸네일이 없다 — 탐색으로 한 번 받아 둔다 */
+async function thumbsFor(items: CensorImage[]) {
+  const need = items.filter((im) => !im.rel && im.path);
+  if (!need.length) return;
+  try {
+    const r = await post<{ items: { thumb?: string; width?: number; height?: number }[] }>(
+      "/api/tools/probe", { items: need.map((im) => ({ name: im.name, path: im.path })) });
+    need.forEach((im, i) => { im.thumb = r.items[i]?.thumb || undefined; im.w = r.items[i]?.width; im.h = r.items[i]?.height; });
+  } catch {}
 }
 
 let seq = 1;
@@ -567,12 +591,13 @@ export const useCensor = create<S>((set, get) => ({
           ...destOf(get(), s.images),
           image: await blobToBase64(blob),
         });
-        made.push({ id: `a${seq++}`, name: r.name, rel: r.file });
+        made.push(savedItem(r));
       } catch (e) {
         set({ error: String(e) });
       }
       set({ progress: { done: i + 1, total: s.images.length, what: "save" } });
     }
+    await thumbsFor(made);
     /* ★★**저장한 장의 편집 상태는 버린다** (사용자 지적 2026-09-04: *"검열 편집하고 난 다음에
        같은 이미지 한 번 더 돌렸는데 이전에 작업했던 편집 정보가 남아 있었음"*).
        `scanAll` 은 `boxes[id]` 가 있으면 탐지를 건너뛰고 `paint[id]` 가 있으면 굽기를 건너뛰므로,
@@ -606,7 +631,8 @@ export const useCensor = create<S>((set, get) => ({
         ...destOf(s, [im]),
         image: await blobToBase64(blob),
       });
-      const made: CensorImage = { id: `a${seq++}`, name: r.name, rel: r.file };
+      const made = savedItem(r);
+      await thumbsFor([made]);
       // ★빈 것으로 두지 않고 **열쇠를 지운다** (`saveAll` 의 ★★주)
       const rest = { ...get().paint };
       delete rest[im.id];
