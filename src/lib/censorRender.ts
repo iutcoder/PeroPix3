@@ -15,10 +15,10 @@
  *
  *  박스를 끄는 동안 일어나는 일은 `drawImage` 몇 번과 경로 채우기 하나뿐이다.
  */
-import { SEEDS, bucketAspect, bucketScale, cloudScale, plate, plateRGBA, spanOf, warmFields } from "./steam.ts";
+import { SEEDS, bucketAspect, bucketScale, cloudScale, plate, plateRGBA, prepRegion, regionCoverRows, regionReach, spanOf, warmFields } from "./steam.ts";
 import { makeNoise } from "./noise.ts";
 import { methodIndex, rectEmpty, type Mask, type Rect } from "./censorMask.ts";
-import type { Plate } from "./steam.ts";
+import type { Plate, RegionCloud } from "./steam.ts";
 
 /** 한 장에 그릴 것. ★★두 갈래다 (`censorMask` 머리의 ★★주): 스팀은 **사각형 목록**으로(비트맵을 8px
  *  격자로 줄여 덮은 것), 나머지 방식은 **비트맵 그대로** 마스크로 쓴다. 어느 방식이 있는지는 `boxes` 가
@@ -132,14 +132,14 @@ const PLATES_MAX = 1024;
 /** 구름 무리 한 장 (화면에 붙이는 캔버스). `full` 이 거짓이면 아직 저해상도 덮임이 섞여 있다 */
 type SteamEntry = { cv: HTMLCanvasElement; x: number; y: number; w: number; h: number; full: boolean };
 type SteamItem = { b: RenderBox; cx: number; cy: number; w: number; h: number; rot: number; span: number };
-type BakeTiming = { t: number; plates: number; lum: number; acc: number; rgba: number; pieces: number };
-/** 칠 덩어리 하나의 **덮임** — 조각 판을 쌓은 작업 격자. 캔버스가 아니라 배열이라 무리로 합칠 때 최대값을 취할 수 있다 */
+/** 칠 덩어리 하나의 **덮임** — 작업 격자. 상자 하나면 v2 판을, 자유 영역이면 거리 구름을 여기 쌓는다 */
 type BlobEntry = {
   x0: number; y0: number; W: number; H: number; k: number; gw: number; gh: number; sx: number; sy: number;
   cover: Uint8Array; full: boolean;
 };
-const lap = (tm: BakeTiming) => { const n = performance.now(); const d = n - tm.t; tm.t = n; return d; };
-
+/** 덩어리 굽기 한 판 — `step()` 을 되풀이 부르면 몇 ms 씩 나눠 굽는다 (끝나면 true). 상자 하나는 판 한 장,
+ *  자유 영역은 거리장 만들기 → 줄 묶음마다 덮임 */
+type BlobBake = { entry: BlobEntry; step: () => boolean; pieces: number };
 /** 사각형들을 감싸는 자리 (1px 여유, 정수) */
 function bboxOf(rs: number[][]) {
   let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
@@ -276,9 +276,9 @@ export class CensorRenderer {
       if (how === "steam") {
         // ★처음 제 해상도로 그릴 때 밭을 미리 예약한다 — 획 도중·손 뗀 프레임에 밭 굽기가 안 걸리게
         if (!quick) warmFields(s.feather, SEEDS, [128, 256]);
-        for (const k of this.drawSteam(ctx, list, s, scale, quick, sync, "")) used.add(k);
+        for (const k of this.drawSteam(ctx, list, s, scale, quick, sync, "", mask)) used.add(k);
         // ★이번 획의 델타는 제 열쇠로 따로 — 본 덩어리의 캐시를 건드리지 않는다
-        if (ov.length) for (const k of this.drawSteam(ctx, ov, s, scale, true, false, "ov|")) used.add(k);
+        if (ov.length) for (const k of this.drawSteam(ctx, ov, s, scale, true, false, "ov|", mask)) used.add(k);
       }
       else if (mask) this.drawMasked(ctx, how, mask, s, scale, W, H, scene.dirty);
     }
@@ -550,7 +550,7 @@ export class CensorRenderer {
    */
   private drawSteam(
     ctx: CanvasRenderingContext2D, list: RenderBox[], s: CoverSettings, scale: number,
-    quick: boolean, sync: boolean, prefix: string,
+    quick: boolean, sync: boolean, prefix: string, mask: Mask | null,
   ): Set<string> {
     const used = new Set<string>();
     const live = list.filter((b) => b.box[2] > b.box[0] && b.box[3] > b.box[1]);
@@ -614,12 +614,12 @@ export class CensorRenderer {
       const gRects = idx.map((i) => rects[i]);
       let e = this.blobs.get(key);
       if (sync) {
-        if (!e || !e.full) { e = this.bakeBlob(gItems, gRects, s, scale, false); this.blobs.set(key, e); syncBaked++; }
+        if (!e || !e.full) { e = this.bakeBlob(gItems, gRects, s, scale, false, mask); this.blobs.set(key, e); syncBaked++; }
       } else {
         // ★없으면 우선 저해상도로 바로 — 끄는 동안이든 손을 뗀 직후든 화면이 비지 않게
-        if (!e) { e = this.bakeBlob(gItems, gRects, s, scale, true); this.blobs.set(key, e); quickBaked++; }
+        if (!e) { e = this.bakeBlob(gItems, gRects, s, scale, true, mask); this.blobs.set(key, e); quickBaked++; }
         // ★손을 뗐는데 제 해상도가 아니면 뒤에서 굽는다 (이미 굽고 있으면 그대로)
-        if (!quick && !e.full && !this.jobs.has(key)) { this.startBake(key, gItems, gRects, s, scale); scheduled++; }
+        if (!quick && !e.full && !this.jobs.has(key)) { this.startBake(key, gItems, gRects, s, scale, mask); scheduled++; }
       }
     }
 
@@ -644,30 +644,28 @@ export class CensorRenderer {
     return used;
   }
 
-  /** 뒤에서 굽는 작업 — 조각을 몇 ms 씩 나눠, 한가한 틈마다 한 걸음. 다 되면 바꿔 끼우고 `onReady` */
-  private startBake(key: string, gItems: SteamItem[], gRects: number[][], s: CoverSettings, scale: number) {
+  /** 뒤에서 굽는 작업 — 몇 ms 씩 나눠, 한가한 틈마다 한 걸음. 다 되면 바꿔 끼우고 `onReady` */
+  private startBake(key: string, gItems: SteamItem[], gRects: number[][], s: CoverSettings, scale: number, mask: Mask | null) {
     const job = {};
     this.jobs.set(key, job);
-    const tm = { t: 0, plates: 0, lum: 0, acc: 0, rgba: 0, pieces: gItems.length };
     const started = performance.now();
-    let st: BlobEntry | null = null;
-    let next = 0;
+    let bake: BlobBake | null = null;
     let cpu = 0;
     const step = () => {
       // 열쇠가 버려졌거나(모양이 바뀜) 다른 작업으로 바뀌었으면 그만둔다
       if (this.jobs.get(key) !== job) return;
       const t0 = performance.now();
-      tm.t = t0;
-      if (!st) {
-        st = this.prepBlob(gItems, gRects, false);
+      if (!bake) {
+        bake = this.prepBlob(gItems, gRects, s, scale, false, mask);
       } else {
         // 한 걸음에 8ms 까지만 — 입력·프레임 사이에 끼어도 안 걸리게
-        while (next < gItems.length && performance.now() - t0 < 8) this.accPiece(st, gItems[next++], s, scale, false, tm);
-        if (next >= gItems.length) {
+        let done = false;
+        while (!done && performance.now() - t0 < 8) done = bake.step();
+        if (done) {
           cpu += performance.now() - t0;
           this.jobs.delete(key);
-          this.blobs.set(key, st);
-          console.info(`[censor] 뒤에서 제 해상도 굽기 끝: 조각 ${tm.pieces}, 걸린 시간 ${(performance.now() - started).toFixed(0)}ms (CPU ${cpu.toFixed(0)}ms — 판 ${tm.plates.toFixed(0)}, 누적 ${tm.acc.toFixed(0)})`);
+          this.blobs.set(key, bake.entry);
+          console.info(`[censor] 뒤에서 제 해상도 굽기 끝: 조각 ${bake.pieces}, 걸린 시간 ${(performance.now() - started).toFixed(0)}ms (CPU ${cpu.toFixed(0)}ms)`);
           this.onReady?.();
           return;
         }
@@ -679,32 +677,94 @@ export class CensorRenderer {
   }
 
   /** 칠 덩어리 하나를 **한 번에** 굽는다 (끄는 동안의 저해상도, 저장) */
-  private bakeBlob(gItems: SteamItem[], gRects: number[][], s: CoverSettings, scale: number, quick: boolean): BlobEntry {
-    const st = this.prepBlob(gItems, gRects, quick);
-    for (const it of gItems) this.accPiece(st, it, s, scale, quick, null);
-    return st;
+  private bakeBlob(gItems: SteamItem[], gRects: number[][], s: CoverSettings, scale: number, quick: boolean, mask: Mask | null): BlobEntry {
+    const bake = this.prepBlob(gItems, gRects, s, scale, quick, mask);
+    while (!bake.step()) { /* 끝까지 */ }
+    return bake.entry;
   }
 
-  /** 굽기 준비 — 덩어리의 구름 사각형을 감싸는 자리와 작업 해상도 */
-  private prepBlob(gItems: SteamItem[], gRects: number[][], quick: boolean): BlobEntry {
-    const { x0, y0, W, H } = bboxOf(gRects);
-    /* 작업 해상도 — 긴 변을 이만큼으로 줄인다.
-       ★끄는 동안 조각이 많은 덩어리는 더 줄인다 (사용자 로그 2026-09-05: 조각 300개 덩어리의 저해상도
-         굽기가 프레임마다 15~25ms). 비용은 격자 픽셀 × 조각이라 조각이 `QUICK_PIECES` 를 넘으면
-         그 제곱근만큼 변을 줄여 프레임당 일을 묶는다. 손을 떼면 제 해상도로 돌아온다. */
+  /** 굽기 준비 — **상자 하나**면 v2 판 그대로(`accPiece`), **그 밖(자유 영역)** 은 거리 구름(`steam.ts` 의 영역 구름).
+   *  ★상자 하나를 판으로 남기는 까닭: 찾은 박스의 구름은 v2 와 똑같아야 한다 (사용자 지시). 붓으로 이어 칠한
+   *    것, 길어서 조각난 상자는 영역 구름이다 — 판을 겹치면 튀고 십자가 서고 자락 경계가 계단진다 (머리 주석) */
+  private prepBlob(gItems: SteamItem[], gRects: number[][], s: CoverSettings, scale: number, quick: boolean, mask: Mask | null): BlobBake {
+    const single = gItems.length === 1 && Math.abs(gItems[0].rot) < 1e-6;
+    if (single || !mask) {
+      const { x0, y0, W, H } = bboxOf(gRects);
+      /* 작업 해상도 — 긴 변을 이만큼으로 줄인다.
+         ★끄는 동안 조각이 많은 덩어리는 더 줄인다 (사용자 로그 2026-09-05: 조각 300개 덩어리의 저해상도
+           굽기가 프레임마다 15~25ms). 비용은 격자 픽셀 × 조각이라 조각이 `QUICK_PIECES` 를 넘으면
+           그 제곱근만큼 변을 줄여 프레임당 일을 묶는다. 손을 떼면 제 해상도로 돌아온다. */
+      const long = Math.max(W, H);
+      const shrink = quick && gItems.length > QUICK_PIECES ? Math.sqrt(QUICK_PIECES / gItems.length) : 1;
+      const k = Math.min(1, ((quick ? STEAM_WORK_QUICK : STEAM_WORK) * shrink) / long);
+      const gw = Math.max(8, Math.round(W * k));
+      const gh = Math.max(8, Math.round(H * k));
+      const entry: BlobEntry = { x0, y0, W, H, k, gw, gh, sx: gw / W, sy: gh / H, cover: new Uint8Array(gw * gh), full: !quick };
+      let next = 0;
+      return {
+        entry, pieces: gItems.length,
+        step: () => { if (next < gItems.length) this.accPiece(entry, gItems[next++], s, scale, quick); return next >= gItems.length; },
+      };
+    }
+    return this.prepRegionBlob(gItems, s, scale, quick, mask);
+  }
+
+  /** 자유 영역의 거리 구름 — 격자에 칠한 픽셀을 찍고(마스크 표본), 거리장으로 굵기를 재고, 줄 묶음마다 덮임 */
+  private prepRegionBlob(gItems: SteamItem[], s: CoverSettings, scale: number, quick: boolean, mask: Mask): BlobBake {
+    // 영역의 화면 사각형 (양수 「범위」는 조각 크기에 이미 들어 있다 — 여기서는 원래 상자로 되돌린다)
+    const ex = Math.max(0, s.expand) * scale;
+    const boxes = gItems.map((it) => [it.cx - it.w / 2 + ex, it.cy - it.h / 2 + ex, it.cx + it.w / 2 - ex, it.cy + it.h / 2 - ex]);
+    const rb = bboxOf(boxes);
+    // 굵기를 먼저 대략 재어 격자 여유를 잡는다 — 조각 짧은 변의 최대의 반 (거리장으로 다시 잰다)
+    let half = 0;
+    for (const b of boxes) half = Math.max(half, Math.min(b[2] - b[0], b[3] - b[1]) / 2);
+    half = Math.max(1, half);
+    const k0 = cloudScale((2 * half) / scale);
+    const pad = Math.ceil(regionReach(half, k0, ex));
+    const x0 = rb.x0 - pad, y0 = rb.y0 - pad, W = rb.W + pad * 2, H = rb.H + pad * 2;
     const long = Math.max(W, H);
-    const shrink = quick && gItems.length > QUICK_PIECES ? Math.sqrt(QUICK_PIECES / gItems.length) : 1;
-    const k = Math.min(1, ((quick ? STEAM_WORK_QUICK : STEAM_WORK) * shrink) / long);
-    const gw = Math.max(8, Math.round(W * k));
-    const gh = Math.max(8, Math.round(H * k));
-    return { x0, y0, W, H, k, gw, gh, sx: gw / W, sy: gh / H, cover: new Uint8Array(gw * gh), full: !quick };
+    const kg = Math.min(1, (quick ? STEAM_WORK_QUICK : STEAM_WORK) / long);
+    const gw = Math.max(8, Math.round(W * kg));
+    const gh = Math.max(8, Math.round(H * kg));
+    const sx = gw / W, sy = gh / H;
+    const entry: BlobEntry = { x0, y0, W, H, k: kg, gw, gh, sx, sy, cover: new Uint8Array(gw * gh), full: !quick };
+    const v = methodIndex("steam");
+    let cloud: RegionCloud | null = null;
+    let row = 0;
+    const ROWS = 16;
+    return {
+      entry, pieces: gItems.length,
+      step: () => {
+        if (!cloud) {
+          // ① 격자에 영역을 찍는다 — 이 덩어리의 상자 안이면서 마스크가 켜진 자리 (다른 덩어리는 안 들어온다)
+          const inside = new Uint8Array(gw * gh);
+          for (const b of boxes) {
+            const gx0 = Math.max(0, Math.floor((b[0] - x0) * sx)), gx1 = Math.min(gw - 1, Math.ceil((b[2] - x0) * sx));
+            const gy0 = Math.max(0, Math.floor((b[1] - y0) * sy)), gy1 = Math.min(gh - 1, Math.ceil((b[3] - y0) * sy));
+            for (let gy = gy0; gy <= gy1; gy++) {
+              const iy = Math.min(mask.h - 1, Math.max(0, Math.floor((y0 + (gy + 0.5) / sy) / scale)));
+              for (let gx = gx0; gx <= gx1; gx++) {
+                const ix = Math.min(mask.w - 1, Math.max(0, Math.floor((x0 + (gx + 0.5) / sx) / scale)));
+                if (mask.cells[iy * mask.w + ix] === v) inside[gy * gw + gx] = 1;
+              }
+            }
+          }
+          // ② 거리장·굵기·노이즈. 씨앗은 첫 조각의 것 (자라도 왼쪽 위 씨앗이라 그대로)
+          cloud = prepRegion(inside, gw, gh, gItems[0].b.seed, s.feather, kg * scale, ex * kg);
+          return false;
+        }
+        // ③ 줄 묶음마다 덮임
+        regionCoverRows(cloud, row, Math.min(gh, row + ROWS), entry.cover);
+        row += ROWS;
+        return row >= gh;
+      },
+    };
   }
 
   /** 조각 하나의 판을 덩어리 격자에 쌓는다 */
-  private accPiece(st: BlobEntry, it: SteamItem, s: CoverSettings, scale: number, quick: boolean, tm: BakeTiming | null) {
+  private accPiece(st: BlobEntry, it: SteamItem, s: CoverSettings, scale: number, quick: boolean) {
     const { gw, gh, sx, sy, cover } = st;
     const p = this.steamPlate(it.b, s, scale, quick);
-    if (tm) tm.plates += lap(tm);
     // 이 판이 격자에서 차지하는 크기·자리
     const dw = it.w * p.span * sx, dh = it.h * p.span * sy;
     const cx = (it.cx - st.x0) * sx, cy = (it.cy - st.y0) * sy;
@@ -733,7 +793,6 @@ export class CensorRenderer {
         cover[i] = mergeCover(cover[i], cv);
       }
     }
-    if (tm) tm.acc += lap(tm);
   }
 
   /** 덩어리 캔버스 한 장 — 쌓은 덮임을 깎고(음수 범위) 밝기·진하기를 입힌다. 덮임 배열은 그대로 두고 사본을 깎는다 */

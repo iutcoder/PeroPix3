@@ -304,3 +304,150 @@ export function plateRGBA(
 void sdRoundRect;
 void smoothstep;
 void fbm;
+
+/** ── 영역 구름 ──────────────────────────────────────────────────
+ *
+ *  ★★★붓으로 칠한 **자유 곡선 영역**의 구름 (사용자 지적 2026-09-06: *"칠한 영역이 커질수록 스팀이 좀
+ *    튀어. 위아래로 갑자기 비져나갈 때도 있고, 십자 현상도 가끔 나옴. 브러시 경계랑 그 너머로 옅게 퍼진
+ *    안개의 경계선이 너무 뚜렷해"*).
+ *    사각형 판을 겹쳐 최대값으로 합치는 방식은 **사각형마다 제 크기의 구름**을 찍는다 — 칠한 영역을 덮은
+ *    사각형은 크기가 제각각이라, 작은 조각의 짧은 자락이 큰 조각의 긴 자락 위에 얹혀 **속(100%)과 자락의
+ *    경계가 계단처럼 서고**, 길쭉한 조각은 제 긴 변만큼 위아래로 뻗쳐 **튀고**, 세로·가로 조각이 겹치면
+ *    **십자**가 됐다. 그래서 자유 영역은 판을 겹치지 않고 **영역에서의 거리**로 한 번에 만든다.
+ *
+ *  v2 판의 셈을 거리로 옮긴 것이다 — 원 하나를 두고 보면 둘이 같다:
+ *      v2: 타원 거리 u (0 가운데 · 1 구름 박스 끝), 구름 박스 = 원래 박스 × 배율 k.
+ *          warped = u + 노이즈·0.25, u<0.6 → 100%, 0.6~1.15 스무스스텝, 그 밖 0.
+ *      여기: R = 영역의 **굵기의 반**(안쪽 거리의 최대), u = (R + 밖거리 − 안거리) / (k·R).
+ *          반지름 R 인 원이면 v2 의 u 와 같다. 사각형이면 모서리가 v2 타원보다 더 덮인다 (둥근 사각형).
+ *  ★굵기 R 은 영역마다 하나다 — 40px 붓 획은 R=20, 상자는 짧은 변의 반. 배율 k 는 `cloudScale(2R)`.
+ *  ★노이즈 파장은 굵기에 매인다 (`noiseScale`) — 판에서는 판 긴 변의 반이었다. 굵기의 배수로 두어
+ *    가는 획에 큰 덩어리 노이즈가 얹히지 않게 한다.
+ */
+
+/** 1차원 제곱 거리 변환 (Felzenszwalb–Huttenlocher). `f` 는 0(대상)·INF(그 밖) */
+function edt1d(f: Float32Array, n: number, d: Float32Array, v: Int32Array, z: Float32Array) {
+  let k = 0;
+  v[0] = 0;
+  z[0] = -Infinity;
+  z[1] = Infinity;
+  for (let q = 1; q < n; q++) {
+    let sx: number;
+    for (;;) {
+      const vk = v[k];
+      sx = ((f[q] + q * q) - (f[vk] + vk * vk)) / (2 * q - 2 * vk);
+      if (sx <= z[k] && k > 0) k--;
+      else break;
+    }
+    k++;
+    v[k] = q;
+    z[k] = sx;
+    z[k + 1] = Infinity;
+  }
+  k = 0;
+  for (let q = 0; q < n; q++) {
+    while (z[k + 1] < q) k++;
+    const vk = v[k];
+    d[q] = (q - vk) * (q - vk) + f[vk];
+  }
+}
+
+/** 2차원 제곱 거리 — 픽셀마다 `inside === target` 인 가장 가까운 픽셀까지. 대상이 없으면 전부 INF */
+export function edt(inside: Uint8Array, w: number, h: number, target: number): Float32Array {
+  const INF = 1e12;
+  const out = new Float32Array(w * h);
+  const n = Math.max(w, h);
+  const f = new Float32Array(n), d = new Float32Array(n), v = new Int32Array(n), z = new Float32Array(n + 1);
+  for (let x = 0; x < w; x++) {
+    for (let y = 0; y < h; y++) f[y] = inside[y * w + x] === target ? 0 : INF;
+    edt1d(f, h, d, v, z);
+    for (let y = 0; y < h; y++) out[y * w + x] = d[y];
+  }
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) f[x] = out[y * w + x];
+    edt1d(f, w, d, v, z);
+    for (let x = 0; x < w; x++) out[y * w + x] = d[x];
+  }
+  return out;
+}
+
+export type RegionCloud = {
+  w: number; h: number;
+  /** 굵기의 반 (격자 px) */
+  R: number;
+  /** 배율 (`cloudScale`) */
+  k: number;
+  /** 밖거리 − 안거리 (격자 px). 안이면 음수 */
+  signed: Float32Array;
+  /** 가장자리 노이즈 밭 (`noiseField` 의 `en`, res×res) — 판과 같은 밭을 읽는다 */
+  en: Float32Array;
+  res: number;
+  /** 격자 px → 밭 px 배율 */
+  fieldScale: number;
+  /** 윤곽 흔들림 세기 (부드럽게가 클수록 약하다, v2) */
+  strength: number;
+  /** 경계를 밖으로 미는 몫 (양수 「범위」, 격자 px) */
+  shift: number;
+};
+
+/** 영역 구름 준비 — 거리장을 만들고 굵기를 잰다. `inside` 는 격자에서 칠해진 픽셀(1).
+ *  `thickPx` 를 주면 굵기의 반을 그 값으로 못 박는다 (격자 px). 안 주면 안쪽 거리의 최대 */
+export function prepRegion(
+  inside: Uint8Array, w: number, h: number, seed: number, feather: number, gridPerImage: number, shift = 0,
+): RegionCloud {
+  const dOut = edt(inside, w, h, 1);
+  const dIn = edt(inside, w, h, 0);
+  const signed = new Float32Array(w * h);
+  let rMax = 0;
+  for (let i = 0; i < w * h; i++) {
+    const o = Math.sqrt(dOut[i]), n = Math.sqrt(dIn[i]);
+    // 안쪽 픽셀은 자기 자리에서 0.5px 만큼 더 안이라 본다 (가장자리 픽셀의 안거리가 0 이 아니게)
+    signed[i] = inside[i] ? -(n) : o;
+    if (inside[i] && n > rMax) rMax = n;
+  }
+  const R = Math.max(1, rMax);
+  const k = cloudScale((2 * R) / gridPerImage);
+  const ff = 1 + Math.min(50, Math.max(0, feather)) / 25;
+  // 판에서는 ns = 판 긴 변/2 · ff. 판 긴 변 ≈ 구름 박스(2R·k) × (1+2·EXPAND) 의 1.5배로 본다
+  const ns = ((2 * R * k * (1 + 2 * EXPAND) * 1.5) / 2) * ff;
+  const strength = 1 - Math.min(50, Math.max(0, feather)) / 62.5;
+  /* ★노이즈는 픽셀마다 새로 셈하지 않고 **판과 같은 밭**을 읽는다 (`noiseField`, 씨앗·부드럽게마다 한 번 굽고
+     캐시). 픽셀마다 세 옥타브를 돌리면 200×120 격자에 50ms 였다 — 손을 뗀 프레임이 튄다. 밭의 축척은
+     `res/2·ff` 이므로 격자 px 를 그 비로 밭 px 로 옮겨 읽는다 (밭보다 넓으면 거울처럼 접어 이어 붙인다). */
+  const res = 256;
+  const field = noiseField(seed, feather, res);
+  return { w, h, R, k, signed, en: field.en, res, fieldScale: ((res / 2) * ff) / ns, strength, shift };
+}
+
+/** 줄 `y0..y1` 의 덮임을 채운다 (배경 굽기가 몇 줄씩 나눠 부른다). `out` 은 `w*h` */
+export function regionCoverRows(c: RegionCloud, y0: number, y1: number, out: Uint8Array) {
+  const { w, R, k, signed, en, res, fieldScale, strength, shift } = c;
+  const kR = k * R;
+  const amp = 0.25 * strength;
+  const period = 2 * res;
+  // 거울 접기 — 밭 밖으로 나가면 되돌아온다 (경계에서 값이 이어진다)
+  const fold = (v: number) => { let m = v % period; if (m < 0) m += period; return m < res ? m : period - 1 - m; };
+  for (let y = y0; y < y1; y++) {
+    const fy = fold(Math.floor(y * fieldScale)) * res;
+    for (let x = 0; x < w; x++) {
+      const i = y * w + x;
+      const u = (R + signed[i] - shift) / kR;
+      // 노이즈로도 못 넘는 자리는 셈을 건너뛴다 — 깊은 속은 100%, 먼 밖은 0
+      if (u >= 1.15 + amp + 0.01) { out[i] = 0; continue; }
+      if (u < 0.6 - amp - 0.01) { out[i] = 255; continue; }
+      const warped = u + en[fy + fold(Math.floor(x * fieldScale))] * amp;
+      let a = 0;
+      if (warped < 0.6) a = 255;
+      else if (warped < 1.15) {
+        const t = (warped - 0.6) / 0.55;
+        a = Math.round((1 - t * t * (3 - 2 * t)) * 255);
+      }
+      out[i] = a;
+    }
+  }
+}
+
+/** 구름이 영역 경계 밖으로 뻗을 수 있는 최대 거리 (격자 px) — 격자를 이만큼 넓혀 잡는다 */
+export function regionReach(R: number, k: number, shift = 0) {
+  return (1.15 + 0.25) * k * R - R + shift + 2;
+}
