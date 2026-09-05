@@ -368,6 +368,29 @@ function edt1d(f: Float32Array, n: number, d: Float32Array, v: Int32Array, z: Fl
   }
 }
 
+/** 상자 흐림 세 번으로 가우시안(σ)을 근사한다 — 분리형·이동합이라 σ 와 무관하게 픽셀당 상수 비용.
+ *  가장자리는 끝 값을 늘려 쓴다. σ 가 1 미만이면 아무것도 안 한다 */
+export function blurField(a: Float32Array, w: number, h: number, sigma: number) {
+  if (sigma < 1) return;
+  // 상자 세 번의 분산 3·(m²−1)/12 = σ² → 상자 폭 m
+  const m = Math.max(3, Math.round(Math.sqrt((4 * sigma * sigma) / 1 + 1)) | 1);
+  const r = m >> 1;
+  const tmp = new Float32Array(Math.max(w, h));
+  const pass = (len: number, get: (i: number) => number, put: (i: number, v: number) => void) => {
+    let sum = 0;
+    for (let i = -r; i <= r; i++) sum += get(Math.min(len - 1, Math.max(0, i)));
+    for (let i = 0; i < len; i++) {
+      tmp[i] = sum / m;
+      sum += get(Math.min(len - 1, i + r + 1)) - get(Math.max(0, i - r));
+    }
+    for (let i = 0; i < len; i++) put(i, tmp[i]);
+  };
+  for (let n = 0; n < 3; n++) {
+    for (let y = 0; y < h; y++) pass(w, (x) => a[y * w + x], (x, v) => { a[y * w + x] = v; });
+    for (let x = 0; x < w; x++) pass(h, (y) => a[y * w + x], (y, v) => { a[y * w + x] = v; });
+  }
+}
+
 /** 2차원 제곱 거리 — 픽셀마다 `inside === target` 인 가장 가까운 픽셀까지. 대상이 없으면 전부 INF */
 export function edt(inside: Uint8Array, w: number, h: number, target: number): Float32Array {
   const INF = 1e12;
@@ -424,6 +447,35 @@ export function prepRegion(
     if (inside[i] && n > rMax) rMax = n;
   }
   const R = Math.max(1, rMax);
+  /* ★★거리장의 등고선 모서리를 둥글린다 (사용자 지적 2026-09-06: *"박스는 X 자로 줄어들어. 대각선 부분만 좀 더
+     진하게 남아 있음"*). 상자 안쪽 거리는 「가장 가까운 변까지」라 등고선이 모서리가 뾰족한 작은 사각형들이고,
+     같은 반지름의 원으로 보면 대각선 쪽이 더 깊어 속이 X 자로 남는다. 부호 있는 거리장을 굵기의 반(σ = R/2)
+     으로 흐리면 등고선의 모서리가 둥글어져 상자도 원처럼 줄어든다. 곧은 변에서는 값이 그대로다 (경계 0 유지). */
+  blurField(signed, w, h, R / 2);
+  /* ★★**상자 모양이면 v2 타원 거리를 겹친다** (둘 중 큰 쪽). 흐림만으로는 정사각형의 속이 여전히 대각선 쪽이
+     더 깊었고(같은 반지름에서 축 117 : 대각선 136), 흐림을 굵기만큼 키우면 변의 덮임이 떨어졌다(255 → 223).
+     v2 의 타원(경계 상자에 내접, 짧은 변으로 정규화)을 max 로 겹치면 변 위는 그대로(255)고 모서리만 v2 처럼
+     깎여 속이 타원으로 줄어든다 — 찾은 상자·사각 붓 한 점이 여기 든다. 상자 판정: 칠한 픽셀이 경계 상자의 95%
+     이상이고 비율 3 이내. 붓 획(둥근 끝·길쭉한 띠·ㄴ 자)은 여기 안 들어 거리장 그대로다. */
+  {
+    let bx0 = w, by0 = h, bx1 = -1, by1 = -1, n = 0;
+    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) if (inside[y * w + x]) {
+      n++; if (x < bx0) bx0 = x; if (x > bx1) bx1 = x; if (y < by0) by0 = y; if (y > by1) by1 = y;
+    }
+    const bw = bx1 - bx0 + 1, bh = by1 - by0 + 1;
+    if (n > 0 && n >= 0.95 * bw * bh && Math.max(bw, bh) <= 3 * Math.min(bw, bh)) {
+      const hw = bw / 2, hh = bh / 2, cx = bx0 + hw, cy = by0 + hh, Re = Math.min(hw, hh);
+      for (let y = 0; y < h; y++) {
+        const dy = (y + 0.5 - cy) / hh;
+        for (let x = 0; x < w; x++) {
+          const dx = (x + 0.5 - cx) / hw;
+          const se = Re * (Math.sqrt(dx * dx + dy * dy) - 1);
+          const i = y * w + x;
+          if (se > signed[i]) signed[i] = se;
+        }
+      }
+    }
+  }
   const k = cloudScale((2 * R) / gridPerImage);
   const ff = 1 + Math.min(50, Math.max(0, feather)) / 25;
   // 판에서는 ns = 판 긴 변/2 · ff. 판 긴 변 ≈ 구름 박스(2R·k) × (1+2·EXPAND) 의 1.5배로 본다
