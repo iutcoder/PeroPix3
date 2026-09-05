@@ -135,6 +135,47 @@ export type PlateKey = {
 export const bucketAspect = (w: number, h: number) =>
   Math.max(0.05, Math.round((w / Math.max(h, 1e-6)) * 20) / 20);
 
+/** 씨앗·부드럽게·해상도별 **노이즈 밭** — 두께(`lum`)와 가장자리 흔들림(`en`)을 판 픽셀 자리마다.
+ *
+ *  ★★왜 판과 따로 두나 (2026-09-05, 덮기 실측): 노이즈는 **판 픽셀 좌표**로 계산되고 그 축척
+ *    `ns` 는 판의 긴 변(= 해상도)으로 정해지므로, 씨앗·부드럽게·해상도가 같으면 **비율·배율이
+ *    달라도 같은 밭의 왼쪽 위 조각**을 읽는 것이다. 판 굽기의 비용은 거의 전부 픽셀당 여섯 번의
+ *    노이즈였다 (640px 에 40ms). 붓으로 덮은 사각형은 비율·배율이 획마다 새로 나와 그때마다
+ *    판을 구웠는데, 밭을 두면 새 판은 타원 거리 계산뿐이라 몇 ms 다. 결과는 전과 **비트 단위로 같다**.
+ *  ★밭은 씨앗 8 × 해상도 3 × 부드럽게 값 만큼 생기므로 개수를 막는다 (오래된 것부터 버린다). */
+const fields = new Map<string, { lum: Uint8Array; en: Float32Array }>();
+const FIELDS_MAX = 48;
+
+function noiseField(seed: number, feather: number, res: number) {
+  const key = `${seed}|${feather}|${res}`;
+  const hit = fields.get(key);
+  if (hit) return hit;
+  const n = makeNoise(seed);
+  const ff = 1 + Math.min(50, Math.max(0, feather)) / 25;
+  const ns = (res / 2) * ff;
+  const lum = new Uint8Array(res * res);
+  const en = new Float32Array(res * res);
+  for (let py = 0; py < res; py++) {
+    for (let px = 0; px < res; px++) {
+      const i = py * res + px;
+      // ── 구름의 두께 (거의 흰색, 13계조만 흔들린다) ──────────────
+      let bn = n(px / ns, py / ns)
+        + n((px / ns) * 2, (py / ns) * 2) * 0.5
+        + n((px / ns) * 4, (py / ns) * 4) * 0.25;
+      bn = 0.5 + ((bn / 1.75 + 1) / 2) * 0.5;
+      lum[i] = Math.round(bn * 255);
+      // ── 3옥타브 가장자리 노이즈 ──────────────────────────────
+      en[i] = n(px / (ns * 0.5) + 50, py / (ns * 0.5) + 50) * 0.5
+        + n(px / (ns * 0.25) + 150, py / (ns * 0.25) + 150) * 0.35
+        + n(px / (ns * 0.12) + 250, py / (ns * 0.12) + 250) * 0.15;
+    }
+  }
+  if (fields.size >= FIELDS_MAX) fields.delete(fields.keys().next().value!);
+  const f = { lum, en };
+  fields.set(key, f);
+  return f;
+}
+
 /** 무늬 판 하나를 만든다. ★비싸다 — 부르는 쪽이 캐시한다 (`censorRender`).
  *
  *  ★아래 상수는 **전부 v2 원문의 값**이다. 하나만 만져도 구름의 성격이 바뀌므로,
@@ -153,10 +194,8 @@ export function plate(key: PlateKey): Plate {
   const expandX = ws * EXPAND;
   const expandY = hs * EXPAND;
 
-  const n = makeNoise(seed);
-  // ★「부드럽게」가 하는 일 둘 (v2 그대로): 무늬를 성기게(1x~3x) · 윤곽 흔들림을 약하게(100%~20%)
-  const ff = 1 + Math.min(50, Math.max(0, feather)) / 25;
-  const ns = (Math.max(tw, th) / 2) * ff;
+  const field = noiseField(seed, feather, max);
+  // ★「부드럽게」가 하는 일 둘 (v2 그대로): 무늬를 성기게(1x~3x, `noiseField`) · 윤곽 흔들림을 약하게(100%~20%)
   const strength = 1 - Math.min(50, Math.max(0, feather)) / 62.5;
 
   const rx = ws / 2, ry = hs / 2;
@@ -174,22 +213,16 @@ export function plate(key: PlateKey): Plate {
       const edge = Math.min(px, py, tw - 1 - px, th - 1 - py);
       if (edge < safe) continue;   // 판 테두리는 완전히 투명하다
 
-      // ── 구름의 두께 (거의 흰색, 13계조만 흔들린다) ──────────────
-      let bn = n(px / ns, py / ns)
-        + n((px / ns) * 2, (py / ns) * 2) * 0.5
-        + n((px / ns) * 4, (py / ns) * 4) * 0.25;
-      bn = 0.5 + ((bn / 1.75 + 1) / 2) * 0.5;
-      lum[i] = Math.round(bn * 255);
+      // 노이즈 밭에서 같은 자리를 읽는다 (밭은 `max × max`, 판은 그 왼쪽 위 `tw × th`)
+      const fi = py * max + px;
+      lum[i] = field.lum[fi];
 
       // ── 덮는 범위 ──────────────────────────────────────────
       // ★타원 거리 — 1 이 구름 박스의 테두리다 (원래 박스는 그 `1/CLOUD_SCALE` 자리에 있다)
       const dx = (px - cx) / rx, dy = (py - cy) / ry;
       const dist = Math.hypot(dx, dy);
-      // ★3옥타브 가장자리 노이즈 — **양쪽으로** 민다 (안으로 파이는 것도 v2 의 모양이다)
-      const en = n(px / (ns * 0.5) + 50, py / (ns * 0.5) + 50) * 0.5
-        + n(px / (ns * 0.25) + 150, py / (ns * 0.25) + 150) * 0.35
-        + n(px / (ns * 0.12) + 250, py / (ns * 0.12) + 250) * 0.15;
-      const warped = dist + en * 0.25 * strength;
+      // ★가장자리 노이즈는 **양쪽으로** 민다 (안으로 파이는 것도 v2 의 모양이다)
+      const warped = dist + field.en[fi] * 0.25 * strength;
 
       let a = 0;
       if (warped < 0.6) a = 255;

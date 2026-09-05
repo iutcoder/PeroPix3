@@ -8,9 +8,9 @@
  *    0 은 비었음, 1 이상은 **그 칸을 가리는 방식**이다 (`METHOD_IDS` 의 번호). 방식이
  *    자리마다 다를 수 있어야 하므로 (예전 「박스마다 다른 방식」이 하던 일) 칸이 방식을 든다.
  *
- *  그리는 쪽은 격자를 **사각형들로 쪼개** 받는다 (`toRenderBoxes`). 렌더러(`censorRender`)는
- *  사각형 목록만 알고, 스팀은 사각형마다 v2 판을 찍어 최대값으로 모으므로 이어진 칸은
- *  한 덩이 구름이 된다. 격자를 직접 받는 렌더러를 따로 만들지 않는다 — 한 벌이어야 한다.
+ *  그리는 쪽은 격자를 **큰 사각형들로 덮어** 받는다 (`toRenderBoxes`, 겹쳐도 된다). 렌더러
+ *  (`censorRender`)는 사각형 목록만 알고, 스팀은 사각형마다 v2 판을 찍어 최대값으로 모으므로
+ *  겹친 사각형은 한 덩이 구름이 된다. 격자를 직접 받는 렌더러를 따로 만들지 않는다 — 한 벌이어야 한다.
  */
 import type { RenderBox } from "./censorRender.ts";
 
@@ -122,32 +122,66 @@ export function remap(g: Grid, v: number) {
   return g;
 }
 
-/** 격자를 **사각형들로 쪼갠다** — 방식이 같은 칸끼리, 탐욕으로 가장 넓은 것부터.
+/** 격자를 **큰 사각형들로 덮는다** — 방식이 같은 칸끼리, 사각형은 **겹쳐도 된다**.
  *
- *  왼쪽 위부터 훑어, 오른쪽으로 갈 수 있는 데까지 넓히고 그 폭이 통째로 이어지는 만큼
- *  아래로 늘린다. 사각형끼리 겹치지 않고, 합치면 칠한 칸과 정확히 같다.
- *  ★찾은 박스 하나는 사각형 하나로 돌아온다 (격자에 맞춰 넓어진 채로). 붓으로 그은 대각선은
- *    계단이 되어 작은 사각형 여럿이 되는데, 스팀은 그것들을 최대값으로 모으므로 한 덩이다. */
+ *  ★★왜 쪼개지 않고 덮는가 (사용자 지적 2026-09-05: *"정확한 사각형일 때랑 계단이 많은
+ *    사각형일 때랑 그려지는 모습이 너무 달라"*): 겹치지 않게 쪼개면 계단이 있는 자리마다
+ *    조각이 잘게 갈리고, 스팀은 조각마다 **그 조각 크기의** 구름을 찍으므로 작은 구름들이
+ *    줄지어 붙어 계단이 그대로 드러났다. 칠한 영역 **안에 들어가는 큰 사각형**들로 겹치게
+ *    덮으면 사각형마다 제 크기의 구름이 되고, 그것들이 최대값으로 합쳐져(한 덩이) 직각
+ *    다각형도 사각형 몇 장이 겹친 구름이 된다. 정확한 사각형은 사각형 하나라 v2 그대로다.
+ *  ★모자이크·흐리기·단색은 마스크를 합집합으로 채우므로 겹쳐도 결과가 같다.
+ *
+ *  방법: 왼쪽 위부터 훑어 아직 안 덮인 칸을 만나면, 그 칸을 품는 사각형 중 점수가 가장 높은
+ *  것을 고른다. 점수는 **쪼개지 않고 그릴 수 있는 넓이** — 짧은 변 × (긴 변을 `SPLIT_ASPECT`
+ *  배까지만 센 것). 비율을 넘는 긴 띠는 어차피 `splitSquarish` 가 짧은 변 크기로 자르므로,
+ *  얇고 긴 띠(3×42)가 넓이로 이겨 놓고 잘게 잘리는 일을 막는다 (실측: 거의 세로인 획).
+ *  같은 점수면 넓은 쪽. 사각형 안의 칸은 전부 덮인 것으로 친다.
+ *  ★찾은 박스 하나는 사각형 하나로 돌아온다 (격자에 맞춰 넓어진 채로).
+ *  ★합집합은 칠한 칸과 정확히 같다 — 사각형은 늘 칠한 칸 안에만 있고, 칸은 빠짐없이 덮인다. */
 export function rectsOf(g: Grid): { method: string; box: [number, number, number, number] }[] {
-  const seen = new Uint8Array(g.cells.length);
+  const { cols, rows, cells } = g;
+  const done = new Uint8Array(cells.length);
   const out: { method: string; box: [number, number, number, number] }[] = [];
-  for (let y = 0; y < g.rows; y++) {
-    for (let x = 0; x < g.cols; x++) {
-      const i = y * g.cols + x;
-      const v = g.cells[i];
-      if (!v || seen[i]) continue;
-      let w = 1;
-      while (x + w < g.cols && g.cells[i + w] === v && !seen[i + w]) w++;
-      let h = 1;
-      outer: while (y + h < g.rows) {
-        const row = (y + h) * g.cols + x;
-        for (let k = 0; k < w; k++) if (g.cells[row + k] !== v || seen[row + k]) break outer;
-        h++;
+  /** 행 t 에서 x 를 품고 값이 v 인 가로 줄의 양 끝 (칸, 양쪽 포함) */
+  const run = (t: number, x: number, v: number) => {
+    const row = t * cols;
+    let a = x, b = x;
+    while (a > 0 && cells[row + a - 1] === v) a--;
+    while (b < cols - 1 && cells[row + b + 1] === v) b++;
+    return [a, b];
+  };
+  for (let y = 0; y < rows; y++) {
+    for (let x = 0; x < cols; x++) {
+      const i = y * cols + x;
+      const v = cells[i];
+      if (!v || done[i]) continue;
+      // 위로·아래로 행을 더할수록 좁아지는 가로 범위 (행 y 에서 k 행 떨어진 곳까지의 교집합)
+      const upL: number[] = [], upR: number[] = [], dnL: number[] = [], dnR: number[] = [];
+      for (let t = y, l = 0, r = cols - 1; t >= 0 && cells[t * cols + x] === v; t--) {
+        const [a, b] = run(t, x, v);
+        l = Math.max(l, a); r = Math.min(r, b);
+        upL.push(l); upR.push(r);
       }
-      for (let r = 0; r < h; r++) seen.fill(1, (y + r) * g.cols + x, (y + r) * g.cols + x + w);
+      for (let t = y, l = 0, r = cols - 1; t < rows && cells[t * cols + x] === v; t++) {
+        const [a, b] = run(t, x, v);
+        l = Math.max(l, a); r = Math.min(r, b);
+        dnL.push(l); dnR.push(r);
+      }
+      let best = 0, bl = x, br = x, bt = y, bb = y;
+      for (let u = 0; u < upL.length; u++) {
+        for (let d = 0; d < dnL.length; d++) {
+          const l = Math.max(upL[u], dnL[d]), r = Math.min(upR[u], dnR[d]);
+          const w = r - l + 1, h = u + d + 1;
+          const lo = Math.min(w, h), hi = Math.max(w, h);
+          const score = lo * Math.min(hi, lo * SPLIT_ASPECT) + w * h * 1e-3;
+          if (score > best) { best = score; bl = l; br = r; bt = y - u; bb = y + d; }
+        }
+      }
+      for (let t = bt; t <= bb; t++) done.fill(1, t * cols + bl, t * cols + br + 1);
       out.push({
         method: methodOf(v),
-        box: [x * GRID, y * GRID, Math.min(g.w, (x + w) * GRID), Math.min(g.h, (y + h) * GRID)],
+        box: [bl * GRID, bt * GRID, Math.min(g.w, (br + 1) * GRID), Math.min(g.h, (bb + 1) * GRID)],
       });
     }
   }
@@ -175,8 +209,11 @@ export function seedOf(box: [number, number, number, number]) {
   return ((h >>> 0) % SEEDS) + 1;
 }
 
-/** 이 비율을 넘는 사각형은 조각낸다 (긴 변 ÷ 짧은 변) */
-export const SPLIT_ASPECT = 2;
+/** 이 비율을 넘는 사각형은 조각낸다 (긴 변 ÷ 짧은 변).
+ *  ★3 인 이유: 2 로 두면 계단 모양을 덮은 8×30칸 몸통이 8×8 로 잘려 큰 구름이 사라졌다
+ *  (2026-09-05). 같은 폭으로 잘린 조각은 **옆면 구름 폭이 한 장일 때와 같고**(짧은 변이 정한다),
+ *  비율 3 까지는 타원 끝의 뻗침이 짧은 변 이내라 뾰족해 보이지 않는다. */
+export const SPLIT_ASPECT = 3;
 
 /** 길쭉한 사각형을 **정사각형에 가까운 조각**으로 나눈다 — 칸 경계에서.
  *

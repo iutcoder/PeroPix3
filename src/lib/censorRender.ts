@@ -281,18 +281,25 @@ export class CensorRenderer {
   }
 
   /** 박스 하나가 쓸 **v2 무늬 판**. 씨앗·부드럽게·비율·배율에만 매이므로 캐시가 잘 듣는다 */
-  private steamPlate(b: RenderBox, s: CoverSettings, scale: number): Plate {
+  /** 박스의 구름 배율 (5% 버킷). ★**원본 픽셀의 짧은 변**으로 정한다 (화면 배율이 아니라) — 확대해도 구름이 안 변한다 */
+  private steamScale(b: RenderBox, s: CoverSettings) {
+    const [x1, y1, x2, y2] = b.box;
+    return bucketScale(cloudScale(Math.min(x2 - x1, y2 - y1) + s.expand * 2));
+  }
+
+  /** `shrink` 는 화면 픽셀 → 작업 격자 픽셀의 비 (`drawSteam` 의 k) — 판은 그 격자에 그려진다 */
+  private steamPlate(b: RenderBox, s: CoverSettings, scale: number, shrink: number): Plate {
     const [x1, y1, x2, y2] = b.box;
     const w = (x2 - x1 + s.expand * 2) * scale;
     const h = (y2 - y1 + s.expand * 2) * scale;
-    // ★배율은 **원본 픽셀의 짧은 변**으로 정한다 (화면 배율이 아니라) — 확대해도 구름이 안 변한다
-    const shortSrc = Math.min(x2 - x1, y2 - y1) + s.expand * 2;
-    const k = bucketScale(cloudScale(shortSrc));
+    const k = this.steamScale(b, s);
     /* ★★판 해상도는 **그려질 크기**에 맞춘다 (사용자 지적 2026-09-05: *"브러시처럼 쭉 그으면
        앱이 정지된 수준"*). 붓 조각은 화면에서 수십 px 로 그려지는데 640px 판을 40ms 씩 굽고
        있었다 — 획이 박스에 닿으면 조각이 수십 개라 프레임당 초 단위였다. 세 단으로 뭉갠다
-       (128 · 256 · 640) — 열쇠에 들어가므로 같은 조각이 커지면 그때 큰 판을 새로 굽는다. */
-    const need = Math.max(w, h) * spanOf(k);
+       (128 · 256 · 640) — 열쇠에 들어가므로 같은 조각이 커지면 그때 큰 판을 새로 굽는다.
+       ★그려질 크기는 화면이 아니라 **작업 격자**(긴 변 340, 끄는 동안 170)에서의 크기다 —
+         판은 격자에만 읽히므로 화면 크기로 고르면 헛되이 크게 굽는다 (덮기 실측 2026-09-05). */
+    const need = Math.max(w, h) * spanOf(k) * shrink;
     const res = need <= 100 ? 128 : need <= 220 ? 256 : 640;
     const key = `${b.seed}|${s.feather}|${bucketAspect(w, h)}|${k}|${res}`;
     let p = this.plates.get(key);
@@ -330,24 +337,25 @@ export class CensorRenderer {
     const live = list.filter((b) => b.box[2] > b.box[0] && b.box[3] > b.box[1]);
     if (!live.length) return;
 
-    /** 박스 하나가 화면에서 차지하는 자리와 그 판 — 두 번 쓰므로 미리 뽑는다 */
+    /** 박스 하나가 화면에서 차지하는 자리 — 두 번 쓰므로 미리 뽑는다. 판은 작업 해상도가 정해진 뒤에 */
     const items = live.map((b) => {
       const [x1, y1, x2, y2] = b.box;
       return {
-        p: this.steamPlate(b, s, scale),
+        b,
         cx: ((x1 + x2) / 2) * scale,
         cy: ((y1 + y2) / 2) * scale,
         w: (x2 - x1 + s.expand * 2) * scale,
         h: (y2 - y1 + s.expand * 2) * scale,
         rot: b.rotation ?? 0,
+        span: spanOf(this.steamScale(b, s)),
       };
     });
 
     // 구름들이 차지하는 자리 — 판은 박스의 `span` 배로 그려진다
     let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
     for (const it of items) {
-      const hw = (it.w * it.p.span) / 2;
-      const hh = (it.h * it.p.span) / 2;
+      const hw = (it.w * it.span) / 2;
+      const hh = (it.h * it.span) / 2;
       const r = Math.abs(it.rot) > 1e-6 ? Math.hypot(hw, hh) : 0;
       x0 = Math.min(x0, it.cx - (r || hw)); y0 = Math.min(y0, it.cy - (r || hh));
       x1 = Math.max(x1, it.cx + (r || hw)); y1 = Math.max(y1, it.cy + (r || hh));
@@ -389,7 +397,8 @@ export class CensorRenderer {
       }
 
       for (const it of items) {
-        const { p } = it;
+        // ★판 해상도는 **격자에 그려질 크기**(k 를 곱한 것)로 고른다 — 판은 격자에서만 읽힌다
+        const p = this.steamPlate(it.b, s, scale, k);
         // 이 판이 격자에서 차지하는 크기·자리
         const dw = it.w * p.span * sx, dh = it.h * p.span * sy;
         const cx = (it.cx - x0) * sx, cy = (it.cy - y0) * sy;
