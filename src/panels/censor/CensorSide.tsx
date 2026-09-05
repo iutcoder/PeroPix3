@@ -3,20 +3,25 @@ import { api } from "../../lib/backend";
 import { toast } from "../../store/toast";
 import { Icon } from "../../components/Icon";
 import { useCensor, type Tool } from "../../store/censor";
+import { GRID, isEmpty } from "../../lib/censorMask";
 import { card, box, on, num, dropFocus, Hint, Line, Sec } from "./ui";
 
 /** 오른쪽 기둥. **탭마다 다른 것을 묻는다** (v2 `censor-side-panel`).
  *
  *      검열 전   무엇을 찾을까   모델 · 대상 · 클래스별 문턱 · 낮은 신뢰도 숨김
- *      검열 중·후 어떻게 고칠까  도구 · 단축키 · 고른 박스의 방식
+ *      검열 중·후 어떻게 고칠까  붓·지우개 · 붓 크기 · 되돌리기 · 단축키
  *      공통       어떻게 가릴까   방식과 그 방식의 슬라이더
+ *
+ *  ★「고른 박스만 다른 방식」 절은 걷었다 — 붓이 **지금 고른 방식**을 칸에 적으므로, 방식을
+ *    바꿔 가며 덧칠하면 자리마다 방식이 다르다 (사용자 지시 2026-09-05, 붓으로 바꾸며).
  */
 export function CensorSide() {
   const t = useI18n((s) => s.t);
   const c = useCensor();
   const classes = c.models.find((m) => m.file === c.model)?.classes ?? [];
   const editable = c.tab !== "before";
-  const sel = c.curBoxes()[c.sel];
+  const curIm = c.cur();
+  const painted = !!curIm && !isEmpty(c.paint[curIm.id]);
 
   return (
     <div style={{ width: 250, flexShrink: 0, display: "flex", flexDirection: "column", minHeight: 0 }}>
@@ -103,14 +108,14 @@ export function CensorSide() {
         {editable && (
           <>
             <Sec label={t("censor.tools")} help={t("censor.toolHint")}>
-              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: "var(--sp-2)" }}>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "var(--sp-2)" }}>
                 {TOOLS.map(([id, key, icon]) => (
                   <button
                     key={id}
                     data-censor-tool={id}
-                    // ★도구 칩도 같다 — `1 2 3` 단축키와 같은 자리라 고리가 특히 잘 남는다
+                    // ★도구 칩도 같다 — `1 2` 단축키와 같은 자리라 고리가 특히 잘 남는다
                     onMouseDown={dropFocus}
-                    onClick={() => c.set({ tool: id, sel: -1 })}
+                    onClick={() => c.set({ tool: id })}
                     style={{
                       ...box,
                       ...(c.tool === id ? on : {}),
@@ -126,26 +131,37 @@ export function CensorSide() {
                   </button>
                 ))}
               </div>
+              {/* ★붓 크기는 **칸 단위**다 (8px 격자) — 변은 2r+1 칸. 숫자는 픽셀로 보여 준다 */}
+              <Line label={t("imgIn.brushSize")}>
+                <input type="range" data-censor-brush-size min={0} max={12} value={c.brush}
+                  onChange={(e) => c.tune({ brush: Number(e.target.value) })} style={{ flex: 1 }} />
+                <span style={num}>{(c.brush * 2 + 1) * GRID}</span>
+              </Line>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "var(--sp-2)" }}>
+                <button
+                  data-censor-undo
+                  onMouseDown={dropFocus}
+                  onClick={() => c.undoPaint()}
+                  disabled={!c.undos.length}
+                  style={{ ...box, display: "flex", alignItems: "center", justifyContent: "center", gap: "var(--sp-1)",
+                    color: c.undos.length ? "var(--ink-soft)" : "var(--ink-ghost)" }}
+                >
+                  {Icon.undo}
+                  {t("imgIn.maskUndo")}
+                </button>
+                <button
+                  data-censor-clear
+                  onMouseDown={dropFocus}
+                  onClick={() => c.clearPaint()}
+                  disabled={!painted}
+                  style={{ ...box, display: "flex", alignItems: "center", justifyContent: "center", gap: "var(--sp-1)",
+                    color: painted ? "var(--ink-soft)" : "var(--ink-ghost)" }}
+                >
+                  {Icon.trash}
+                  {t("imgIn.maskClear")}
+                </button>
+              </div>
             </Sec>
-
-            {sel && (
-              <Sec label={t("censor.boxMethod")} help={t("censor.boxMethodHint")}>
-                {/* ★박스마다 다른 방식 (B7). 백엔드 `apply_boxes` 가 박스별 `method` 를 읽는다 */}
-                <div style={{ display: "flex", flexWrap: "wrap", gap: "var(--sp-2)" }}>
-                  {METHODS.map(([m, key]) => (
-                    <button
-                      key={m}
-                      data-censor-box-method={m}
-                      onMouseDown={dropFocus}
-                      onClick={() => c.setBoxMethod(c.sel, m)}
-                      style={{ ...box, ...((sel.method ?? c.method) === m ? on : {}) }}
-                    >
-                      {t(key)}
-                    </button>
-                  ))}
-                </div>
-              </Sec>
-            )}
           </>
         )}
 
@@ -241,8 +257,9 @@ export function CensorSide() {
           <Sec label={t("censor.keys")}>
             <div style={{ display: "flex", flexDirection: "column", gap: "var(--sp-1)" }}>
               {[
-                ["1 2 3", t("censor.k_tool")],
-                ["Del", t("censor.k_del")],
+                ["1 2", t("censor.k_tool")],
+                ["[ ]", t("censor.k_size")],
+                ["Ctrl+Z", t("censor.k_undo")],
                 [t("censor.k_wheelKey"), t("censor.k_wheel")],
                 [t("censor.k_rightKey"), t("censor.k_right")],
               ].map(([k, v]) => (
@@ -294,7 +311,7 @@ export function CensorSide() {
         )}
         {c.tab === "after" && (
           <>
-            <button data-censor-resave onClick={() => void c.saveOne()} disabled={c.busy || !c.curBoxes().length} style={runBtn}>
+            <button data-censor-resave onClick={() => void c.saveOne()} disabled={c.busy || !painted} style={runBtn}>
               {Icon.save}
               {t("censor.resave")}
             </button>
@@ -316,10 +333,10 @@ const METHODS = [
   ["color", "censor.m_color"],
 ] as const;
 
-const TOOLS: [Tool, "censor.t_select" | "censor.t_add" | "censor.t_del", "cursor" | "plus" | "trash"][] = [
-  ["select", "censor.t_select", "cursor"],
-  ["add", "censor.t_add", "plus"],
-  ["delete", "censor.t_del", "trash"],
+// ★문구는 인페인트 마스크의 것을 그대로 쓴다 — 같은 뜻에 다른 말을 두지 않는다
+const TOOLS: [Tool, "imgIn.brush" | "imgIn.eraser", "brush" | "eraser"][] = [
+  ["brush", "imgIn.brush", "brush"],
+  ["erase", "imgIn.eraser", "eraser"],
 ];
 
 const kbd: React.CSSProperties = {

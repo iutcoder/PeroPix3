@@ -80,13 +80,18 @@ export function Censor() {
       const el = e.target as HTMLElement | null;
       if (el && /^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName)) return;
       const s = useCensor.getState();
-      if (s.tab !== "before" && (e.key === "1" || e.key === "2" || e.key === "3")) {
+      if (s.tab !== "before" && (e.key === "1" || e.key === "2")) {
         e.preventDefault();
-        return s.set({ tool: e.key === "1" ? "select" : e.key === "2" ? "add" : "delete", sel: -1 });
+        return s.set({ tool: e.key === "1" ? "brush" : "erase" });
       }
-      if (e.key === "Delete" && s.tab !== "before" && s.sel >= 0) {
+      // 붓 크기 — 인페인트처럼 슬라이더도 있지만, 칠하다 말고 손을 옮기지 않아도 되게
+      if (s.tab !== "before" && (e.key === "[" || e.key === "]")) {
         e.preventDefault();
-        return s.removeBox(s.sel);
+        return s.tune({ brush: Math.max(0, Math.min(12, s.brush + (e.key === "]" ? 1 : -1))) });
+      }
+      if (s.tab !== "before" && e.key.toLowerCase() === "z" && (e.ctrlKey || e.metaKey) && !e.shiftKey) {
+        e.preventDefault();
+        return s.undoPaint();
       }
       if (e.key === "ArrowLeft") return s.step(-1);
       if (e.key === "ArrowRight") return s.step(1);
