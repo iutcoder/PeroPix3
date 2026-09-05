@@ -199,10 +199,16 @@ export function CensorStage() {
         maxHeight: "100%",
       }}
     >
-      <img
+      {/* ★★그림이 아직 없으면(탭 전환·목록 비움 사이) `<img>` 를 **아예 두지 않는다** (사용자 지적
+          2026-09-05: 검열 시작을 누르면 잠깐 깨진 그림 아이콘이 뜬다). Chromium 은 src 가 있다가
+          없어진 img 를 「깨진 그림」으로 그린다 — 헤드리스로 재현: src 를 뗀 것·빈 문자열·404 는
+          아이콘이 뜨고, 처음부터 src 가 없던 img 만 아무것도 안 그린다. src 가 null 인 길은 넷인데
+          (탭 전환·목록 비움·범위 밖 선택·초기값) 전부 이 한 자리를 지나므로 여기서 한 번에 막는다. */}
+      {c.src === null && <div data-censor-empty style={{ width: "100%", height: "100%" }} />}
+      {c.src !== null && <img
         ref={imgRef}
         data-censor-img
-        src={c.src ?? undefined}
+        src={c.src}
         alt=""
         draggable={false}
         onLoad={(e) => {
@@ -212,7 +218,7 @@ export function CensorStage() {
         }}
         // ★칸을 꽉 채운다 — 칸의 크기는 위에서 그림 비율대로 셈해 두었다
         style={{ width: "100%", height: "100%", objectFit: "contain", userSelect: "none", display: "block" }}
-      />
+      />}
       <canvas
         ref={canvasRef}
         data-censor-cover
