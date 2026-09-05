@@ -42,6 +42,8 @@ export function CensorStage() {
   const upAt = useRef(0);
   /** 획 도중 프레임마다 든 시간 — 붓 처리·윤곽·굽기. 손을 뗄 때 한 줄로 찍고 비운다 */
   const strokeStats = useRef({ n: 0, ms: [] as number[], outline: 0, draw: 0, brush: 0 });
+  /** 끄는 동안 예약된 다시 그리기 (프레임당 한 번). ★마우스는 프레임보다 자주 움직임을 보낸다 */
+  const rafRef = useRef(0);
 
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   /** 긋는 동안 보이는 칠한 칸의 윤곽 (`outlinePath`). ★ref 로 `d` 를 바로 쓴다 — 긋는 중엔 리액트가 안 돈다 */
@@ -77,6 +79,8 @@ export function CensorStage() {
     /* ★끄는 동안에는 **낮은 해상도로** 굽는다 (`censorRender` 의 `STEAM_WORK_QUICK`).
        스팀은 모양이 바뀔 때마다 다시 만들어야 해서, 제 해상도로 태우면 손이 걸린다.
        손을 떼면 `editing` 이 꺼지고 이 함수가 한 번 더 돌아 제 해상도로 다시 굽는다. */
+    // ★뒤에서 제 해상도 굽기가 끝나면 그 자리에서 다시 그린다 (스팀, 손을 뗀 뒤)
+    r.onReady = paint;
     const t0 = performance.now();
     r.draw(cv, toRenderBoxes(st.paint[cur.id]), coverOf(st), (shown * dpr) / sz.w, false, st.editing);
     const now = performance.now();
@@ -90,7 +94,7 @@ export function CensorStage() {
       // ★console.info — debug 등급은 개발자 도구 기본 필터에 안 보인다 (사용자: "콘솔창에 아무 로그도 안 찍힘")
       const sorted = [...ss.ms].sort((a, b) => a - b);
       const med = sorted[sorted.length >> 1] ?? 0, max = sorted[sorted.length - 1] ?? 0;
-      console.info(`[censor] 획 ${ss.n}점: 프레임 중앙값 ${med.toFixed(1)}ms·최대 ${max.toFixed(1)}ms (붓 최대 ${ss.brush.toFixed(1)}, 윤곽 최대 ${ss.outline.toFixed(1)}, 굽기 최대 ${ss.draw.toFixed(1)}) | 손 뗌 → 덮개 완료 ${(now - upAt.current).toFixed(0)}ms (그리기 ${(now - t0).toFixed(0)}ms, 캔버스 ${cv.width}×${cv.height})`);
+      console.info(`[censor] 획 ${ss.n}점: 프레임 중앙값 ${med.toFixed(1)}ms·최대 ${max.toFixed(1)}ms (붓 최대 ${ss.brush.toFixed(1)}, 윤곽 최대 ${ss.outline.toFixed(1)}, 굽기 최대 ${ss.draw.toFixed(1)}) | 손 뗌 → 화면 반영 ${(now - upAt.current).toFixed(0)}ms (그리기 ${(now - t0).toFixed(0)}ms, 캔버스 ${cv.width}×${cv.height})`);
       upAt.current = 0;
       strokeStats.current = { n: 0, ms: [], outline: 0, draw: 0, brush: 0 };
     }
@@ -189,12 +193,16 @@ export function CensorStage() {
     useCensor.getState().strokeAt(cell, s.last, s.erase);
     strokeStats.current.brush = Math.max(strokeStats.current.brush, performance.now() - tb);
     s.last = cell;
-    paint();
+    /* ★★**프레임당 한 번만** 다시 그린다 (사용자 로그 2026-09-05: 그리는 도중 잔렉). 마우스는 초당
+       수백 번 움직임을 보내고 칸이 바뀔 때마다 굽고 있었다 — 굽기 15~25ms 가 프레임 안에 여러 번
+       쌓이면 화면이 밀린다. 칸은 위에서 이미 바뀌었으니 다음 프레임에 한 번 그리면 다 반영된다. */
+    if (!rafRef.current) rafRef.current = requestAnimationFrame(() => { rafRef.current = 0; paint(); });
   };
 
   const up = () => {
     if (!strokeRef.current) return;
     strokeRef.current = null;
+    if (rafRef.current) { cancelAnimationFrame(rafRef.current); rafRef.current = 0; }
     upAt.current = performance.now();
     // ★손을 떼면 덮개를 다시 진하게 (「들춰보기」는 끄는 동안만이다) — 그리고 제 해상도로 다시 굽는다
     useCensor.getState().strokeEnd();
