@@ -96,9 +96,9 @@ export function CensorStage() {
     const mask = st.paint[cur.id];
     const sr = strokeRef.current;
     let scene: Scene;
-    if (st.editing && sr && !sr.erase && st.strokeBase && mask && st.strokeBase.length === mask.cells.length) {
-      if (!sr.baseBoxes) sr.baseBoxes = toRenderBoxes({ ...mask, cells: st.strokeBase });
-      scene = { boxes: sr.baseBoxes, mask, overlay: toRenderBoxes(strokeDelta(mask, st.strokeBase, st.strokeDirty ?? undefined)), dirty: st.strokeDirty ?? undefined };
+    if (st.editing && sr && !sr.erase && st.strokeBase && mask && st.strokeBase.cells.length === mask.cells.length) {
+      if (!sr.baseBoxes) sr.baseBoxes = toRenderBoxes({ ...mask, cells: st.strokeBase.cells });
+      scene = { boxes: sr.baseBoxes, mask, overlay: toRenderBoxes(strokeDelta(mask, st.strokeBase.cells, st.strokeDirty ?? undefined)), dirty: st.strokeDirty ?? undefined };
     } else scene = { boxes: toRenderBoxes(mask), mask: mask ?? null };
     r.draw(cv, scene, coverOf(st), (shown * dpr) / sz.w, false, st.editing, false);
     const now = performance.now();

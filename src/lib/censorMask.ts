@@ -58,6 +58,10 @@ export type Mask = {
   h: number;
   /** 픽셀마다 0(비었음) 또는 방식 번호 — 줄 순서, `w` 칸씩 */
   cells: Uint8Array;
+  /** 픽셀마다 **덮인 비율** 0..255 — 켜진 픽셀에서만 뜻이 있다. 원형 붓의 테두리 픽셀이 부분값을 갖는다
+   *  (사용자 지적 2026-09-05: *"깔끔한 곡선이 아니고 테두리가 블러된 것처럼 흐려"* — 이진 마스크를 흐려서
+   *  계단을 가리면 3px 로 번진다. 덮인 비율로 그리면 전환이 1px 안에서 끝난다). 사각 붓·찾은 박스는 255 */
+  alpha: Uint8Array;
   /** 켜진 픽셀을 품는 사각형 (보수적 · 자라기만 한다) */
   bounds: Rect;
   /** 픽셀이 바뀔 때마다 오른다 — 렌더러가 옮겨 둔 알파 판을 다시 쓸지 판정하는 근거 */
@@ -67,14 +71,16 @@ export type Mask = {
 export function makeMask(w: number, h: number): Mask {
   const W = Math.max(1, Math.floor(w));
   const H = Math.max(1, Math.floor(h));
-  return { w: W, h: H, cells: new Uint8Array(W * H), bounds: emptyRect(), rev: 0 };
+  return { w: W, h: H, cells: new Uint8Array(W * H), alpha: new Uint8Array(W * H), bounds: emptyRect(), rev: 0 };
 }
 
-export const cloneMask = (m: Mask): Mask => ({ ...m, cells: new Uint8Array(m.cells), bounds: { ...m.bounds } });
+export const cloneMask = (m: Mask): Mask =>
+  ({ ...m, cells: new Uint8Array(m.cells), alpha: new Uint8Array(m.alpha), bounds: { ...m.bounds } });
 
 /** 전부 지운다 (「전부 지우기」 단추) */
 export function clearMask(m: Mask) {
   m.cells.fill(0);
+  m.alpha.fill(0);
   m.bounds = emptyRect();
   m.rev++;
 }
@@ -105,9 +111,34 @@ function fillRect(m: Mask, x0: number, y0: number, x1: number, y1: number, v: nu
   x0 = Math.max(0, x0); y0 = Math.max(0, y0);
   x1 = Math.min(m.w, x1); y1 = Math.min(m.h, y1);
   if (x1 <= x0 || y1 <= y0) return;
-  for (let y = y0; y < y1; y++) m.cells.fill(v, y * m.w + x0, y * m.w + x1);
+  const a = v ? 255 : 0;
+  for (let y = y0; y < y1; y++) {
+    m.cells.fill(v, y * m.w + x0, y * m.w + x1);
+    m.alpha.fill(a, y * m.w + x0, y * m.w + x1);
+  }
   if (v) grow(m.bounds, x0, y0, x1, y1);
   m.rev++;
+}
+
+/** 테두리 픽셀 하나 — 덮인 비율 `cov`(0..1) 로 칠하거나 지운다.
+ *  ★반쯤 덮인 픽셀의 규칙: 빈 픽셀은 그 비율로 켜지고, 같은 방식이면 더 덮인 쪽을 남기고, 다른 방식은
+ *    반 넘게 덮였을 때만 넘어온다. 지우개는 반 넘게 덮였으면 지우고, 덜 덮였으면 그만큼만 옅게 한다. */
+function paintPx(m: Mask, i: number, v: number, cov: number) {
+  if (cov <= 0) return;
+  const a = cov >= 1 ? 255 : Math.round(cov * 255);
+  const was = m.cells[i];
+  if (v) {
+    if (!was) { m.cells[i] = v; m.alpha[i] = a; }
+    else if (was === v) { if (a > m.alpha[i]) m.alpha[i] = a; }
+    else if (cov >= 0.5) { m.cells[i] = v; if (a > m.alpha[i]) m.alpha[i] = a; }
+  } else if (was) {
+    if (cov >= 0.5) { m.cells[i] = 0; m.alpha[i] = 0; }
+    else {
+      const left = 255 - a;
+      if (left < m.alpha[i]) m.alpha[i] = left;
+      if (m.alpha[i] === 0) m.cells[i] = 0;
+    }
+  }
 }
 
 /** 찾은 박스를 비트맵에 굽는다. ★**조금이라도 걸친 픽셀은 켠다** — 검열은 덜 가리는 쪽이 사고다.
@@ -134,7 +165,8 @@ export function brushBox(x: number, y: number, d: number) {
 }
 
 /** 붓 한 번 — `(x,y)` 를 가운데로 지름 `d` 의 사각·원을 `v` 로 (0 이면 지우개).
- *  원은 붓 사각형에 내접하는 원이다 — 픽셀의 가운데가 원 안에 들면 켠다. 지름 3 이하는 사각형과 같다.
+ *  원은 붓 사각형에 내접하는 원이다. ★테두리 픽셀은 **덮인 비율**로 칠한다 — 픽셀 가운데에서 원 둘레까지의
+ *  거리로 근사한다 (둘레 안쪽 반 픽셀부터 바깥 반 픽셀까지 1→0). 지름 3 이하는 사각형과 같다.
  *  `dirty` 를 주면 손댄 사각형만큼 넓혀 준다 (되돌리기가 그 자리만 보관한다) */
 export function stamp(m: Mask, x: number, y: number, d: number, v: number, shape: Shape = "square", dirty?: Rect) {
   const { x0, y0, d: D } = brushBox(x, y, d);
@@ -145,12 +177,28 @@ export function stamp(m: Mask, x: number, y: number, d: number, v: number, shape
   }
   const R = D / 2;
   const cx = x0 + R, cy = y0 + R;
-  const r2 = R * R;
+  const rIn = (R - 0.5) * (R - 0.5), rOut = (R + 0.5) * (R + 0.5);
+  let touched = false;
   for (let py = Math.max(0, y0); py < Math.min(m.h, y0 + D); py++) {
     const dy = py + 0.5 - cy;
-    const hw = Math.sqrt(Math.max(0, r2 - dy * dy));
-    const a = Math.ceil(cx - hw - 0.5), b = Math.floor(cx + hw - 0.5);
-    if (b >= a) fillRect(m, a, py, b + 1, py + 1, v);
+    const dy2 = dy * dy;
+    // 안쪽(가득 덮임) 구간은 통째로, 그 바깥 테두리 띠만 픽셀마다 비율을 센다
+    const hwIn = Math.sqrt(Math.max(0, rIn - dy2)), hwOut = Math.sqrt(Math.max(0, rOut - dy2));
+    const aIn = Math.ceil(cx - hwIn - 0.5), bIn = Math.floor(cx + hwIn - 0.5);
+    const aOut = Math.max(0, Math.ceil(cx - hwOut - 0.5)), bOut = Math.min(m.w - 1, Math.floor(cx + hwOut - 0.5));
+    if (bOut < aOut) continue;
+    if (bIn >= aIn) fillRect(m, aIn, py, bIn + 1, py + 1, v);
+    const row = py * m.w;
+    for (let px = aOut; px <= bOut; px++) {
+      if (px >= aIn && px <= bIn) continue;
+      const dx = px + 0.5 - cx;
+      paintPx(m, row + px, v, R + 0.5 - Math.sqrt(dx * dx + dy2));
+    }
+    touched = true;
+  }
+  if (touched) {
+    if (v) grow(m.bounds, Math.max(0, x0), Math.max(0, y0), Math.min(m.w, x0 + D), Math.min(m.h, y0 + D));
+    m.rev++;
   }
 }
 
@@ -197,6 +245,7 @@ export function floodErase(m: Mask, x: number, y: number, dirty?: Rect) {
     const i = stack.pop()!;
     if (!cells[i]) continue;
     cells[i] = 0;
+    m.alpha[i] = 0;
     n++;
     const px = i % w, py = (i - px) / w;
     if (px < bx0) bx0 = px; else if (px + 1 > bx1) bx1 = px + 1;
@@ -321,7 +370,7 @@ export function strokeDelta(m: Mask, base: Uint8Array, within?: Rect): Mask {
     const row = y * m.w;
     for (let x = x0; x < x1; x++) {
       const v = m.cells[row + x];
-      if (v && !base[row + x]) out.cells[row + x] = v;
+      if (v && !base[row + x]) { out.cells[row + x] = v; out.alpha[row + x] = m.alpha[row + x]; }
     }
   }
   grow(out.bounds, x0, y0, x1, y1);
@@ -340,22 +389,28 @@ export function remap(m: Mask, v: number) {
 }
 
 /** 되돌리기 한 걸음 — 사각형 하나의 픽셀 사본. ★비트맵 전체(100만 바이트)를 걸음마다 들고 있지 않는다 */
-export type Patch = { x0: number; y0: number; x1: number; y1: number; data: Uint8Array };
+export type Patch = { x0: number; y0: number; x1: number; y1: number; data: Uint8Array; alpha: Uint8Array };
 
-/** `cells`(어느 시점의 비트맵)에서 사각형 `r` 을 떠 둔다. 빈 사각형이면 null */
-export function snapshot(m: { w: number; h: number }, cells: Uint8Array, r: Rect): Patch | null {
+/** 어느 시점의 비트맵 두 판(`cells`·`alpha`)에서 사각형 `r` 을 떠 둔다. 빈 사각형이면 null */
+export function snapshot(m: { w: number; h: number }, cells: Uint8Array, alpha: Uint8Array, r: Rect): Patch | null {
   const x0 = Math.max(0, r.x0), y0 = Math.max(0, r.y0), x1 = Math.min(m.w, r.x1), y1 = Math.min(m.h, r.y1);
   if (x1 <= x0 || y1 <= y0) return null;
   const pw = x1 - x0;
-  const data = new Uint8Array(pw * (y1 - y0));
-  for (let y = y0; y < y1; y++) data.set(cells.subarray(y * m.w + x0, y * m.w + x1), (y - y0) * pw);
-  return { x0, y0, x1, y1, data };
+  const data = new Uint8Array(pw * (y1 - y0)), al = new Uint8Array(pw * (y1 - y0));
+  for (let y = y0; y < y1; y++) {
+    data.set(cells.subarray(y * m.w + x0, y * m.w + x1), (y - y0) * pw);
+    al.set(alpha.subarray(y * m.w + x0, y * m.w + x1), (y - y0) * pw);
+  }
+  return { x0, y0, x1, y1, data, alpha: al };
 }
 
 /** 떠 둔 사각형을 되돌려 놓는다 */
 export function restore(m: Mask, p: Patch) {
   const pw = p.x1 - p.x0;
-  for (let y = p.y0; y < p.y1; y++) m.cells.set(p.data.subarray((y - p.y0) * pw, (y - p.y0 + 1) * pw), y * m.w + p.x0);
+  for (let y = p.y0; y < p.y1; y++) {
+    m.cells.set(p.data.subarray((y - p.y0) * pw, (y - p.y0 + 1) * pw), y * m.w + p.x0);
+    m.alpha.set(p.alpha.subarray((y - p.y0) * pw, (y - p.y0 + 1) * pw), y * m.w + p.x0);
+  }
   grow(m.bounds, p.x0, p.y0, p.x1, p.y1);
   m.rev++;
 }

@@ -65,12 +65,6 @@ const STEAM_WORK = 340;
  *  문제라(2026-08-23 「반응성이 매우 안 좋음」) 매 프레임 40ms 를 태울 수 없다. */
 const STEAM_WORK_QUICK = 170;
 
-/** 마스크 가장자리 계단 다듬기의 흐림 σ (px, 화면·저장 모두).
- *  ★1.0 인 이유 (2026-09-05 하네스, 6배 확대 대조): 크롬은 가우시안을 상자 흐림 세 번으로 근사하는데
- *    σ 가 1 아래면 상자 폭이 1px 로 떨어져 **아무 일도 안 한다** (0.6 은 계단 그대로였다). 1.0 이 계단이
- *    사라지는 가장 작은 값이고, 1.2·1.5 는 그보다 조금 더 퍼질 뿐이다. */
-const AA_SIGMA = 1.0;
-
 /** 두 구름을 합칠 때 **이만큼 차이 안에서만** 이음매를 둥글린다 (0..255 의 덮임 단위) */
 const SMAX = 40;
 
@@ -322,12 +316,10 @@ export class CensorRenderer {
        깐 뒤(가장자리 복제 = 밖을 「끝과 같은 값」으로 본다) 흐린다. 그림 안쪽에서 끝나는
        변의 부드러움은 그대로다. 여백은 blur 반경(σ = feather/2)의 4배로, 그 밖의 투명이
        끝에 미치는 몫은 0.1% 미만이다. */
-    /* ★★계단 다듬기 — 마스크는 픽셀 단위 이진값이라 원형 붓의 테두리가 계단으로 남는다 (사용자 지적
-       2026-09-05: *"원형 브러시 테두리가 좀 거칠어"*). 「부드럽게」가 0 이어도 흐림 σ 를 이만큼은 걸어
-       가장자리 1px 만 안티에일리어싱한다 — 안쪽은 그대로 100% 다. 네모 박스의 반듯한 변도 끝 한 픽셀만
-       반투명해지는 정도라 눈에 안 띈다. */
-    const sigma = Math.max(feather / 2, AA_SIGMA);
-    const m = Math.ceil(sigma * 4);
+    /* ★계단은 흐림으로 다듬지 않는다 (사용자 지적 2026-09-05: *"테두리가 블러된 것처럼 흐려"* — σ 1px 흐림을
+       걸어 봤더니 3px 로 번졌다). 원형 붓의 테두리는 마스크가 **덮인 비율**(`alpha`)로 들고 있어 1px 안에서
+       전환된다. 흐림은 「부드럽게」가 켜졌을 때만이다. */
+    const m = feather > 0 ? Math.ceil(feather * 2) : 0;
     const PW = W + m * 2;
     const PH = H + m * 2;
     if (!this.maskCv || this.maskCv.width !== W || this.maskCv.height !== H
@@ -367,12 +359,13 @@ export class CensorRenderer {
         const bw = x1 - x0, bh = y1 - y0;
         const img = fg.createImageData(bw, bh);
         const px = img.data;
-        const cells = mask.cells;
+        const cells = mask.cells, alpha = mask.alpha;
         for (let y = 0; y < bh; y++) {
           const row = (y0 + y) * mask.w + x0;
           let o = y * bw * 4;
           for (let x = 0; x < bw; x++, o += 4) {
-            if (cells[row + x] === v) { px[o] = px[o + 1] = px[o + 2] = px[o + 3] = 255; }
+            // 덮인 비율이 알파다 — 원형 붓의 테두리 픽셀이 반투명으로 옮겨져 계단이 안 진다
+            if (cells[row + x] === v) { px[o] = px[o + 1] = px[o + 2] = 255; px[o + 3] = alpha[row + x]; }
           }
         }
         fg.putImageData(img, x0, y0);
@@ -383,6 +376,8 @@ export class CensorRenderer {
     // 켜진 자리만 옮겨 그린다 (그림 전체를 읽지 않는다)
     const bw = b.x1 - b.x0, bh = b.y1 - b.y0;
     mg.imageSmoothingEnabled = true;
+    // ★줄여 그릴 때 보간 품질을 올린다 — 기본(양선형)은 0.6배 축소에서 덮인 비율의 계단을 도로 드러냈다 (하네스 6배 확대)
+    mg.imageSmoothingQuality = "high";
     mg.drawImage(full, b.x0, b.y0, bw, bh, b.x0 * scale, b.y0 * scale, bw * scale, bh * scale);
     if (Math.abs(net) >= 0.5) {
       // ★팽창·침식도 켜진 자리 둘레(반지름만큼 더)만 읽고 쓴다 — 비용이 칠한 자리 크기에 비례한다
@@ -422,7 +417,7 @@ export class CensorRenderer {
     const cg = cut.getContext("2d")!;
     cg.setTransform(1, 0, 0, 1, 0, 0);
     cg.clearRect(0, 0, PW, PH);
-    cg.filter = `blur(${sigma}px)`;
+    cg.filter = feather > 0 ? `blur(${feather / 2}px)` : "none";
     cg.drawImage(pad, 0, 0);
     cg.filter = "none";
     // 마스크가 남긴 자리에만 재료를 남긴다 (재료는 그림 자리에만 — 여백은 어차피 잘려 나간다)

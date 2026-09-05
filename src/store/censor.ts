@@ -207,7 +207,7 @@ type S = Saved & {
   undos: Patch[];
   /** 긋는 동안만 — 획 시작 전의 픽셀 전부. 무대가 이번 획의 델타를 뽑는 근거이고, 손을 떼면 손댄
    *  사각형(`strokeDirty`)만 잘라 되돌리기 더미에 넣는다 */
-  strokeBase: Uint8Array | null;
+  strokeBase: { cells: Uint8Array; alpha: Uint8Array } | null;
   /** 긋는 동안 붓이 손댄 사각형 (제자리에서 자란다) */
   strokeDirty: Rect | null;
   sizes: Record<string, { w: number; h: number }>;
@@ -647,7 +647,7 @@ export const useCensor = create<S>((set, get) => ({
     const m = get().curMask();
     if (!m) return false;
     // ★한 획이 한 걸음 — 긋기 **전에** 지금 픽셀을 얼려 둔다. 손을 뗄 때 손댄 자리만 잘라 더미에 넣는다
-    set({ strokeBase: new Uint8Array(m.cells), strokeDirty: emptyRect(), editing: true });
+    set({ strokeBase: { cells: new Uint8Array(m.cells), alpha: new Uint8Array(m.alpha) }, strokeDirty: emptyRect(), editing: true });
     return true;
   },
 
@@ -668,7 +668,7 @@ export const useCensor = create<S>((set, get) => ({
     const s = get();
     const m = s.curMask();
     // ★손댄 사각형의 **획 전 픽셀**을 한 걸음으로. 아무것도 안 건드렸으면 걸음도 없다
-    const p = m && s.strokeBase && s.strokeDirty ? snapshot(m, s.strokeBase, s.strokeDirty) : null;
+    const p = m && s.strokeBase && s.strokeDirty ? snapshot(m, s.strokeBase.cells, s.strokeBase.alpha, s.strokeDirty) : null;
     const undos = p ? [...s.undos.slice(-(UNDO_MAX - 1)), p] : s.undos;
     // 손을 떼면 덮개를 다시 진하게, 그리고 제 해상도로 한 번 더 굽게 (`rev`)
     set({ editing: false, strokeBase: null, strokeDirty: null, undos, rev: s.rev + 1 });
