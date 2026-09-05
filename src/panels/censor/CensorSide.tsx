@@ -2,7 +2,7 @@ import { useI18n } from "../../i18n";
 import { api } from "../../lib/backend";
 import { toast } from "../../store/toast";
 import { Icon } from "../../components/Icon";
-import { useCensor, type Tool } from "../../store/censor";
+import { BRUSH_MAX, useCensor, type Tool } from "../../store/censor";
 import { GRID, isEmpty } from "../../lib/censorMask";
 import { card, box, on, num, dropFocus, Hint, Line, Sec } from "./ui";
 
@@ -133,7 +133,7 @@ export function CensorSide() {
               </div>
               {/* ★붓 크기는 **칸 단위**다 (8px 격자) — 변은 2r+1 칸. 숫자는 픽셀로 보여 준다 */}
               <Line label={t("imgIn.brushSize")}>
-                <input type="range" data-censor-brush-size min={0} max={12} value={c.brush}
+                <input type="range" data-censor-brush-size min={0} max={BRUSH_MAX} value={c.brush}
                   onChange={(e) => c.tune({ brush: Number(e.target.value) })} style={{ flex: 1 }} />
                 <span style={num}>{(c.brush * 2 + 1) * GRID}</span>
               </Line>
@@ -259,7 +259,7 @@ export function CensorSide() {
             <div style={{ display: "flex", flexDirection: "column", gap: "var(--sp-1)" }}>
               {[
                 ["1 2", t("censor.k_tool")],
-                ["[ ]", t("censor.k_size")],
+                [`Alt+${t("censor.k_wheelKey")}`, t("censor.k_size")],
                 ["Ctrl+Z", t("censor.k_undo")],
                 [t("censor.k_wheelKey"), t("censor.k_wheel")],
                 [t("censor.k_rightKey"), t("censor.k_right")],

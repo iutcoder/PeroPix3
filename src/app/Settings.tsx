@@ -415,7 +415,7 @@ const KEY_GROUPS: readonly (readonly [string, readonly string[]])[] = [
   ["scene", ["pickMulti", "pickRange", "pickDelete", "pickClear", "arrowTake", "arrowScene", "wheelTake", "wheelZoom",
              "wheelLane", "sceneRename", "sceneTab", "dragGroup", "dragTab", "undo"]],
   ["gallery", ["galArrows", "galStar", "galMulti", "galRename", "galClose"]],
-  ["censor", ["cenTools", "cenDelete", "cenRight", "cenArrows"]],
+  ["censor", ["cenTools", "cenSize", "cenUndo", "cenRight", "cenWheel", "cenArrows"]],
   ["files", ["fileMulti"]],
   ["window", ["titleDbl"]],
 ];

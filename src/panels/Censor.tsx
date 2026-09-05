@@ -1,6 +1,6 @@
 import { useEffect, useRef } from "react";
 import { useI18n } from "../i18n";
-import { useCensor, type Tab } from "../store/censor";
+import { BRUSH_MAX, useCensor, type Tab } from "../store/censor";
 import { useFiles, type FileNode } from "../store/files";
 import { useGen } from "../store/gen";
 import { fileMgrThumb } from "../lib/imgUrl";
@@ -65,6 +65,14 @@ export function Censor() {
     if (!el) return;
     const onWheel = (e: WheelEvent) => {
       const s = useCensor.getState();
+      /* ★★**Alt+휠 = 붓 크기** (사용자 지시 2026-09-05: *"조작키를 알트 + 휠로 변경"* — 칠하다 말고
+         손을 옮기지 않아도 되게. 칩의 가중치와 같은 조합이다). Alt 단독 누름이 창의 메뉴 모드를 깨우지
+         않게는 `App.tsx` 가 막아 둔다. */
+      if (e.altKey && s.tab !== "before") {
+        e.preventDefault();
+        s.tune({ brush: Math.max(0, Math.min(BRUSH_MAX, s.brush + (e.deltaY < 0 ? 1 : -1))) });
+        return;
+      }
       const n = (s.tab === "after" ? s.after : s.images).length;
       if (n < 2) return;
       e.preventDefault();
@@ -74,22 +82,23 @@ export function Censor() {
     return () => el.removeEventListener("wheel", onWheel);
   }, [c.tab]);
 
-  /** 단축키. ★입력칸에 커서가 있으면 먹지 않는다 (숫자칸에 1 을 못 치면 곤란하다) */
+  /** 단축키. ★**글자를 치는 칸**에 커서가 있으면 먹지 않는다 (숫자칸에 1 을 못 치면 곤란하다).
+   *  ★★슬라이더·체크박스는 글자 칸이 아니다 — 여기서 걸러 버리면 슬라이더를 만진 뒤로 단축키가
+   *    전부 죽는다 (사용자 제보 2026-09-05: *"컨트롤 제트도 안 됨, 단축키 다 안 되는 거 보니까 입력을
+   *    안 먹고 있는 듯"*). 무대는 `pointerdown` 의 기본 동작을 막고 있어 눌러도 포커스가 안 옮겨지므로,
+   *    직전에 만진 슬라이더가 포커스를 쥔 채 남는다 (무대 쪽에서도 누를 때 포커스를 푼다). */
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const el = e.target as HTMLElement | null;
-      if (el && /^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName)) return;
+      if (el && (el.tagName === "TEXTAREA" || el.tagName === "SELECT" || el.isContentEditable
+        || (el.tagName === "INPUT" && !/^(range|checkbox|radio|button|color)$/.test((el as HTMLInputElement).type)))) return;
       const s = useCensor.getState();
       if (s.tab !== "before" && (e.key === "1" || e.key === "2")) {
         e.preventDefault();
         return s.set({ tool: e.key === "1" ? "brush" : "erase" });
       }
-      // 붓 크기 — 인페인트처럼 슬라이더도 있지만, 칠하다 말고 손을 옮기지 않아도 되게
-      if (s.tab !== "before" && (e.key === "[" || e.key === "]")) {
-        e.preventDefault();
-        return s.tune({ brush: Math.max(0, Math.min(12, s.brush + (e.key === "]" ? 1 : -1))) });
-      }
-      if (s.tab !== "before" && e.key.toLowerCase() === "z" && (e.ctrlKey || e.metaKey) && !e.shiftKey) {
+      // ★`code` 로 본다 — 한글 자판이 켜져 있으면 `key` 가 "ㅋ" 로 오는 수가 있다
+      if (s.tab !== "before" && e.code === "KeyZ" && (e.ctrlKey || e.metaKey) && !e.shiftKey) {
         e.preventDefault();
         return s.undoPaint();
       }

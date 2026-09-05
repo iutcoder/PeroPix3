@@ -173,6 +173,10 @@ export function CensorStage() {
     }
     // ★기본 동작(글자 선택·선택된 글자 끌기)을 막는다 — 선택이 남아 있으면 붓이 한 틱 만에 끊겼다
     e.preventDefault();
+    /* ★★그 대신 **포커스를 손수 푼다.** `pointerdown` 을 막으면 뒤따르는 `mousedown` 이 안 나가고, 포커스를
+       옮기는 것은 그 `mousedown` 의 기본 동작이다 — 그래서 직전에 만진 슬라이더가 포커스를 쥔 채 남아
+       Ctrl+Z 같은 단축키를 전부 삼켰다 (사용자 제보 2026-09-05). */
+    (document.activeElement as HTMLElement | null)?.blur?.();
     const cell = cellOf(e);
     if (!cell) return;
     const st = useCensor.getState();

@@ -60,6 +60,8 @@ export type Tab = "before" | "processing" | "after";
  *  사각형 브러시로 칠하고 지우는 형태로"*). 박스를 고르고·옮기고·돌리던 도구는 걷었다 —
  *  편집 대상이 박스 목록이 아니라 **칠한 칸의 격자**(`lib/censorMask`)가 되었기 때문이다. */
 export type Tool = "brush" | "erase";
+/** 붓 반지름의 천장 (칸). 슬라이더와 Alt+휠이 같은 값을 본다 */
+export const BRUSH_MAX = 12;
 
 /** 붓을 되돌릴 걸음 수 (인페인트 마스크와 같다) */
 const UNDO_MAX = 40;
