@@ -418,8 +418,13 @@ export function restore(m: Mask, p: Patch) {
 /** 스팀용 **거친 격자** (`GRID`px 칸). 칸마다 0 또는 방식 번호 */
 export type Coarse = { w: number; h: number; cols: number; rows: number; cells: Uint8Array };
 
-/** 비트맵을 거친 격자로 줄인다. ★**픽셀이 하나라도 켜진 칸은 켠다** — 가는 획도 구름을 얻고, 찾은
- *  박스는 격자 시절과 같은 칸이 된다 (걸친 칸은 켠다). 방식이 섞인 칸은 픽셀이 가장 많은 쪽 */
+/** 비트맵을 거친 격자로 줄인다. ★**칸의 가운데 픽셀이 켜졌을 때** 켠다 (사용자 지적 2026-09-05: 원형 붓 뒤로
+ *  *"스팀의 칠해지는 영역이 좀 넓은 거 같아. 원래 90% 였는데 110%"* — 픽셀 하나라도 걸친 칸을 켜니 40px 붓이
+ *  48px 칸 띠가 됐다). 가운데 표본은 변마다 **가장 가까운 칸 경계로 반올림**하는 것과 같아, 찾은 박스는 네
+ *  귀가 반듯하고 붓 띠는 붓 굵기와 평균적으로 같다. (칸의 넓이 절반 기준은 박스 귀퉁이 칸(25%)을 꺼뜨려
+ *  네모가 십자로 갈라졌다.)
+ *  ★가는 획은 살린다 — 가운데를 비껴가도 **켜진 이웃이 하나도 없는** 칸은 켠다 (3px 획이 통째로 사라지지 않게).
+ *  살린 칸의 방식은 픽셀이 가장 많은 쪽 */
 export function coarseOf(m: Mask): Coarse {
   const cols = Math.max(1, Math.ceil(m.w / GRID));
   const rows = Math.max(1, Math.ceil(m.h / GRID));
@@ -439,12 +444,28 @@ export function coarseOf(m: Mask): Coarse {
   }
   const c0 = b.x0 >> 3, c1 = Math.min(cols - 1, (b.x1 - 1) >> 3);
   const r0 = b.y0 >> 3, r1 = Math.min(rows - 1, (b.y1 - 1) >> 3);
+  const best = new Uint8Array(cols * rows);        // 픽셀은 있는데 가운데를 비껴간 칸 — 가장 많은 방식
+  for (let r = r0; r <= r1; r++) {
+    const cy = Math.min(m.h - 1, r * GRID + (GRID >> 1));
+    for (let c = c0; c <= c1; c++) {
+      const i = r * cols + c;
+      const cx = Math.min(m.w - 1, c * GRID + (GRID >> 1));
+      const mid = cells[cy * m.w + cx];
+      if (mid) { out.cells[i] = mid; continue; }
+      let top = 0, bv = 0;
+      for (let v = 1; v < K; v++) { const n = counts[i * K + v]; if (n > top) { top = n; bv = v; } }
+      best[i] = bv;
+    }
+  }
+  // 가운데를 비껴간 칸 — 켜진 이웃이 없으면(가는 획) 켠다. ★이웃 판정은 살리기 전 상태로 (살린 칸끼리 번갈아 꺼지지 않게)
+  const before = out.cells.slice();
   for (let r = r0; r <= r1; r++) {
     for (let c = c0; c <= c1; c++) {
       const i = r * cols + c;
-      let best = 0, bv = 0;
-      for (let v = 1; v < K; v++) if (counts[i * K + v] > best) { best = counts[i * K + v]; bv = v; }
-      out.cells[i] = bv;
+      if (!best[i]) continue;
+      const on = (c > 0 && before[i - 1]) || (c < cols - 1 && before[i + 1])
+        || (r > 0 && before[i - cols]) || (r < rows - 1 && before[i + cols]);
+      if (!on) out.cells[i] = best[i];
     }
   }
   return out;
