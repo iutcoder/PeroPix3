@@ -165,9 +165,12 @@ export class CensorRenderer {
    *    이미 깔아 두었으므로 그 위에 덮개만 얹으면 되고, 매 프레임 원본을 다시 그리지 않아도
    *    된다. 「들춰보기」도 이 캔버스의 CSS 투명도 하나로 끝난다.
    *  ★저장할 때만 참이다 — 그때는 한 장으로 합쳐야 한다. */
+  /** `overlay` — 끄는 동안 **이번 획이 새로 칠한 조각**. 본 목록은 구워 둔 것을 그대로 쓰고, 이것만
+   *  따로(열쇠 `ov|`) 저해상도로 구워 위에 얹는다. 손을 떼면 본 목록에 합쳐져 들어오므로 그때 사라진다.
+   *  ★겹친 자리는 최대값이 아니라 그냥 덧그려져 조금 밝을 수 있다 — 끄는 동안(옅게 보이는 때)뿐이다. */
   draw(
     target: HTMLCanvasElement, boxes: RenderBox[], s: CoverSettings,
-    scale: number, withBase = false, quick = false, sync = false,
+    scale: number, withBase = false, quick = false, sync = false, overlay: RenderBox[] = [],
   ) {
     const W = Math.max(1, Math.round(this.w * scale));
     const H = Math.max(1, Math.round(this.h * scale));
@@ -182,25 +185,41 @@ export class CensorRenderer {
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.clearRect(0, 0, W, H);
     if (withBase) ctx.drawImage(this.src, 0, 0, W, H);
-    if (!boxes.length) return;
-
-    // ★방식이 섞여 있어도 **한 방식당 한 번**만 오려 붙인다 (박스마다 오리면 그만큼 느려진다)
-    const groups = new Map<string, RenderBox[]>();
-    for (const b of boxes) {
-      const how = b.method || s.method;
-      const at = groups.get(how);
-      if (at) at.push(b);
-      else groups.set(how, [b]);
+    if (!boxes.length && !overlay.length) {
+      this.steamGroups.clear();
+      this.jobs.clear();
+      return;
     }
 
-    for (const [how, list] of groups) {
+    // ★방식이 섞여 있어도 **한 방식당 한 번**만 오려 붙인다 (박스마다 오리면 그만큼 느려진다)
+    const byMethod = (list: RenderBox[]) => {
+      const m = new Map<string, RenderBox[]>();
+      for (const b of list) {
+        const how = b.method || s.method;
+        const at = m.get(how);
+        if (at) at.push(b);
+        else m.set(how, [b]);
+      }
+      return m;
+    };
+    const groups = byMethod(boxes);
+    const extra = byMethod(overlay);
+    const used = new Set<string>();
+    for (const how of new Set([...groups.keys(), ...extra.keys()])) {
+      const list = groups.get(how) ?? [];
+      const ov = extra.get(how) ?? [];
       if (how === "steam") {
         // ★처음 제 해상도로 그릴 때 밭을 미리 예약한다 — 획 도중·손 뗀 프레임에 밭 굽기가 안 걸리게
         if (!quick) warmFields(s.feather, SEEDS, [128, 256]);
-        this.drawSteam(ctx, list, s, scale, quick, sync);
+        for (const k of this.drawSteam(ctx, list, s, scale, quick, sync, "")) used.add(k);
+        // ★이번 획의 델타는 제 열쇠로 따로 — 본 덩어리의 캐시를 건드리지 않는다
+        if (ov.length) for (const k of this.drawSteam(ctx, ov, s, scale, true, false, "ov|")) used.add(k);
       }
-      else this.drawMasked(ctx, how, list, s, scale, W, H);
+      else this.drawMasked(ctx, how, ov.length ? list.concat(ov) : list, s, scale, W, H);
     }
+    // 이번에 안 쓴 덩어리(모양이 바뀐 것의 옛 열쇠·끝난 획의 델타)는 버린다 — 굽던 작업도 함께
+    for (const k of this.steamGroups.keys()) if (!used.has(k)) this.steamGroups.delete(k);
+    for (const k of this.jobs.keys()) if (!used.has(k)) this.jobs.delete(k);
   }
 
   // ── 재료 ──────────────────────────────────────────────────
@@ -425,14 +444,11 @@ export class CensorRenderer {
    */
   private drawSteam(
     ctx: CanvasRenderingContext2D, list: RenderBox[], s: CoverSettings, scale: number,
-    quick = false, sync = false,
-  ) {
+    quick: boolean, sync: boolean, prefix: string,
+  ): Set<string> {
+    const used = new Set<string>();
     const live = list.filter((b) => b.box[2] > b.box[0] && b.box[3] > b.box[1]);
-    if (!live.length) {
-      this.steamGroups.clear();
-      this.jobs.clear();
-      return;
-    }
+    if (!live.length) return used;
 
     /** 박스 하나가 화면에서 차지하는 자리 — 두 번 쓰므로 미리 뽑는다. 판은 작업 해상도가 정해진 뒤에 */
     const items: SteamItem[] = live.map((b) => {
@@ -474,11 +490,10 @@ export class CensorRenderer {
       else groups.set(r, [i]);
     }
 
-    const used = new Set<string>();
     let quickBaked = 0, syncBaked = 0, scheduled = 0;
     const t0 = performance.now();
     for (const idx of groups.values()) {
-      const key = this.steamKey(idx.map((i) => live[i]), s, scale);
+      const key = prefix + this.steamKey(idx.map((i) => live[i]), s, scale);
       used.add(key);
       const gItems = idx.map((i) => items[i]);
       const gRects = idx.map((i) => rects[i]);
@@ -493,12 +508,10 @@ export class CensorRenderer {
       }
       ctx.drawImage(e.cv, e.x, e.y, e.w, e.h);
     }
-    // 이번에 안 쓴 덩어리(모양이 바뀐 것의 옛 열쇠)는 버린다 — 굽던 작업도 함께 (작업은 열쇠가 사라지면 멈춘다)
-    for (const k of this.steamGroups.keys()) if (!used.has(k)) this.steamGroups.delete(k);
-    for (const k of this.jobs.keys()) if (!used.has(k)) this.jobs.delete(k);
-    if (!quick && !sync) {
+    if (!quick && !sync && !prefix) {
       console.info(`[censor] 손 뗌: 덩어리 ${groups.size} (조각 ${items.length}) — 저해상도 즉시 ${quickBaked}, 뒤에서 제 해상도 예약 ${scheduled}, ${(performance.now() - t0).toFixed(0)}ms`);
     }
+    return used;
   }
 
   /** 뒤에서 굽는 작업 — 조각을 몇 ms 씩 나눠, 한가한 틈마다 한 걸음. 다 되면 바꿔 끼우고 `onReady` */

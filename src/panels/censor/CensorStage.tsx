@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { coverOf, useCensor, passes, type Box } from "../../store/censor";
-import { GRID, cellAt, outlinePath, toRenderBoxes } from "../../lib/censorMask";
+import { GRID, cellAt, outlinePath, strokeDelta, toRenderBoxes } from "../../lib/censorMask";
+import type { RenderBox } from "../../lib/censorRender";
 import { hitBox } from "../../lib/censorBox";
 
 /** 무대. 그림 한 장과 그 위의 덮개 (v2 `censorPreviewCanvas` + `censorOverlayCanvas`).
@@ -34,9 +35,12 @@ export function CensorStage() {
   const [fitted, setFitted] = useState<{ w: number; h: number } | null>(null);
   const editable = c.tab !== "before";
   /** 붓이 닿을 자리 (그림 좌표의 칸). 손을 대고 있을 때만 그린다 */
-  const [cursorCell, setCursorCell] = useState<{ gx: number; gy: number } | null>(null);
+  /** 붓 커서가 보이는가. ★자리(x·y)는 리액트를 안 거치고 `cursorRef` 로 바로 쓴다 — 마우스는 초당
+   *  수백 번 움직임을 보내는데, 그때마다 리액트를 돌리면 스팀의 프레임 예산을 잡아먹는다 */
+  const [cursorOn, setCursorOn] = useState(false);
+  const cursorRef = useRef<SVGRectElement | null>(null);
   /** 긋는 중 — 지난 칸과 지우개 여부. ★ref 다: pointermove 는 리액트 렌더를 안 기다린다 */
-  const strokeRef = useRef<{ last: { gx: number; gy: number } | null; erase: boolean } | null>(null);
+  const strokeRef = useRef<{ last: { gx: number; gy: number } | null; erase: boolean; baseBoxes?: RenderBox[] } | null>(null);
   /** 손을 뗀 시각 — 제 해상도 덮개가 완성될 때까지 걸린 시간을 콘솔에 남긴다 (사용자 제보 2026-09-05:
    *  스팀에서 손을 떼는 순간 0.5초 멈춤. 재현이 안 되어 실제 앱에서 잰다) */
   const upAt = useRef(0);
@@ -82,7 +86,21 @@ export function CensorStage() {
     // ★뒤에서 제 해상도 굽기가 끝나면 그 자리에서 다시 그린다 (스팀, 손을 뗀 뒤)
     r.onReady = paint;
     const t0 = performance.now();
-    r.draw(cv, toRenderBoxes(st.paint[cur.id]), coverOf(st), (shown * dpr) / sz.w, false, st.editing);
+    /* ★★붓 획을 긋는 동안은 **획 시작 전 그림은 구워 둔 그대로**, 이번 획이 새로 칠한 칸만 따로 얹는다
+       (사용자 제보 2026-09-05: 조각 300개 덩어리에서 그리는 동안 렉). 전에는 매 프레임 덩어리 전체를
+       저해상도로 다시 구워 조각 수만큼 느려졌다. 획 시작 전 사각형 목록은 획 동안 안 변하므로 한 번만
+       만들어 둔다 (`baseBoxes`) — 그 열쇠는 구워 둔 것과 같아 굽기가 없다. 지우개 획은 얹을 수 없어
+       전처럼 통째로 굽는다. */
+    const grid = st.paint[cur.id];
+    const sr = strokeRef.current;
+    let boxes: RenderBox[];
+    let overlay: RenderBox[] = [];
+    if (st.editing && sr && !sr.erase && st.strokeBase && grid && st.strokeBase.length === grid.cells.length) {
+      if (!sr.baseBoxes) sr.baseBoxes = toRenderBoxes({ ...grid, cells: st.strokeBase });
+      boxes = sr.baseBoxes;
+      overlay = toRenderBoxes(strokeDelta(grid, st.strokeBase));
+    } else boxes = toRenderBoxes(grid);
+    r.draw(cv, boxes, coverOf(st), (shown * dpr) / sz.w, false, st.editing, false, overlay);
     const now = performance.now();
     const ss = strokeStats.current;
     if (st.editing) {
@@ -182,7 +200,13 @@ export function CensorStage() {
       return;
     }
     const cell = cellOf(e);
-    setCursorCell(cell);
+    const cr = cursorRef.current;
+    if (cell && cr) {
+      const b = useCensor.getState().brush;
+      cr.setAttribute("x", String((cell.gx - b) * GRID));
+      cr.setAttribute("y", String((cell.gy - b) * GRID));
+    }
+    if (cell && !cursorOn) setCursorOn(true);
     const s = strokeRef.current;
     if (!s || !cell) return;
     if (s.last && s.last.gx === cell.gx && s.last.gy === cell.gy) return;
@@ -277,7 +301,7 @@ export function CensorStage() {
         onPointerMove={move}
         onPointerUp={up}
         onPointerCancel={up}
-        onPointerLeave={() => setCursorCell(null)}
+        onPointerLeave={() => setCursorOn(false)}
         // ★우클릭 메뉴를 막는다 — 오른쪽 단추는 이어진 덩어리 삭제다
         onContextMenu={(e) => e.preventDefault()}
       >
@@ -294,11 +318,12 @@ export function CensorStage() {
         {!editable && shown.map(({ b, i }) => (
           <BoxShape key={i} b={b} hot={hover === i} ok={passes(b, c.labelConf, c.conf)} scale={scale} />
         ))}
-        {editable && cursorCell && (
+        {editable && cursorOn && (
           <rect
+            ref={cursorRef}
             data-censor-brush
-            x={(cursorCell.gx - c.brush) * GRID}
-            y={(cursorCell.gy - c.brush) * GRID}
+            x={-side}
+            y={-side}
             width={side}
             height={side}
             fill={erasing ? "rgba(255,255,255,0.14)" : "rgba(255,64,96,0.22)"}

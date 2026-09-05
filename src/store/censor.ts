@@ -197,6 +197,8 @@ type S = Saved & {
   paint: Record<string, Grid>;
   /** 지금 그림의 되돌리기 더미 — 한 걸음이 한 획이다. 그림을 넘기면 비운다 */
   undos: Uint8Array[];
+  /** 긋는 동안만 — 획 시작 전의 칸 (되돌리기 스냅샷과 같은 배열). 무대가 이번 획의 델타를 뽑는 근거 */
+  strokeBase: Uint8Array | null;
   sizes: Record<string, { w: number; h: number }>;
   /** 지금 무대에 그릴 원본 주소 (떨군 그림은 서버에서 받아 온 data URL) */
   src: string | null;
@@ -273,6 +275,7 @@ export const useCensor = create<S>((set, get) => ({
   boxes: {},
   paint: {},
   undos: [],
+  strokeBase: null,
   sizes: {},
   src: null,
   renderer: null,
@@ -631,7 +634,8 @@ export const useCensor = create<S>((set, get) => ({
     const g = get().curGrid();
     if (!g) return false;
     // ★한 획이 한 걸음 — 긋기 **전에** 지금 칸을 얼려 둔다 (인페인트 마스크와 같다)
-    set({ undos: [...get().undos.slice(-(UNDO_MAX - 1)), new Uint8Array(g.cells)], editing: true });
+    const snap = new Uint8Array(g.cells);
+    set({ undos: [...get().undos.slice(-(UNDO_MAX - 1)), snap], strokeBase: snap, editing: true });
     return true;
   },
 
@@ -649,7 +653,7 @@ export const useCensor = create<S>((set, get) => ({
 
   strokeEnd() {
     // 손을 떼면 덮개를 다시 진하게, 그리고 제 해상도로 한 번 더 굽게 (`rev`)
-    set({ editing: false, rev: get().rev + 1 });
+    set({ editing: false, strokeBase: null, rev: get().rev + 1 });
   },
 
   eraseBlob(cell) {

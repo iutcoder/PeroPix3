@@ -173,6 +173,18 @@ export function outlinePath(g: Grid) {
   return parts.join("");
 }
 
+/** 지금 격자에서 `base`(획 시작 전 칸)에는 없던 칸만 남긴 격자 — **이번 획이 새로 칠한 것**.
+ *  ★★사용자 제보 2026-09-05: 조각 300개 덩어리에 붓을 대면 그리는 동안 렉. 끄는 동안 매 프레임
+ *    덩어리 전체를 다시 굽던 것을, 획 시작 전 그림은 구워 둔 그대로 두고 **이 델타만** 작은
+ *    구름으로 얹는 방식으로 바꿨다 (`CensorStage.paint` · `censorRender.draw` 의 `overlay`).
+ *    지우개 획은 얹을 수 없으므로 델타를 안 만든다 (부르는 쪽이 가른다). */
+export function strokeDelta(g: Grid, base: Uint8Array): Grid {
+  const out = makeGrid(g.w, g.h);
+  const n = Math.min(g.cells.length, base.length);
+  for (let i = 0; i < n; i++) if (g.cells[i] && !base[i]) out.cells[i] = g.cells[i];
+  return out;
+}
+
 /** 칠한 칸 전부를 한 방식으로 (검열 방식 단추가 「지금 있는 것 전부」에 걸리는 규칙) */
 export function remap(g: Grid, v: number) {
   for (let i = 0; i < g.cells.length; i++) if (g.cells[i]) g.cells[i] = v;
