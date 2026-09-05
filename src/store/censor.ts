@@ -3,7 +3,7 @@ import { t } from "../i18n";
 import { api, backendUrl } from "../lib/backend";
 import { CensorRenderer, type CoverSettings, type RenderBox } from "../lib/censorRender.ts";
 import {
-  burnBoxes, isEmpty, makeGrid, methodIndex, remap, stamp, stroke, toRenderBoxes, type Grid,
+  burnBoxes, floodErase, isEmpty, makeGrid, methodIndex, remap, stamp, stroke, toRenderBoxes, type Grid,
 } from "../lib/censorMask.ts";
 import { fileMgrImg } from "../lib/imgUrl";
 import type { Dropped } from "../lib/dropImages";
@@ -249,6 +249,8 @@ type S = Saved & {
   /** 붓이 지나는 칸. `last` 가 있으면 거기서 이어 긋는다. ★다시 그리지 않는다 — 무대가 그 자리에서 그린다 */
   strokeAt: (cell: { gx: number; gy: number }, last: { gx: number; gy: number } | null, erase: boolean) => void;
   strokeEnd: () => void;
+  /** 그 칸과 이어진 덩어리를 통째로 지운다 (우클릭). 한 걸음으로 되돌린다 */
+  eraseBlob: (cell: { gx: number; gy: number }) => void;
   undoPaint: () => void;
   clearPaint: () => void;
   /** 검열 방식을 바꾼다 — ★**검열 중·후에는 칠한 칸 전부**에 건다 */
@@ -645,6 +647,15 @@ export const useCensor = create<S>((set, get) => ({
   strokeEnd() {
     // 손을 떼면 덮개를 다시 진하게, 그리고 제 해상도로 한 번 더 굽게 (`rev`)
     set({ editing: false, rev: get().rev + 1 });
+  },
+
+  eraseBlob(cell) {
+    const s = get();
+    const g = s.curGrid();
+    if (!g || !g.cells[cell.gy * g.cols + cell.gx]) return;
+    s.strokeBegin();
+    floodErase(g, cell.gx, cell.gy);
+    s.strokeEnd();
   },
 
   undoPaint() {

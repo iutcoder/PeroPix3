@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { coverOf, useCensor, passes, type Box } from "../../store/censor";
-import { GRID, cellAt, toRenderBoxes } from "../../lib/censorMask";
+import { GRID, cellAt, outlinePath, toRenderBoxes } from "../../lib/censorMask";
 import { hitBox } from "../../lib/censorBox";
 
 /** 무대. 그림 한 장과 그 위의 덮개 (v2 `censorPreviewCanvas` + `censorOverlayCanvas`).
@@ -39,6 +39,8 @@ export function CensorStage() {
   const strokeRef = useRef<{ last: { gx: number; gy: number } | null; erase: boolean } | null>(null);
 
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  /** 긋는 동안 보이는 칠한 칸의 윤곽 (`outlinePath`). ★ref 로 `d` 를 바로 쓴다 — 긋는 중엔 리액트가 안 돈다 */
+  const outlineRef = useRef<SVGPathElement | null>(null);
 
   /** 덮개를 **지금 당장** 다시 그린다.
    *
@@ -59,6 +61,10 @@ export function CensorStage() {
       if (g) g.clearRect(0, 0, cv.width, cv.height);
       return;
     }
+    /* ★★긋는 동안만 **칠한 칸의 윤곽**을 얹는다 (사용자 지시 2026-09-05: *"그리는 중에는 박스
+       경계선이 보이게 — 어떻게 칠해서 연결되고 있는지 확인할 수 있게"*). 구름은 이어진 칸을
+       한 덩이로 뭉개므로, 어디가 붙었고 어디가 떨어졌는지는 이 선이 말해 준다. */
+    outlineRef.current?.setAttribute("d", st.editing && st.paint[cur.id] ? outlinePath(st.paint[cur.id]) : "");
     const dpr = Math.min(2, window.devicePixelRatio || 1);
     const shown = el.clientWidth;
     if (!shown) return;
@@ -121,12 +127,19 @@ export function CensorStage() {
       if (i >= 0) c.toggleBox(i);
       return;
     }
-    // ★오른쪽 단추는 지우개다 — 도구를 바꾸지 않고도 지울 수 있어야 한다 (박스 시절의 우클릭 삭제 자리)
-    const erase = c.tool === "erase" || e.button === 2;
-    if (e.button !== 0 && e.button !== 2) return;
     const cell = cellOf(e);
     if (!cell) return;
     const st = useCensor.getState();
+    /* ★★오른쪽 단추는 **이어진 덩어리 삭제**다 (사용자 지시 2026-09-05: *"우클릭을 기존처럼 박스
+       전체삭제로. 연결되어 있는 것 기준으로 모두 지움"*). 박스 시절의 우클릭 삭제 자리 —
+       붓에서 「박스」에 해당하는 것이 이어진 덩어리다. 끌지 않는다 (한 번 눌러 한 덩어리). */
+    if (e.button === 2) {
+      st.eraseBlob(cell);
+      paint();
+      return;
+    }
+    if (e.button !== 0) return;
+    const erase = c.tool === "erase";
     if (!st.strokeBegin()) return;
     (e.currentTarget as Element).setPointerCapture(e.pointerId);
     strokeRef.current = { last: cell, erase };
@@ -223,9 +236,19 @@ export function CensorStage() {
         onPointerUp={up}
         onPointerCancel={up}
         onPointerLeave={() => setCursorCell(null)}
-        // ★우클릭 메뉴를 막는다 — 오른쪽 단추는 지우개다
+        // ★우클릭 메뉴를 막는다 — 오른쪽 단추는 이어진 덩어리 삭제다
         onContextMenu={(e) => e.preventDefault()}
       >
+        {editable && (
+          <path
+            ref={outlineRef}
+            data-censor-outline
+            fill="none"
+            stroke="rgba(255,64,96,0.95)"
+            strokeWidth={1.5 / scale}
+            style={{ pointerEvents: "none" }}
+          />
+        )}
         {!editable && shown.map(({ b, i }) => (
           <BoxShape key={i} b={b} hot={hover === i} ok={passes(b, c.labelConf, c.conf)} scale={scale} />
         ))}

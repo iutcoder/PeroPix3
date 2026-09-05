@@ -227,8 +227,9 @@ export function CensorSide() {
               </Line>
             </>
           )}
+          {/* ★「범위」— 음수면 합집합을 깎는다 (사용자 지시 2026-09-05: "넓히기를 음수도 가능하게. 이름을 범위로") */}
           <Line label={t("censor.expand")}>
-            <input type="range" min={0} max={50} value={c.expand}
+            <input type="range" data-censor-expand min={-50} max={50} value={c.expand}
               onChange={(e) => c.tune({ expand: Number(e.target.value) }, "draw")} style={{ flex: 1 }} />
             <span style={num}>{c.expand}</span>
           </Line>

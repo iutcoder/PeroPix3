@@ -116,6 +116,62 @@ export function stroke(
   }
 }
 
+/** 이 칸과 **이어진 칠한 칸 전부**를 지운다 (네 방향, 방식은 안 가린다). 지운 칸 수를 돌려준다.
+ *  ★★사용자 지시 2026-09-05: *"우클릭을 기존처럼 박스 전체삭제로. 연결되어 있는 것 기준으로 모두 지움"*.
+ *    박스 시절의 우클릭 삭제 자리다 — 붓에서 「박스」에 해당하는 것이 이어진 덩어리다. */
+export function floodErase(g: Grid, gx: number, gy: number) {
+  if (gx < 0 || gy < 0 || gx >= g.cols || gy >= g.rows) return 0;
+  if (!g.cells[gy * g.cols + gx]) return 0;
+  const stack = [gy * g.cols + gx];
+  let n = 0;
+  while (stack.length) {
+    const i = stack.pop()!;
+    if (!g.cells[i]) continue;
+    g.cells[i] = 0;
+    n++;
+    const x = i % g.cols, y = (i - x) / g.cols;
+    if (x > 0 && g.cells[i - 1]) stack.push(i - 1);
+    if (x < g.cols - 1 && g.cells[i + 1]) stack.push(i + 1);
+    if (y > 0 && g.cells[i - g.cols]) stack.push(i - g.cols);
+    if (y < g.rows - 1 && g.cells[i + g.cols]) stack.push(i + g.cols);
+  }
+  return n;
+}
+
+/** 칠한 칸의 **윤곽선** — SVG 경로(`d`), 그림 픽셀 좌표. 비어 있는 이웃과 맞닿은 변만 긋는다.
+ *  ★★사용자 지시 2026-09-05: *"그리는 중에는 박스 경계선이 보이게 (어떻게 칠해서 연결되고
+ *    있는지 확인할 수 있게)"*. 이어진 칸은 한 윤곽이 되므로, 어디가 붙었고 어디가 떨어졌는지
+ *    구름 아래에서도 보인다. 같은 줄의 이어진 변은 한 선분으로 합친다 (경로가 짧아진다). */
+export function outlinePath(g: Grid) {
+  const { cols, rows, cells } = g;
+  const at = (x: number, y: number) => x >= 0 && y >= 0 && x < cols && y < rows && cells[y * cols + x] !== 0;
+  const parts: string[] = [];
+  // 가로변 — 위·아래
+  for (let y = 0; y <= rows; y++) {
+    for (const dir of [-1, 1] as const) {
+      let start = -1;
+      for (let x = 0; x <= cols; x++) {
+        // 이 세로 위치 y 에서, dir<0 이면 「칸 (x,y) 의 윗변」, dir>0 이면 「칸 (x,y-1) 의 아랫변」
+        const on = x < cols && (dir < 0 ? at(x, y) && !at(x, y - 1) : at(x, y - 1) && !at(x, y));
+        if (on && start < 0) start = x;
+        if (!on && start >= 0) { parts.push(`M${start * GRID} ${y * GRID}H${x * GRID}`); start = -1; }
+      }
+    }
+  }
+  // 세로변 — 왼쪽·오른쪽
+  for (let x = 0; x <= cols; x++) {
+    for (const dir of [-1, 1] as const) {
+      let start = -1;
+      for (let y = 0; y <= rows; y++) {
+        const on = y < rows && (dir < 0 ? at(x, y) && !at(x - 1, y) : at(x - 1, y) && !at(x, y));
+        if (on && start < 0) start = y;
+        if (!on && start >= 0) { parts.push(`M${x * GRID} ${start * GRID}V${y * GRID}`); start = -1; }
+      }
+    }
+  }
+  return parts.join("");
+}
+
 /** 칠한 칸 전부를 한 방식으로 (검열 방식 단추가 「지금 있는 것 전부」에 걸리는 규칙) */
 export function remap(g: Grid, v: number) {
   for (let i = 0; i < g.cells.length; i++) if (g.cells[i]) g.cells[i] = v;

@@ -62,6 +62,36 @@ const c2d = (w: number, h: number) => {
   return cv;
 };
 
+/** 덮임 값(0..255, `stride` 간격)을 **반지름 `r` 의 정사각 창 최소값**으로 — 침식.
+ *
+ *  ★★음수 「범위」(사용자 지시 2026-09-05: *"넓히기를 음수도 가능하게"*)는 **합집합을** 깎는다.
+ *    사각형마다 깎으면 겹쳐 덮은 사각형(`rectsOf`)이 만나는 자리마다 양쪽이 물러나 **덩어리
+ *    안쪽에 틈**이 생긴다. 그래서 양수는 v2 대로 사각형마다 넓히고, 음수는 다 모은 뒤 한 번 깎는다.
+ *  가로·세로 두 번의 1차원 최소값이라 반지름과 무관하게 픽셀당 상수 비용이다 (van Herk). */
+export function erodeAlpha(a: Uint8Array | Uint8ClampedArray, W: number, H: number, r: number, stride = 1, offset = 0) {
+  const R = Math.round(r);
+  if (R <= 0) return;
+  const k = 2 * R + 1;
+  const n = Math.max(W, H);
+  const tmp = new Uint8Array(n + 2 * R), f = new Uint8Array(n + 2 * R), b = new Uint8Array(n + 2 * R);
+  const pass = (len: number, get: (i: number) => number, put: (i: number, v: number) => void) => {
+    // 양 끝은 밖을 「0」으로 본다 — 그림 끝에서도 깎인다 (덮개가 끝에 붙어 있으면 그만큼 물러난다)
+    const m = len + 2 * R;
+    tmp.fill(0, 0, m);
+    for (let i = 0; i < len; i++) tmp[R + i] = get(i);
+    for (let i = 0; i < m; i++) f[i] = i % k === 0 ? tmp[i] : Math.min(f[i - 1], tmp[i]);
+    for (let i = m - 1; i >= 0; i--) b[i] = (i % k === k - 1 || i === m - 1) ? tmp[i] : Math.min(b[i + 1], tmp[i]);
+    for (let i = 0; i < len; i++) put(i, Math.min(b[i], f[i + k - 1]));
+  };
+  for (let y = 0; y < H; y++) {
+    const row = y * W;
+    pass(W, (x) => a[(row + x) * stride + offset], (x, v) => { a[(row + x) * stride + offset] = v; });
+  }
+  for (let x = 0; x < W; x++) {
+    pass(H, (y) => a[(y * W + x) * stride + offset], (y, v) => { a[(y * W + x) * stride + offset] = v; });
+  }
+}
+
 /** 그림 한 장에 딸린 렌더러. 재료 캐시를 들고 있으므로 **그림마다 하나** 만든다. */
 export class CensorRenderer {
   private src: Src;
@@ -196,7 +226,9 @@ export class CensorRenderer {
     ctx: CanvasRenderingContext2D, how: string, list: RenderBox[],
     s: CoverSettings, scale: number, W: number, H: number,
   ) {
-    const expand = s.expand * scale;
+    // ★「범위」— 양수는 사각형마다 넓히고(v2), 음수는 마스크를 다 그린 뒤 합집합을 깎는다 (`erodeAlpha`)
+    const expand = Math.max(0, s.expand) * scale;
+    const shrink = Math.max(0, -s.expand) * scale;
     const feather = s.feather * scale;
     /* ★★그림 가장자리에 붙은 박스가 **끝에서 옅어지던 결함** (유저 제보 2026-09-02: 흰색 검열이
        좌·우·상단 가장자리에서 제대로 안 됨). 캔버스 `blur` 필터는 캔버스 **밖을 투명**으로
@@ -232,6 +264,11 @@ export class CensorRenderer {
       this.path(mg, b, expand, scale);
       mg.fill();
       if (feather > 0) mg.stroke();
+    }
+    if (shrink >= 0.5) {
+      const img = mg.getImageData(0, 0, W, H);
+      erodeAlpha(img.data, W, H, shrink, 4, 3);
+      mg.putImageData(img, 0, 0);
     }
 
     // 여백을 두른 판 — 가운데에 마스크, 둘레에는 가장자리 한 줄을 늘려 깐다
@@ -284,14 +321,14 @@ export class CensorRenderer {
   /** 박스의 구름 배율 (5% 버킷). ★**원본 픽셀의 짧은 변**으로 정한다 (화면 배율이 아니라) — 확대해도 구름이 안 변한다 */
   private steamScale(b: RenderBox, s: CoverSettings) {
     const [x1, y1, x2, y2] = b.box;
-    return bucketScale(cloudScale(Math.min(x2 - x1, y2 - y1) + s.expand * 2));
+    return bucketScale(cloudScale(Math.min(x2 - x1, y2 - y1) + Math.max(0, s.expand) * 2));
   }
 
   /** `shrink` 는 화면 픽셀 → 작업 격자 픽셀의 비 (`drawSteam` 의 k) — 판은 그 격자에 그려진다 */
   private steamPlate(b: RenderBox, s: CoverSettings, scale: number, shrink: number): Plate {
     const [x1, y1, x2, y2] = b.box;
-    const w = (x2 - x1 + s.expand * 2) * scale;
-    const h = (y2 - y1 + s.expand * 2) * scale;
+    const w = (x2 - x1 + Math.max(0, s.expand) * 2) * scale;
+    const h = (y2 - y1 + Math.max(0, s.expand) * 2) * scale;
     const k = this.steamScale(b, s);
     /* ★★판 해상도는 **그려질 크기**에 맞춘다 (사용자 지적 2026-09-05: *"브러시처럼 쭉 그으면
        앱이 정지된 수준"*). 붓 조각은 화면에서 수십 px 로 그려지는데 640px 판을 40ms 씩 굽고
@@ -344,8 +381,9 @@ export class CensorRenderer {
         b,
         cx: ((x1 + x2) / 2) * scale,
         cy: ((y1 + y2) / 2) * scale,
-        w: (x2 - x1 + s.expand * 2) * scale,
-        h: (y2 - y1 + s.expand * 2) * scale,
+        // ★음수 「범위」는 여기서 안 쓴다 — 다 모은 덮임을 깎는다 (아래 `erodeAlpha`)
+        w: (x2 - x1 + Math.max(0, s.expand) * 2) * scale,
+        h: (y2 - y1 + Math.max(0, s.expand) * 2) * scale,
         rot: b.rotation ?? 0,
         span: spanOf(this.steamScale(b, s)),
       };
@@ -437,6 +475,9 @@ export class CensorRenderer {
           }
         }
       }
+
+      // ★음수 「범위」— 모은 덮임을 격자 단위로 깎는다 (화면 px → 격자 px 는 k)
+      if (s.expand < 0) erodeAlpha(cover, gw, gh, -s.expand * scale * k);
 
       const cv = c2d(gw, gh);
       const g = cv.getContext("2d")!;
