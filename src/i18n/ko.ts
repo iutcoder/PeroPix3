@@ -774,8 +774,6 @@ export const ko: Dict = {
     tabAfter: "검열 후",
     model: "모델",
     modelHint: "큰 모델일수록 잘 찾고 느립니다.",
-    pickImage: "왼쪽에서 그림을 고르거나 여기에 떨구세요",
-    found: "{n}곳",
     targets: "찾을 것",
     noClasses: "모델을 고르면 찾을 것이 뜹니다.",
     needTarget: "찾을 것을 하나 이상 고르세요.",
@@ -827,8 +825,6 @@ export const ko: Dict = {
     scanning: "찾는 중 {n} / {total}",
     scanningOne: "찾는 중",
     saving: "저장 중 {n} / {total}",
-    hintBefore: "박스를 누르면 끄고 켭니다.",
-    hintEdit: "끌어 옮기고, 우클릭으로 지웁니다.",
   },
 
   act: {

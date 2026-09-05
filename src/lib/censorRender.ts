@@ -92,6 +92,11 @@ export function erodeAlpha(a: Uint8Array | Uint8ClampedArray, W: number, H: numb
   }
 }
 
+/** 박스별 v2 무늬 판 — 씨앗·부드럽게·비율·배율·해상도에만 매인다. ★그림과 무관하므로 **렌더러가
+ *  아니라 모듈**이 든다 — 그림을 넘겨 렌더러가 새로 생겨도 판은 그대로 쓴다. 개수만 막는다. */
+const plates = new Map<string, Plate>();
+const PLATES_MAX = 256;
+
 /** 그림 한 장에 딸린 렌더러. 재료 캐시를 들고 있으므로 **그림마다 하나** 만든다. */
 export class CensorRenderer {
   private src: Src;
@@ -102,8 +107,6 @@ export class CensorRenderer {
   /** 재료 — 그림 전체를 덮은 한 장. 열쇠는 `방식|수치|그릴 크기` */
   private layers = new Map<string, HTMLCanvasElement>();
   /** 구운 구름 한 장 — 열쇠는 **모양과 설정**이다 (`steamKey`) */
-  /** 박스별 v2 무늬 판 — 씨앗·부드럽게·비율·배율에만 매인다 (크기와 무관하므로 오래 산다) */
-  private plates = new Map<string, Plate>();
   private steamCache: { key: string; cv: HTMLCanvasElement; x: number; y: number; w: number; h: number } | null = null;
   /** 매 프레임 새로 만들지 않으려고 들고 있는 석 장 (모양 · 여백을 두른 모양 · 오려낸 재료) */
   private maskCv: HTMLCanvasElement | null = null;
@@ -324,25 +327,28 @@ export class CensorRenderer {
     return bucketScale(cloudScale(Math.min(x2 - x1, y2 - y1) + Math.max(0, s.expand) * 2));
   }
 
-  /** `shrink` 는 화면 픽셀 → 작업 격자 픽셀의 비 (`drawSteam` 의 k) — 판은 그 격자에 그려진다 */
-  private steamPlate(b: RenderBox, s: CoverSettings, scale: number, shrink: number): Plate {
+  private steamPlate(b: RenderBox, s: CoverSettings, scale: number): Plate {
     const [x1, y1, x2, y2] = b.box;
     const w = (x2 - x1 + Math.max(0, s.expand) * 2) * scale;
     const h = (y2 - y1 + Math.max(0, s.expand) * 2) * scale;
     const k = this.steamScale(b, s);
     /* ★★판 해상도는 **그려질 크기**에 맞춘다 (사용자 지적 2026-09-05: *"브러시처럼 쭉 그으면
        앱이 정지된 수준"*). 붓 조각은 화면에서 수십 px 로 그려지는데 640px 판을 40ms 씩 굽고
-       있었다 — 획이 박스에 닿으면 조각이 수십 개라 프레임당 초 단위였다. 세 단으로 뭉갠다
-       (128 · 256 · 640) — 열쇠에 들어가므로 같은 조각이 커지면 그때 큰 판을 새로 굽는다.
-       ★그려질 크기는 화면이 아니라 **작업 격자**(긴 변 340, 끄는 동안 170)에서의 크기다 —
-         판은 격자에만 읽히므로 화면 크기로 고르면 헛되이 크게 굽는다 (덮기 실측 2026-09-05). */
-    const need = Math.max(w, h) * spanOf(k) * shrink;
-    const res = need <= 100 ? 128 : need <= 220 ? 256 : 640;
+       있었다 — 획이 박스에 닿으면 조각이 수십 개라 프레임당 초 단위였다. 두 단으로 뭉갠다 (128 · 256).
+       ★★열쇠는 **획과 무관해야 한다** (사용자 제보 2026-09-05: *"손을 떼서 확정되는 순간 0.5초
+         멈춤"*, 계측: 손을 뗀 굽기의 판 207ms·125ms, 나머지는 30ms). 전에는 작업 격자에서의
+         크기(구름 전체 경계 상자에 따라 변하는 k 를 곱한 것)로 골라서, 획을 그을 때마다 상자가
+         변해 **같은 조각의 판이 다른 해상도로 다시 구워졌다.** 그래서 화면 크기만 본다.
+       ★640 은 없앴다 — 구름은 작업 격자(긴 변 340)에만 그려지므로 256 을 1.3배 늘려 읽어도
+         노이즈 파장(15px 이상)이 다 살고, 640 판 하나는 브라우저에서 40ms 다. */
+    const need = Math.max(w, h) * spanOf(k);
+    const res = need <= 100 ? 128 : 256;
     const key = `${b.seed}|${s.feather}|${bucketAspect(w, h)}|${k}|${res}`;
-    let p = this.plates.get(key);
+    let p = plates.get(key);
     if (!p) {
       p = plate({ seed: b.seed, feather: s.feather, aspect: bucketAspect(w, h), scale: k, res });
-      this.plates.set(key, p);
+      if (plates.size >= PLATES_MAX) plates.delete(plates.keys().next().value!);
+      plates.set(key, p);
     }
     return p;
   }
@@ -412,6 +418,10 @@ export class CensorRenderer {
 
     let baked = this.steamCache && this.steamCache.key === key ? this.steamCache : null;
     if (!baked) {
+      // 계측 — 제 해상도(손을 뗀 뒤) 굽기만 콘솔에 남긴다 (사용자 제보 2026-09-05: 그 순간 0.5초 멈춤)
+      const tm = quick ? null : { t: performance.now(), plates: 0, lum: 0, acc: 0, rgba: 0, newPlates: 0 };
+      const lap = () => { const n = performance.now(); const d = n - tm!.t; tm!.t = n; return d; };
+      const platesBefore = plates.size;
       const sx = gw / W, sy = gh / H;
       const cover = new Uint8Array(gw * gh);
 
@@ -433,10 +443,12 @@ export class CensorRenderer {
           }
         }
       }
+      if (tm) tm.lum = lap();
 
       for (const it of items) {
-        // ★판 해상도는 **격자에 그려질 크기**(k 를 곱한 것)로 고른다 — 판은 격자에서만 읽힌다
-        const p = this.steamPlate(it.b, s, scale, k);
+        if (tm) tm.acc += lap();
+        const p = this.steamPlate(it.b, s, scale);
+        if (tm) tm.plates += lap();
         // 이 판이 격자에서 차지하는 크기·자리
         const dw = it.w * p.span * sx, dh = it.h * p.span * sy;
         const cx = (it.cx - x0) * sx, cy = (it.cy - y0) * sy;
@@ -476,6 +488,7 @@ export class CensorRenderer {
         }
       }
 
+      if (tm) tm.acc += lap();
       // ★음수 「범위」— 모은 덮임을 격자 단위로 깎는다 (화면 px → 격자 px 는 k)
       if (s.expand < 0) erodeAlpha(cover, gw, gh, -s.expand * scale * k);
 
@@ -486,6 +499,10 @@ export class CensorRenderer {
       g.putImageData(img, 0, 0);
       baked = { key, cv, x: x0, y: y0, w: W, h: H };
       this.steamCache = baked;
+      if (tm) {
+        tm.rgba = lap();
+        console.debug(`[censor] 스팀 제 해상도 굽기: 조각 ${items.length}, 격자 ${gw}×${gh}, 무늬 ${tm.lum.toFixed(0)}ms, 판 ${tm.plates.toFixed(0)}ms (새 판 ${plates.size - platesBefore}), 누적 ${tm.acc.toFixed(0)}ms, 색 입히기 ${tm.rgba.toFixed(0)}ms`);
+      }
     }
     ctx.drawImage(baked.cv, baked.x, baked.y, baked.w, baked.h);
   }

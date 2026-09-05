@@ -755,8 +755,6 @@ export const en = {
     tabAfter: "After",
     model: "Model",
     modelHint: "Bigger models find more and run slower.",
-    pickImage: "Pick an image on the left, or drop one here",
-    found: "{n} spots",
     targets: "Look for",
     noClasses: "Pick a model to see what it can find.",
     needTarget: "Pick at least one thing to find.",
@@ -808,8 +806,6 @@ export const en = {
     scanning: "Scanning {n} / {total}",
     scanningOne: "Scanning",
     saving: "Saving {n} / {total}",
-    hintBefore: "Click a box to toggle it.",
-    hintEdit: "Drag to move, right click to delete.",
   },
 
   act: {

@@ -487,21 +487,9 @@ export function Censor() {
               </span>
             )}
           </div>
-
-          <div style={{ display: "flex", alignItems: "center", gap: "var(--sp-3)", minHeight: 18 }}>
-            <span style={{ fontSize: "var(--text-2xs)", color: "var(--ink-dim)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-              {c.cur()?.name ?? t("censor.pickImage")}
-            </span>
-            <span style={{ flex: 1 }} />
-            {!!c.curBoxes().length && (
-              <span style={{ fontSize: "var(--text-2xs)", color: "var(--ink-faint)" }}>
-                {t("censor.found", { n: c.curBoxes().filter((b) => !b.off).length })}
-              </span>
-            )}
-            <span style={{ fontSize: "var(--text-2xs)", color: "var(--ink-faint)" }}>
-              {t(c.tab === "before" ? "censor.hintBefore" : "censor.hintEdit")}
-            </span>
-          </div>
+          {/* ★무대 아래 파일명·찾은 수·안내 줄은 걷었다 (사용자 지시 2026-09-05: "검열 페이지에서
+              하단의 파일명과 안내 라인 필요없음"). 그 글자를 끌어 고르면 선택 상태가 남아 붓이
+              한 틱 만에 끊기던 것도 함께 사라진다. */}
         </div>
 
         {/* ── 오른쪽: 무엇을 찾고 어떻게 가릴까 ── */}

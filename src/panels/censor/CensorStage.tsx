@@ -37,6 +37,9 @@ export function CensorStage() {
   const [cursorCell, setCursorCell] = useState<{ gx: number; gy: number } | null>(null);
   /** 긋는 중 — 지난 칸과 지우개 여부. ★ref 다: pointermove 는 리액트 렌더를 안 기다린다 */
   const strokeRef = useRef<{ last: { gx: number; gy: number } | null; erase: boolean } | null>(null);
+  /** 손을 뗀 시각 — 제 해상도 덮개가 완성될 때까지 걸린 시간을 콘솔에 남긴다 (사용자 제보 2026-09-05:
+   *  스팀에서 손을 떼는 순간 0.5초 멈춤. 재현이 안 되어 실제 앱에서 잰다) */
+  const upAt = useRef(0);
 
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   /** 긋는 동안 보이는 칠한 칸의 윤곽 (`outlinePath`). ★ref 로 `d` 를 바로 쓴다 — 긋는 중엔 리액트가 안 돈다 */
@@ -71,7 +74,13 @@ export function CensorStage() {
     /* ★끄는 동안에는 **낮은 해상도로** 굽는다 (`censorRender` 의 `STEAM_WORK_QUICK`).
        스팀은 모양이 바뀔 때마다 다시 만들어야 해서, 제 해상도로 태우면 손이 걸린다.
        손을 떼면 `editing` 이 꺼지고 이 함수가 한 번 더 돌아 제 해상도로 다시 굽는다. */
+    const t0 = performance.now();
     r.draw(cv, toRenderBoxes(st.paint[cur.id]), coverOf(st), (shown * dpr) / sz.w, false, st.editing);
+    if (upAt.current && !st.editing) {
+      const now = performance.now();
+      console.debug(`[censor] 손 뗌 → 덮개 완료 ${(now - upAt.current).toFixed(0)}ms (그리기 ${(now - t0).toFixed(0)}ms, 캔버스 ${cv.width}×${cv.height})`);
+      upAt.current = 0;
+    }
   }, []);
 
   /** 그림 좌표 ↔ 화면 좌표의 배율 + **판에 맞춘 크기**.
@@ -127,6 +136,8 @@ export function CensorStage() {
       if (i >= 0) c.toggleBox(i);
       return;
     }
+    // ★기본 동작(글자 선택·선택된 글자 끌기)을 막는다 — 선택이 남아 있으면 붓이 한 틱 만에 끊겼다
+    e.preventDefault();
     const cell = cellOf(e);
     if (!cell) return;
     const st = useCensor.getState();
@@ -169,6 +180,7 @@ export function CensorStage() {
   const up = () => {
     if (!strokeRef.current) return;
     strokeRef.current = null;
+    upAt.current = performance.now();
     // ★손을 떼면 덮개를 다시 진하게 (「들춰보기」는 끄는 동안만이다) — 그리고 제 해상도로 다시 굽는다
     useCensor.getState().strokeEnd();
   };
@@ -197,6 +209,7 @@ export function CensorStage() {
         height: fitted ? fitted.h : undefined,
         maxWidth: "100%",
         maxHeight: "100%",
+        userSelect: "none",
       }}
     >
       {/* ★★그림이 아직 없으면(탭 전환·목록 비움 사이) `<img>` 를 **아예 두지 않는다** (사용자 지적

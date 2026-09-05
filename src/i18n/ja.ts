@@ -753,8 +753,6 @@ export const ja: Dict = {
     tabAfter: "検閲後",
     model: "モデル",
     modelHint: "大きいモデルほどよく見つかり、遅くなります。",
-    pickImage: "左から画像を選ぶか、ここにドロップしてください",
-    found: "{n}箇所",
     targets: "検出対象",
     noClasses: "モデルを選ぶと検出対象が表示されます。",
     needTarget: "検出対象を一つ以上選んでください。",
@@ -806,8 +804,6 @@ export const ja: Dict = {
     scanning: "検出中 {n} / {total}",
     scanningOne: "検出中",
     saving: "保存中 {n} / {total}",
-    hintBefore: "ボックスをクリックで切替。",
-    hintEdit: "ドラッグで移動、右クリックで削除。",
   },
 
   act: {
