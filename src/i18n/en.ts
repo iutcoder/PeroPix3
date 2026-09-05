@@ -790,6 +790,8 @@ export const en = {
     k_wheel: "Next image",
     k_rightKey: "Right click",
     k_right: "Delete the connected blob",
+    shapeSquare: "Square",
+    shapeRound: "Round",
     dest: "Save to",
     destBeside: "Next to the original",
     newFolder: "New folder",

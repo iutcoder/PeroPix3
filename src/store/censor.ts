@@ -1,9 +1,10 @@
 import { create } from "zustand";
 import { t } from "../i18n";
 import { api, backendUrl } from "../lib/backend";
-import { CensorRenderer, type CoverSettings, type RenderBox } from "../lib/censorRender.ts";
+import { CensorRenderer, type CoverSettings, type Scene } from "../lib/censorRender.ts";
 import {
-  burnBoxes, floodErase, isEmpty, makeGrid, methodIndex, remap, stamp, stroke, toRenderBoxes, type Grid,
+  burnBoxes, clearMask, emptyRect, floodErase, isEmpty, makeMask, methodIndex, remap, restore, snapshot, stamp, stroke,
+  toRenderBoxes, type Mask, type Patch, type Rect, type Shape,
 } from "../lib/censorMask.ts";
 import { fileMgrImg } from "../lib/imgUrl";
 import type { Dropped } from "../lib/dropImages";
@@ -60,8 +61,8 @@ export type Tab = "before" | "processing" | "after";
  *  사각형 브러시로 칠하고 지우는 형태로"*). 박스를 고르고·옮기고·돌리던 도구는 걷었다 —
  *  편집 대상이 박스 목록이 아니라 **칠한 칸의 격자**(`lib/censorMask`)가 되었기 때문이다. */
 export type Tool = "brush" | "erase";
-/** 붓 반지름의 천장 (칸). 슬라이더와 Alt+휠이 같은 값을 본다 */
-export const BRUSH_MAX = 12;
+/** 붓 지름의 천장 (px). 슬라이더와 Alt+휠이 같은 값을 본다 */
+export const BRUSH_MAX = 300;
 
 /** 붓을 되돌릴 걸음 수 (인페인트 마스크와 같다) */
 const UNDO_MAX = 40;
@@ -86,8 +87,10 @@ type Saved = {
   steamAlpha: number;
   /** 붓을 끄는 동안 덮개가 옅어지는 정도 — ★모든 방식 공통 (CensorSide 의 ★★주) */
   peek: number;
-  /** 붓 반지름 (칸). 변은 `2r+1` 칸 — 인페인트 붓처럼 홀수라 가운데 칸이 있다 */
-  brush: number;
+  /** 붓 지름 (px). ★1px 단위 (사용자 지시 2026-09-05: *"8단위로만 되어서 불편. 1단위로"*) */
+  brushPx: number;
+  /** 붓 모양 — 사각·원 (사용자 지시 2026-09-05: *"원형·사각 다 있는 게 좋을 듯. 네모가 기본"*) */
+  brushShape: Shape;
   dest: string;
   /** 저장 자리 — **일괄변환과 같은 세 갈래** (사용자 지시 2026-09-04).
    *  `overwrite` 원본 자리에 · `sub` 첫 그림 아래 `output/` · `folder` 고른 폴더. */
@@ -111,8 +114,9 @@ const DEFAULTS: Saved = {
   steamBright: 100,
   steamAlpha: 100,
   peek: 30,
-  // 5×5 칸 = 40px. 젖꼭지 하나를 한두 번에 덮는 크기
-  brush: 2,
+  // 40px. 젖꼭지 하나를 한두 번에 덮는 크기
+  brushPx: 40,
+  brushShape: "square",
   dest: "",
   // ★기본은 일괄변환과 같은 `sub` — 원본을 건드리지 않는 쪽이 기본이어야 한다
   destMode: "sub",
@@ -126,6 +130,8 @@ function load(): Saved {
       // ★옛 이름에서 옮겨 온다 — 스팀 전용이던 「들춰보기」가 공통이 되면서 이름이 바뀌었다
       if (got.peek === undefined && typeof got.steamOpacity === "number") got.peek = got.steamOpacity;
       delete got.steamOpacity;
+      // ★옛 붓 반지름(칸, `brush`)은 버린다 — 지름 px(`brushPx`)와 뜻이 달라 옮길 수 없다
+      delete got.brush;
       return { ...DEFAULTS, ...got };
     }
   } catch {}
@@ -196,11 +202,14 @@ type S = Saved & {
   boxes: Record<string, Box[]>;
   /** ★★그림별 **칠한 칸의 격자** — 검열 중·후 탭의 편집 대상이자 렌더러에 나가는 것.
    *  칸은 제자리에서 바뀐다 (붓을 끄는 동안 프레임마다 새 배열을 만들지 않는다) */
-  paint: Record<string, Grid>;
-  /** 지금 그림의 되돌리기 더미 — 한 걸음이 한 획이다. 그림을 넘기면 비운다 */
-  undos: Uint8Array[];
-  /** 긋는 동안만 — 획 시작 전의 칸 (되돌리기 스냅샷과 같은 배열). 무대가 이번 획의 델타를 뽑는 근거 */
+  paint: Record<string, Mask>;
+  /** 지금 그림의 되돌리기 더미 — 한 걸음이 한 획이다. ★획이 손댄 사각형만 떠 둔다 (`Patch`). 그림을 넘기면 비운다 */
+  undos: Patch[];
+  /** 긋는 동안만 — 획 시작 전의 픽셀 전부. 무대가 이번 획의 델타를 뽑는 근거이고, 손을 떼면 손댄
+   *  사각형(`strokeDirty`)만 잘라 되돌리기 더미에 넣는다 */
   strokeBase: Uint8Array | null;
+  /** 긋는 동안 붓이 손댄 사각형 (제자리에서 자란다) */
+  strokeDirty: Rect | null;
   sizes: Record<string, { w: number; h: number }>;
   /** 지금 무대에 그릴 원본 주소 (떨군 그림은 서버에서 받아 온 data URL) */
   src: string | null;
@@ -246,15 +255,16 @@ type S = Saved & {
   curBoxes: () => Box[];
   putBoxes: (b: Box[]) => void;
   toggleBox: (i: number) => void;
-  /** 지금 그림의 격자. 없으면 만든다 (크기를 아직 모르면 null) */
-  curGrid: () => Grid | null;
-  /** 한 획의 시작 — 되돌릴 자리를 찍고 「들춰보기」를 켠다. 격자가 없으면 거짓 */
+  /** 지금 그림의 비트맵. 없으면 만든다 (크기를 아직 모르면 null) */
+  curMask: () => Mask | null;
+  /** 한 획의 시작 — 획 전 픽셀을 얼려 두고 「들춰보기」를 켠다. 비트맵이 없으면 거짓 */
   strokeBegin: () => boolean;
-  /** 붓이 지나는 칸. `last` 가 있으면 거기서 이어 긋는다. ★다시 그리지 않는다 — 무대가 그 자리에서 그린다 */
-  strokeAt: (cell: { gx: number; gy: number }, last: { gx: number; gy: number } | null, erase: boolean) => void;
+  /** 붓이 지나는 자리. `last` 가 있으면 거기서 이어 긋는다. ★다시 그리지 않는다 — 무대가 그 자리에서 그린다 */
+  strokeAt: (at: { x: number; y: number }, last: { x: number; y: number } | null, erase: boolean) => void;
+  /** 한 획의 끝 — 손댄 사각형을 되돌리기 더미에 넣고 제 해상도로 다시 그리게 한다 */
   strokeEnd: () => void;
-  /** 그 칸과 이어진 덩어리를 통째로 지운다 (우클릭). 한 걸음으로 되돌린다 */
-  eraseBlob: (cell: { gx: number; gy: number }) => void;
+  /** 그 자리와 이어진 덩어리를 통째로 지운다 (우클릭). 한 걸음으로 되돌린다 */
+  eraseBlob: (at: { x: number; y: number }) => void;
   undoPaint: () => void;
   clearPaint: () => void;
   /** 검열 방식을 바꾼다 — ★**검열 중·후에는 칠한 칸 전부**에 건다 */
@@ -278,6 +288,7 @@ export const useCensor = create<S>((set, get) => ({
   paint: {},
   undos: [],
   strokeBase: null,
+  strokeDirty: null,
   sizes: {},
   src: null,
   renderer: null,
@@ -526,7 +537,7 @@ export const useCensor = create<S>((set, get) => ({
              초기화"*). 전에는 격자가 있으면 그대로 두어 손본 것을 남겼는데, 그것이 「편집 상태가
              보존되는 문제」였다. 탐지 결과(`boxes`)만 살고 칠한 것은 여기서 버려진다. */
         const sz = sizes[im.id];
-        if (sz) paint[im.id] = burnBoxes(makeGrid(sz.w, sz.h), boxes[im.id], s.method);
+        if (sz) paint[im.id] = burnBoxes(makeMask(sz.w, sz.h), boxes[im.id], s.method);
       } catch (e) {
         boxes[im.id] = boxes[im.id] ?? [];
         set({ error: String(e) });
@@ -549,7 +560,7 @@ export const useCensor = create<S>((set, get) => ({
         /* ★★**화면이 굽는다.** 지금 보고 있지 않은 장도 여기서 원본 크기로 한 장 그린다
            (`renderOne`). 서버는 받은 바이트를 적기만 한다 — 렌더러가 한 벌이라
            보고 있던 그림과 저장본이 갈릴 수 없다. */
-        const blob = await renderOne(im, toRenderBoxes(get().paint[im.id]), coverOf(get()));
+        const blob = await renderOne(im, sceneOf(get().paint[im.id]), coverOf(get()));
         const r = await post<{ file: string; name: string }>("/api/censor/apply", {
           ...sourceOf(im),
           name: im.name,
@@ -582,13 +593,13 @@ export const useCensor = create<S>((set, get) => ({
     const s = get();
     const im = s.cur();
     if (!im || s.busy) return;
-    const boxes = toRenderBoxes(s.paint[im.id]);
-    if (!boxes.length) return set({ error: t("censor.needBox") });
+    const scene = sceneOf(s.paint[im.id]);
+    if (!scene.boxes.length) return set({ error: t("censor.needBox") });
     set({ busy: true, error: null });
     try {
       // ★지금 보고 있는 장이라 렌더러가 이미 있다. 그것으로 원본 크기 한 장을 굽는다
       const r0 = s.renderer;
-      const blob = r0 ? await r0.renderFull(boxes, coverOf(s)) : await renderOne(im, boxes, coverOf(s));
+      const blob = r0 ? await r0.renderFull(scene, coverOf(s)) : await renderOne(im, scene, coverOf(s));
       const r = await post<{ file: string; name: string }>("/api/censor/apply", {
         ...sourceOf(im),
         name: im.name,
@@ -619,7 +630,7 @@ export const useCensor = create<S>((set, get) => ({
     s.putBoxes(s.curBoxes().map((b, n) => (n === i ? { ...b, off: !b.off } : b)));
   },
 
-  curGrid() {
+  curMask() {
     const s = get();
     const im = s.cur();
     if (!im) return null;
@@ -627,64 +638,71 @@ export const useCensor = create<S>((set, get) => ({
     if (have) return have;
     const sz = s.sizes[im.id];
     if (!sz) return null;
-    const g = makeGrid(sz.w, sz.h);
-    set({ paint: { ...s.paint, [im.id]: g } });
-    return g;
+    const m = makeMask(sz.w, sz.h);
+    set({ paint: { ...s.paint, [im.id]: m } });
+    return m;
   },
 
   strokeBegin() {
-    const g = get().curGrid();
-    if (!g) return false;
-    // ★한 획이 한 걸음 — 긋기 **전에** 지금 칸을 얼려 둔다 (인페인트 마스크와 같다)
-    const snap = new Uint8Array(g.cells);
-    set({ undos: [...get().undos.slice(-(UNDO_MAX - 1)), snap], strokeBase: snap, editing: true });
+    const m = get().curMask();
+    if (!m) return false;
+    // ★한 획이 한 걸음 — 긋기 **전에** 지금 픽셀을 얼려 둔다. 손을 뗄 때 손댄 자리만 잘라 더미에 넣는다
+    set({ strokeBase: new Uint8Array(m.cells), strokeDirty: emptyRect(), editing: true });
     return true;
   },
 
-  strokeAt(cell, last, erase) {
+  strokeAt(at, last, erase) {
     const s = get();
-    const g = s.curGrid();
-    if (!g) return;
-    /* ★붓은 **지금 고른 방식**을 칸에 적는다. 그래서 방식을 바꿔 가며 칠하면 자리마다 방식이
+    const m = s.curMask();
+    if (!m) return;
+    /* ★붓은 **지금 고른 방식**을 픽셀에 적는다. 그래서 방식을 바꿔 가며 칠하면 자리마다 방식이
        다르다 — 박스 시절의 「고른 박스만 다른 방식」이 하던 일을 붓이 자연스럽게 한다. */
     const v = erase ? 0 : methodIndex(s.method);
-    if (last) stroke(g, last, cell, s.brush, v);
-    else stamp(g, cell.gx, cell.gy, s.brush, v);
-    // ★여기서 다시 그리지 않는다 — 칸은 제자리에서 바뀌었고, 무대가 `paint()` 로 그 자리에서 그린다
+    const dirty = s.strokeDirty ?? undefined;
+    if (last) stroke(m, last, at, s.brushPx, v, s.brushShape, dirty);
+    else stamp(m, at.x, at.y, s.brushPx, v, s.brushShape, dirty);
+    // ★여기서 다시 그리지 않는다 — 픽셀은 제자리에서 바뀌었고, 무대가 `paint()` 로 그 자리에서 그린다
   },
 
   strokeEnd() {
+    const s = get();
+    const m = s.curMask();
+    // ★손댄 사각형의 **획 전 픽셀**을 한 걸음으로. 아무것도 안 건드렸으면 걸음도 없다
+    const p = m && s.strokeBase && s.strokeDirty ? snapshot(m, s.strokeBase, s.strokeDirty) : null;
+    const undos = p ? [...s.undos.slice(-(UNDO_MAX - 1)), p] : s.undos;
     // 손을 떼면 덮개를 다시 진하게, 그리고 제 해상도로 한 번 더 굽게 (`rev`)
-    set({ editing: false, strokeBase: null, rev: get().rev + 1 });
+    set({ editing: false, strokeBase: null, strokeDirty: null, undos, rev: s.rev + 1 });
   },
 
-  eraseBlob(cell) {
+  eraseBlob(at) {
     const s = get();
-    const g = s.curGrid();
-    if (!g || !g.cells[cell.gy * g.cols + cell.gx]) return;
+    const m = s.curMask();
+    if (!m || !m.cells[at.y * m.w + at.x]) return;
     s.strokeBegin();
-    floodErase(g, cell.gx, cell.gy);
+    floodErase(m, at.x, at.y, get().strokeDirty ?? undefined);
     s.strokeEnd();
   },
 
   undoPaint() {
     const s = get();
-    const g = s.curGrid();
+    const m = s.curMask();
     const prev = s.undos[s.undos.length - 1];
-    if (!g || !prev || prev.length !== g.cells.length) return;
-    g.cells.set(prev);
+    if (!m || !prev || prev.x1 > m.w || prev.y1 > m.h) return;
+    restore(m, prev);
     set({ undos: s.undos.slice(0, -1) });
     s.bump();
   },
 
   clearPaint() {
     const s = get();
-    const g = s.curGrid();
-    if (!g || isEmpty(g)) return;
+    const m = s.curMask();
+    if (!m || isEmpty(m)) return;
     s.strokeBegin();
-    g.cells.fill(0);
-    set({ editing: false });
-    s.bump();
+    // ★손댄 자리 = 켜져 있던 자리 전부 (`bounds`). 되돌리면 그 사각형이 그대로 돌아온다
+    const dirty = get().strokeDirty;
+    if (dirty) Object.assign(dirty, m.bounds);
+    clearMask(m);
+    get().strokeEnd();
   },
 
   /** ★★방식을 바꾸면 **지금 칠한 칸에 전부 걸린다** (사용자 지시 2026-08-23).
@@ -706,7 +724,7 @@ export const useCensor = create<S>((set, get) => ({
       }
     } else if (s.tab === "after" && s.cur()) {
       // ★검열 후에는 **지금 그림만** — 이미 저장된 다른 장을 건드릴 이유가 없다 (v2 와 같다)
-      const g = s.curGrid();
+      const g = s.curMask();
       if (g) remap(g, methodIndex(m));
     }
     // ★검열 전 탭에서는 박스에 안 건다 — 거기 박스는 「찾은 것」이고 방식은 다음 검열의 값이다
@@ -744,10 +762,10 @@ function fillConf(cur: Record<string, number>, classes: string[], base: number) 
 
 function save(s: Saved) {
   const { model, targets, labelConf, conf, floor, method, color, expand, feather, mosaic,
-    mosaicOpacity, blur, steamBright, steamAlpha, peek, brush, dest, destMode } = s;
+    mosaicOpacity, blur, steamBright, steamAlpha, peek, brushPx, brushShape, dest, destMode } = s;
   try {
     localStorage.setItem(KEY, JSON.stringify({ model, targets, labelConf, conf, floor, method,
-      color, expand, feather, mosaic, mosaicOpacity, blur, steamBright, steamAlpha, peek, brush, dest, destMode }));
+      color, expand, feather, mosaic, mosaicOpacity, blur, steamBright, steamAlpha, peek, brushPx, brushShape, dest, destMode }));
   } catch {}
 }
 
@@ -807,9 +825,14 @@ async function loadRenderer(im: CensorImage) {
 
 /** 저장할 때 쓰는 렌더러 — 일괄 저장은 **화면에 없는 장**도 구워야 한다.
  *  ★들고 있지 않는다. 한 장 굽고 버린다 (수십 장의 비트맵을 동시에 쥐면 메모리가 는다). */
-export async function renderOne(im: CensorImage, boxes: RenderBox[], s: CoverSettings) {
+export async function renderOne(im: CensorImage, scene: Scene, s: CoverSettings) {
   const { renderer } = await loadRenderer(im);
-  return await renderer.renderFull(boxes, s);
+  return await renderer.renderFull(scene, s);
+}
+
+/** 렌더러에 줄 것 — 스팀용 사각형과 비트맵 (`censorRender.Scene`) */
+export function sceneOf(m: Mask | undefined): Scene {
+  return { boxes: toRenderBoxes(m), mask: m ?? null };
 }
 
 /** 캔버스가 구운 것을 서버가 받을 수 있는 base64 로 */

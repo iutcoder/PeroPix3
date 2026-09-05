@@ -788,6 +788,8 @@ export const ja: Dict = {
     k_wheel: "次の画像",
     k_rightKey: "右クリック",
     k_right: "つながった塊を削除",
+    shapeSquare: "四角",
+    shapeRound: "丸",
     dest: "保存先",
     destBeside: "元画像の隣",
     newFolder: "新しいフォルダ",

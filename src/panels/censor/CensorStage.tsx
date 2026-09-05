@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { coverOf, useCensor, passes, type Box } from "../../store/censor";
-import { GRID, cellAt, outlinePath, strokeDelta, toRenderBoxes } from "../../lib/censorMask";
-import type { RenderBox } from "../../lib/censorRender";
+import { brushBox, outlinePath, pixelAt, strokeDelta, toRenderBoxes } from "../../lib/censorMask";
+import type { RenderBox, Scene } from "../../lib/censorRender";
 import { hitBox } from "../../lib/censorBox";
 
 /** 무대. 그림 한 장과 그 위의 덮개 (v2 `censorPreviewCanvas` + `censorOverlayCanvas`).
@@ -39,8 +39,10 @@ export function CensorStage() {
    *  수백 번 움직임을 보내는데, 그때마다 리액트를 돌리면 스팀의 프레임 예산을 잡아먹는다 */
   const [cursorOn, setCursorOn] = useState(false);
   const cursorRef = useRef<SVGRectElement | null>(null);
-  /** 긋는 중 — 지난 칸과 지우개 여부. ★ref 다: pointermove 는 리액트 렌더를 안 기다린다 */
-  const strokeRef = useRef<{ last: { gx: number; gy: number } | null; erase: boolean; baseBoxes?: RenderBox[] } | null>(null);
+  /** 긋는 중 — 지난 자리와 지우개 여부. ★ref 다: pointermove 는 리액트 렌더를 안 기다린다 */
+  const strokeRef = useRef<{ last: { x: number; y: number } | null; erase: boolean; baseBoxes?: RenderBox[] } | null>(null);
+  /** 커서가 마지막으로 있던 자리 (그림 픽셀) — 붓 크기가 바뀌면 그 자리에 다시 맞춘다 */
+  const lastPos = useRef<{ x: number; y: number } | null>(null);
   /** 손을 뗀 시각 — 제 해상도 덮개가 완성될 때까지 걸린 시간을 콘솔에 남긴다 (사용자 제보 2026-09-05:
    *  스팀에서 손을 떼는 순간 0.5초 멈춤. 재현이 안 되어 실제 앱에서 잰다) */
   const upAt = useRef(0);
@@ -86,21 +88,19 @@ export function CensorStage() {
     // ★뒤에서 제 해상도 굽기가 끝나면 그 자리에서 다시 그린다 (스팀, 손을 뗀 뒤)
     r.onReady = paint;
     const t0 = performance.now();
-    /* ★★붓 획을 긋는 동안은 **획 시작 전 그림은 구워 둔 그대로**, 이번 획이 새로 칠한 칸만 따로 얹는다
+    /* ★★붓 획을 긋는 동안은 **획 시작 전 그림은 구워 둔 그대로**, 이번 획이 새로 칠한 자리만 따로 얹는다
        (사용자 제보 2026-09-05: 조각 300개 덩어리에서 그리는 동안 렉). 전에는 매 프레임 덩어리 전체를
        저해상도로 다시 구워 조각 수만큼 느려졌다. 획 시작 전 사각형 목록은 획 동안 안 변하므로 한 번만
        만들어 둔다 (`baseBoxes`) — 그 열쇠는 구워 둔 것과 같아 굽기가 없다. 지우개 획은 얹을 수 없어
-       전처럼 통째로 굽는다. */
-    const grid = st.paint[cur.id];
+       전처럼 통째로 굽는다. (스팀 얘기다 — 나머지 방식은 비트맵을 그대로 그려 얹을 것이 없다.) */
+    const mask = st.paint[cur.id];
     const sr = strokeRef.current;
-    let boxes: RenderBox[];
-    let overlay: RenderBox[] = [];
-    if (st.editing && sr && !sr.erase && st.strokeBase && grid && st.strokeBase.length === grid.cells.length) {
-      if (!sr.baseBoxes) sr.baseBoxes = toRenderBoxes({ ...grid, cells: st.strokeBase });
-      boxes = sr.baseBoxes;
-      overlay = toRenderBoxes(strokeDelta(grid, st.strokeBase));
-    } else boxes = toRenderBoxes(grid);
-    r.draw(cv, boxes, coverOf(st), (shown * dpr) / sz.w, false, st.editing, false, overlay);
+    let scene: Scene;
+    if (st.editing && sr && !sr.erase && st.strokeBase && mask && st.strokeBase.length === mask.cells.length) {
+      if (!sr.baseBoxes) sr.baseBoxes = toRenderBoxes({ ...mask, cells: st.strokeBase });
+      scene = { boxes: sr.baseBoxes, mask, overlay: toRenderBoxes(strokeDelta(mask, st.strokeBase, st.strokeDirty ?? undefined)), dirty: st.strokeDirty ?? undefined };
+    } else scene = { boxes: toRenderBoxes(mask), mask: mask ?? null };
+    r.draw(cv, scene, coverOf(st), (shown * dpr) / sz.w, false, st.editing, false);
     const now = performance.now();
     const ss = strokeStats.current;
     if (st.editing) {
@@ -156,11 +156,28 @@ export function CensorStage() {
     return { x: ((e.clientX - r.left) / r.width) * size.w, y: ((e.clientY - r.top) / r.height) * size.h };
   };
 
-  const cellOf = (e: { clientX: number; clientY: number }) => {
+  const posOf = (e: { clientX: number; clientY: number }) => {
     const p = toImage(e);
-    const g = useCensor.getState().curGrid();
-    return p && g ? cellAt(g, p.x, p.y) : null;
+    return p && size ? pixelAt(size, p.x, p.y) : null;
   };
+
+  /** 붓 커서를 그 자리에 놓는다 — 붓 사각형(`brushBox`)과 같은 셈. 원형이면 모서리를 지름의 반으로 둥글린다 */
+  const placeCursor = (pos: { x: number; y: number }) => {
+    const cr = cursorRef.current;
+    if (!cr) return;
+    const st = useCensor.getState();
+    const { x0, y0, d } = brushBox(pos.x, pos.y, st.brushPx);
+    cr.setAttribute("x", String(x0));
+    cr.setAttribute("y", String(y0));
+    cr.setAttribute("width", String(d));
+    cr.setAttribute("height", String(d));
+    cr.setAttribute("rx", String(st.brushShape === "round" ? d / 2 : 0));
+  };
+  // ★Alt+휠로 크기를 바꾸면 마우스가 안 움직여도 커서가 그 자리에서 다시 맞는다
+  useEffect(() => {
+    if (lastPos.current) placeCursor(lastPos.current);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [c.brushPx, c.brushShape, cursorOn]);
 
   const down = (e: React.PointerEvent) => {
     const p = toImage(e);
@@ -177,14 +194,14 @@ export function CensorStage() {
        옮기는 것은 그 `mousedown` 의 기본 동작이다 — 그래서 직전에 만진 슬라이더가 포커스를 쥔 채 남아
        Ctrl+Z 같은 단축키를 전부 삼켰다 (사용자 제보 2026-09-05). */
     (document.activeElement as HTMLElement | null)?.blur?.();
-    const cell = cellOf(e);
-    if (!cell) return;
+    const pos = posOf(e);
+    if (!pos) return;
     const st = useCensor.getState();
     /* ★★오른쪽 단추는 **이어진 덩어리 삭제**다 (사용자 지시 2026-09-05: *"우클릭을 기존처럼 박스
        전체삭제로. 연결되어 있는 것 기준으로 모두 지움"*). 박스 시절의 우클릭 삭제 자리 —
        붓에서 「박스」에 해당하는 것이 이어진 덩어리다. 끌지 않는다 (한 번 눌러 한 덩어리). */
     if (e.button === 2) {
-      st.eraseBlob(cell);
+      st.eraseBlob(pos);
       paint();
       return;
     }
@@ -192,8 +209,8 @@ export function CensorStage() {
     const erase = c.tool === "erase";
     if (!st.strokeBegin()) return;
     (e.currentTarget as Element).setPointerCapture(e.pointerId);
-    strokeRef.current = { last: cell, erase };
-    st.strokeAt(cell, null, erase);
+    strokeRef.current = { last: pos, erase };
+    st.strokeAt(pos, null, erase);
     paint();
   };
 
@@ -203,24 +220,19 @@ export function CensorStage() {
       if (p) setHover(hitBox(boxes, p.x, p.y));
       return;
     }
-    const cell = cellOf(e);
-    const cr = cursorRef.current;
-    if (cell && cr) {
-      const b = useCensor.getState().brush;
-      cr.setAttribute("x", String((cell.gx - b) * GRID));
-      cr.setAttribute("y", String((cell.gy - b) * GRID));
-    }
-    if (cell && !cursorOn) setCursorOn(true);
+    const pos = posOf(e);
+    if (pos) { lastPos.current = pos; placeCursor(pos); }
+    if (pos && !cursorOn) setCursorOn(true);
     const s = strokeRef.current;
-    if (!s || !cell) return;
-    if (s.last && s.last.gx === cell.gx && s.last.gy === cell.gy) return;
+    if (!s || !pos) return;
+    if (s.last && s.last.x === pos.x && s.last.y === pos.y) return;
     /* ★★**그 자리에서 다시 그린다.** 리액트가 다시 그려 주기를 기다리지 않는다 —
        칸은 제자리에서 바뀌었고 `paint` 는 스토어를 `getState()` 로 읽으므로 바로 반영된다.
        서버 왕복이 없으므로 프레임마다 불러도 손이 안 걸린다. */
     const tb = performance.now();
-    useCensor.getState().strokeAt(cell, s.last, s.erase);
+    useCensor.getState().strokeAt(pos, s.last, s.erase);
     strokeStats.current.brush = Math.max(strokeStats.current.brush, performance.now() - tb);
-    s.last = cell;
+    s.last = pos;
     /* ★★**프레임당 한 번만** 다시 그린다 (사용자 로그 2026-09-05: 그리는 도중 잔렉). 마우스는 초당
        수백 번 움직임을 보내고 칸이 바뀔 때마다 굽고 있었다 — 굽기 15~25ms 가 프레임 안에 여러 번
        쌓이면 화면이 밀린다. 칸은 위에서 이미 바뀌었으니 다음 프레임에 한 번 그리면 다 반영된다. */
@@ -245,8 +257,6 @@ export function CensorStage() {
     // ★낮은 신뢰도 숨김은 **보이는 것만** 거른다 (v2 주석 그대로: 실제 검열엔 영향 없음)
     .filter(({ b }) => b.manual || b.confidence >= c.floor);
 
-  // 붓 미리보기 — **눌렀을 때 칠해질 칸**을 그대로 그린다 (`stamp` 와 같은 식: 변은 2r+1)
-  const side = (c.brush * 2 + 1) * GRID;
   const erasing = c.tool === "erase" || strokeRef.current?.erase;
 
   return (
@@ -322,14 +332,16 @@ export function CensorStage() {
         {!editable && shown.map(({ b, i }) => (
           <BoxShape key={i} b={b} hot={hover === i} ok={passes(b, c.labelConf, c.conf)} scale={scale} />
         ))}
+        {/* 붓 미리보기 — **눌렀을 때 칠해질 자리**를 그대로 그린다 (`brushBox`). 자리·크기·둥글기는
+            `placeCursor` 가 DOM 에 바로 쓴다 — 리액트는 이 속성들을 다시 쓰지 않는다 */}
         {editable && cursorOn && (
           <rect
             ref={cursorRef}
             data-censor-brush
-            x={-side}
-            y={-side}
-            width={side}
-            height={side}
+            x={-9999}
+            y={-9999}
+            width={1}
+            height={1}
             fill={erasing ? "rgba(255,255,255,0.14)" : "rgba(255,64,96,0.22)"}
             stroke={erasing ? "rgba(255,255,255,0.85)" : "rgba(255,64,96,0.9)"}
             strokeWidth={1.5 / scale}

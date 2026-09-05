@@ -3,7 +3,7 @@ import { api } from "../../lib/backend";
 import { toast } from "../../store/toast";
 import { Icon } from "../../components/Icon";
 import { BRUSH_MAX, useCensor, type Tool } from "../../store/censor";
-import { GRID, isEmpty } from "../../lib/censorMask";
+import { isEmpty, type Shape } from "../../lib/censorMask";
 import { card, box, on, num, dropFocus, Hint, Line, Sec } from "./ui";
 
 /** 오른쪽 기둥. **탭마다 다른 것을 묻는다** (v2 `censor-side-panel`).
@@ -131,11 +131,34 @@ export function CensorSide() {
                   </button>
                 ))}
               </div>
-              {/* ★붓 크기는 **칸 단위**다 (8px 격자) — 변은 2r+1 칸. 숫자는 픽셀로 보여 준다 */}
+              {/* ★붓 모양 — 사각·원 (사용자 지시 2026-09-05). 기본은 사각: 찾은 박스가 네모라 이어 그리기 자연스럽다 */}
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "var(--sp-2)" }}>
+                {SHAPES.map(([id, key, icon]) => (
+                  <button
+                    key={id}
+                    data-censor-shape={id}
+                    onMouseDown={dropFocus}
+                    onClick={() => c.tune({ brushShape: id })}
+                    style={{
+                      ...box,
+                      ...(c.brushShape === id ? on : {}),
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "center",
+                      gap: "var(--sp-1)",
+                      padding: "var(--sp-1) 0",
+                    }}
+                  >
+                    {Icon[icon]}
+                    {t(key)}
+                  </button>
+                ))}
+              </div>
+              {/* ★붓 지름은 **픽셀 1 단위**다 (사용자 지시 2026-09-05: "8단위로만 되어서 불편") */}
               <Line label={t("imgIn.brushSize")}>
-                <input type="range" data-censor-brush-size min={0} max={BRUSH_MAX} value={c.brush}
-                  onChange={(e) => c.tune({ brush: Number(e.target.value) })} style={{ flex: 1 }} />
-                <span style={num}>{(c.brush * 2 + 1) * GRID}</span>
+                <input type="range" data-censor-brush-size min={1} max={BRUSH_MAX} value={c.brushPx}
+                  onChange={(e) => c.tune({ brushPx: Number(e.target.value) })} style={{ flex: 1 }} />
+                <span style={num}>{c.brushPx}</span>
               </Line>
               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "var(--sp-2)" }}>
                 <button
@@ -338,6 +361,11 @@ const METHODS = [
 const TOOLS: [Tool, "imgIn.brush" | "imgIn.eraser", "brush" | "eraser"][] = [
   ["brush", "imgIn.brush", "brush"],
   ["erase", "imgIn.eraser", "eraser"],
+];
+
+const SHAPES: [Shape, "censor.shapeSquare" | "censor.shapeRound", "shapeSquare" | "shapeRound"][] = [
+  ["square", "censor.shapeSquare", "shapeSquare"],
+  ["round", "censor.shapeRound", "shapeRound"],
 ];
 
 const kbd: React.CSSProperties = {

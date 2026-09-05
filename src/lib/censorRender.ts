@@ -17,7 +17,20 @@
  */
 import { SEEDS, bucketAspect, bucketScale, cloudScale, plate, plateRGBA, spanOf, warmFields } from "./steam.ts";
 import { makeNoise } from "./noise.ts";
+import { methodIndex, rectEmpty, type Mask, type Rect } from "./censorMask.ts";
 import type { Plate } from "./steam.ts";
+
+/** 한 장에 그릴 것. ★★두 갈래다 (`censorMask` 머리의 ★★주): 스팀은 **사각형 목록**으로(비트맵을 8px
+ *  격자로 줄여 덮은 것), 나머지 방식은 **비트맵 그대로** 마스크로 쓴다. 어느 방식이 있는지는 `boxes` 가
+ *  말한다 (픽셀이 있는 방식은 사각형도 있다). */
+export type Scene = {
+  boxes: RenderBox[];
+  mask: Mask | null;
+  /** 끄는 동안 **이번 획이 새로 칠한 조각** (스팀). 본 목록은 구워 둔 것을 그대로 쓰고, 이것만 따로 굽는다 */
+  overlay?: RenderBox[];
+  /** 끄는 동안 **이번 획이 손댄 사각형** — 옮겨 둔 알파 판을 이 안만 다시 쓴다 (나머지 방식) */
+  dirty?: Rect;
+};
 
 export type CoverSettings = {
   method: string;
@@ -69,27 +82,42 @@ const c2d = (w: number, h: number) => {
  *    안쪽에 틈**이 생긴다. 그래서 양수는 v2 대로 사각형마다 넓히고, 음수는 다 모은 뒤 한 번 깎는다.
  *  가로·세로 두 번의 1차원 최소값이라 반지름과 무관하게 픽셀당 상수 비용이다 (van Herk). */
 export function erodeAlpha(a: Uint8Array | Uint8ClampedArray, W: number, H: number, r: number, stride = 1, offset = 0) {
+  rankAlpha(a, W, H, r, stride, offset, false);
+}
+
+/** 반대 — **정사각 창 최대값**으로 넓힌다 (팽창). 양수 「범위」와 「부드럽게」의 테두리 넓히기가 쓴다.
+ *  ★비트맵 마스크에는 사각형마다 넓힐 경로가 없으므로(픽셀뿐이다) 마스크를 그린 뒤 한 번에 넓힌다 */
+export function dilateAlpha(a: Uint8Array | Uint8ClampedArray, W: number, H: number, r: number, stride = 1, offset = 0) {
+  rankAlpha(a, W, H, r, stride, offset, true);
+}
+
+function rankAlpha(
+  a: Uint8Array | Uint8ClampedArray, W: number, H: number, r: number, stride: number, offset: number, max: boolean,
+) {
   const R = Math.round(r);
   if (R <= 0) return;
   const k = 2 * R + 1;
   const n = Math.max(W, H);
   const tmp = new Uint8Array(n + 2 * R), f = new Uint8Array(n + 2 * R), b = new Uint8Array(n + 2 * R);
-  const pass = (len: number, get: (i: number) => number, put: (i: number, v: number) => void) => {
-    // 양 끝은 밖을 「0」으로 본다 — 그림 끝에서도 깎인다 (덮개가 끝에 붙어 있으면 그만큼 물러난다)
+  /* ★★닫힌 고리로 쓴다 — 픽셀마다 `get`·`put` 닫힘을 부르던 판은 30만 픽셀에 30~60ms 였다 (2026-09-05 하네스).
+     `pos` 는 줄(가로 훑기)이면 stride, 열(세로 훑기)이면 W*stride 만큼 뛴다. 양 끝은 밖을 「0」으로 본다 —
+     그림 끝에서도 깎이고(침식), 넓혀도 그림 밖으로는 안 나간다(팽창). */
+  const pass = (len: number, start: number, step: number) => {
     const m = len + 2 * R;
     tmp.fill(0, 0, m);
-    for (let i = 0; i < len; i++) tmp[R + i] = get(i);
-    for (let i = 0; i < m; i++) f[i] = i % k === 0 ? tmp[i] : Math.min(f[i - 1], tmp[i]);
-    for (let i = m - 1; i >= 0; i--) b[i] = (i % k === k - 1 || i === m - 1) ? tmp[i] : Math.min(b[i + 1], tmp[i]);
-    for (let i = 0; i < len; i++) put(i, Math.min(b[i], f[i + k - 1]));
+    for (let i = 0, p = start; i < len; i++, p += step) tmp[R + i] = a[p];
+    if (max) {
+      for (let i = 0, c = 0; i < m; i++, c++) { if (c === k) c = 0; const t = tmp[i]; f[i] = c === 0 ? t : (f[i - 1] > t ? f[i - 1] : t); }
+      for (let i = m - 1, c = 0; i >= 0; i--, c++) { const t = tmp[i]; b[i] = (i % k === k - 1 || i === m - 1) ? t : (b[i + 1] > t ? b[i + 1] : t); }
+      for (let i = 0, p = start; i < len; i++, p += step) { const x = b[i], y = f[i + k - 1]; a[p] = x > y ? x : y; }
+    } else {
+      for (let i = 0, c = 0; i < m; i++, c++) { if (c === k) c = 0; const t = tmp[i]; f[i] = c === 0 ? t : (f[i - 1] < t ? f[i - 1] : t); }
+      for (let i = m - 1; i >= 0; i--) { const t = tmp[i]; b[i] = (i % k === k - 1 || i === m - 1) ? t : (b[i + 1] < t ? b[i + 1] : t); }
+      for (let i = 0, p = start; i < len; i++, p += step) { const x = b[i], y = f[i + k - 1]; a[p] = x < y ? x : y; }
+    }
   };
-  for (let y = 0; y < H; y++) {
-    const row = y * W;
-    pass(W, (x) => a[(row + x) * stride + offset], (x, v) => { a[(row + x) * stride + offset] = v; });
-  }
-  for (let x = 0; x < W; x++) {
-    pass(H, (y) => a[(y * W + x) * stride + offset], (y, v) => { a[(y * W + x) * stride + offset] = v; });
-  }
+  for (let y = 0; y < H; y++) pass(W, y * W * stride + offset, stride);
+  for (let x = 0; x < W; x++) pass(H, x * stride + offset, W * stride);
 }
 
 /** 박스별 v2 무늬 판 — 씨앗·부드럽게·비율·배율·해상도에만 매인다. ★그림과 무관하므로 **렌더러가
@@ -138,6 +166,9 @@ export class CensorRenderer {
   onReady: (() => void) | null = null;
   /** 매 프레임 새로 만들지 않으려고 들고 있는 석 장 (모양 · 여백을 두른 모양 · 오려낸 재료) */
   private maskCv: HTMLCanvasElement | null = null;
+  /** 비트맵을 옮겨 놓은 **원본 크기** 알파 판 — 방식마다 하나. 어느 비트맵의 몇 번째 판인지 들고 있다가
+   *  안 바뀌었으면 그대로 쓰고, 획 중이면 손댄 사각형만 다시 쓴다 (`drawMasked` 의 ★★주) */
+  private alphaCvs = new Map<string, { cv: HTMLCanvasElement; mask: Mask | null; rev: number }>();
   private padCv: HTMLCanvasElement | null = null;
   private cutCv: HTMLCanvasElement | null = null;
 
@@ -165,13 +196,16 @@ export class CensorRenderer {
    *    이미 깔아 두었으므로 그 위에 덮개만 얹으면 되고, 매 프레임 원본을 다시 그리지 않아도
    *    된다. 「들춰보기」도 이 캔버스의 CSS 투명도 하나로 끝난다.
    *  ★저장할 때만 참이다 — 그때는 한 장으로 합쳐야 한다. */
-  /** `overlay` — 끄는 동안 **이번 획이 새로 칠한 조각**. 본 목록은 구워 둔 것을 그대로 쓰고, 이것만
-   *  따로(열쇠 `ov|`) 저해상도로 구워 위에 얹는다. 손을 떼면 본 목록에 합쳐져 들어오므로 그때 사라진다.
-   *  ★겹친 자리는 최대값이 아니라 그냥 덧그려져 조금 밝을 수 있다 — 끄는 동안(옅게 보이는 때)뿐이다. */
+  /** `scene.overlay` — 끄는 동안 **이번 획이 새로 칠한 조각**(스팀). 본 목록은 구워 둔 것을 그대로 쓰고,
+   *  이것만 따로(열쇠 `ov|`) 저해상도로 구워 위에 얹는다. 손을 떼면 본 목록에 합쳐져 들어오므로 그때 사라진다.
+   *  ★겹친 자리는 최대값이 아니라 그냥 덧그려져 조금 밝을 수 있다 — 끄는 동안(옅게 보이는 때)뿐이다.
+   *  ★나머지 방식은 비트맵을 그대로 그리므로 얹을 것이 없다 — 획이 손댄 만큼만 비용이 든다. */
   draw(
-    target: HTMLCanvasElement, boxes: RenderBox[], s: CoverSettings,
-    scale: number, withBase = false, quick = false, sync = false, overlay: RenderBox[] = [],
+    target: HTMLCanvasElement, scene: Scene, s: CoverSettings,
+    scale: number, withBase = false, quick = false, sync = false,
   ) {
+    const { boxes, mask } = scene;
+    const overlay = scene.overlay ?? [];
     const W = Math.max(1, Math.round(this.w * scale));
     const H = Math.max(1, Math.round(this.h * scale));
     if (target.width !== W || target.height !== H) {
@@ -215,7 +249,7 @@ export class CensorRenderer {
         // ★이번 획의 델타는 제 열쇠로 따로 — 본 덩어리의 캐시를 건드리지 않는다
         if (ov.length) for (const k of this.drawSteam(ctx, ov, s, scale, true, false, "ov|")) used.add(k);
       }
-      else this.drawMasked(ctx, how, ov.length ? list.concat(ov) : list, s, scale, W, H);
+      else if (mask) this.drawMasked(ctx, how, mask, s, scale, W, H, scene.dirty);
     }
     // 이번에 안 쓴 덩어리(모양이 바뀐 것의 옛 열쇠·끝난 획의 델타)는 버린다 — 굽던 작업도 함께
     for (const k of this.steamGroups.keys()) if (!used.has(k)) this.steamGroups.delete(k);
@@ -262,29 +296,17 @@ export class CensorRenderer {
 
   // ── 모양 ──────────────────────────────────────────────────
 
-  /** 박스 하나의 사각형을 지금 좌표계에 그린다 (넓히기·회전 포함) */
-  private path(g: CanvasRenderingContext2D, b: RenderBox, expand: number, scale: number) {
-    const [x1, y1, x2, y2] = b.box;
-    const cx = ((x1 + x2) / 2) * scale;
-    const cy = ((y1 + y2) / 2) * scale;
-    const w = (x2 - x1) * scale + expand * 2;
-    const h = (y2 - y1) * scale + expand * 2;
-    g.save();
-    g.translate(cx, cy);
-    if (b.rotation) g.rotate(b.rotation);
-    g.beginPath();
-    g.rect(-w / 2, -h / 2, w, h);
-    g.restore();
-  }
-
   private drawMasked(
-    ctx: CanvasRenderingContext2D, how: string, list: RenderBox[],
-    s: CoverSettings, scale: number, W: number, H: number,
+    ctx: CanvasRenderingContext2D, how: string, mask: Mask,
+    s: CoverSettings, scale: number, W: number, H: number, dirty?: Rect,
   ) {
-    // ★「범위」— 양수는 사각형마다 넓히고(v2), 음수는 마스크를 다 그린 뒤 합집합을 깎는다 (`erodeAlpha`)
-    const expand = Math.max(0, s.expand) * scale;
-    const shrink = Math.max(0, -s.expand) * scale;
     const feather = s.feather * scale;
+    /* ★「범위」와 「부드럽게」의 테두리 넓히기를 **한 번의 팽창·침식**으로 (`dilateAlpha`·`erodeAlpha`).
+       사각형 시절에는 양수 범위를 사각형마다 넓히고 테두리를 feather 폭으로 그어 넓혔는데, 비트맵에는
+       사각형이 없으니 마스크를 그린 뒤 합집합을 통째로 넓히거나 깎는다. 안쪽은 100% 로 남기고
+       **가장자리만** 부드럽게 하려면 흐리기 전에 feather/2 만큼 넓혀야 한다 (파이썬의 MaxFilter →
+       GaussianBlur 과 같은 차례다) — 바로 흐리면 안쪽까지 옅어져 가려야 할 것이 비친다. */
+    const net = s.expand * scale + feather / 2;
     /* ★★그림 가장자리에 붙은 박스가 **끝에서 옅어지던 결함** (유저 제보 2026-09-02: 흰색 검열이
        좌·우·상단 가장자리에서 제대로 안 됨). 캔버스 `blur` 필터는 캔버스 **밖을 투명**으로
        보므로, 마스크를 그림 크기 그대로 흐리면 그림 끝에서 feather 폭만큼 마스크가 빠지고
@@ -303,29 +325,68 @@ export class CensorRenderer {
       this.padCv = c2d(PW, PH);
       this.cutCv = c2d(PW, PH);
     }
-    const mask = this.maskCv;
-    // ★음수 「범위」가 getImageData 로 읽으므로 자주 읽는다고 알린다 (GPU 캔버스 읽기 경고)
-    const mg = mask.getContext("2d", { willReadFrequently: true })!;
+    const cv = this.maskCv;
+    // ★팽창·침식이 getImageData 로 읽으므로 자주 읽는다고 알린다 (GPU 캔버스 읽기 경고)
+    const mg = cv.getContext("2d", { willReadFrequently: true })!;
     mg.setTransform(1, 0, 0, 1, 0, 0);
     mg.clearRect(0, 0, W, H);
 
-    /* ★★안쪽은 100% 로 남기고 **가장자리만** 부드럽게 한다. 그래서 흐리기 전에 테두리를
-       `feather` 만큼 **넓힌다** (파이썬의 MaxFilter → GaussianBlur 과 같은 차례다).
-       바로 흐리면 박스 안쪽까지 옅어져, 가려야 할 것이 비친다. */
-    mg.fillStyle = "#fff";
-    mg.strokeStyle = "#fff";
-    mg.lineJoin = "round";
-    mg.lineWidth = Math.max(0, feather);
-    for (const b of list) {
-      this.path(mg, b, expand, scale);
-      mg.fill();
-      if (feather > 0) mg.stroke();
+    /* ★★비트맵을 **원본 크기의 알파 판**으로 옮겨 놓고 화면 크기로 줄여 그린다. 이 방식의 픽셀만 켠다
+       (`v`) — 방식이 섞여 있어도 판은 방식마다 따로다. 줄여 그릴 때 보간이 가장자리를 1px 안에서 부드럽게 한다.
+       ★★판은 **들고 있다가 다시 쓴다** (2026-09-05 하네스: 매 프레임 다시 옮기니 흰색 프레임이 격자 시절
+         4ms → 14ms). 비트맵의 `rev` 가 그대로면 손대지 않고, 획 중(`dirty`)이면 손댄 사각형만 다시 쓰고,
+         그 밖(되돌리기·덩어리 삭제·방식 바꾸기)에는 켜진 자리(`bounds`)를 다시 쓴다. 지운 픽셀도 그 사각형
+         안에 있으므로 덮어쓰기(putImageData)로 함께 지워진다. */
+    const v = methodIndex(how);
+    const b = mask.bounds;
+    if (rectEmpty(b)) return;
+    let ent = this.alphaCvs.get(how);
+    if (!ent || ent.cv.width !== mask.w || ent.cv.height !== mask.h) {
+      ent = { cv: c2d(mask.w, mask.h), mask: null, rev: -1 };
+      this.alphaCvs.set(how, ent);
     }
-    if (shrink >= 0.5) {
-      const img = mg.getImageData(0, 0, W, H);
-      erodeAlpha(img.data, W, H, shrink, 4, 3);
-      mg.putImageData(img, 0, 0);
+    const full = ent.cv;
+    if (ent.mask !== mask || ent.rev !== mask.rev) {
+      const fg = full.getContext("2d")!;
+      const same = ent.mask === mask;
+      if (!same) fg.clearRect(0, 0, mask.w, mask.h);
+      const r = same && dirty && !rectEmpty(dirty) ? dirty : b;
+      const x0 = Math.max(0, r.x0), y0 = Math.max(0, r.y0), x1 = Math.min(mask.w, r.x1), y1 = Math.min(mask.h, r.y1);
+      if (x1 > x0 && y1 > y0) {
+        const bw = x1 - x0, bh = y1 - y0;
+        const img = fg.createImageData(bw, bh);
+        const px = img.data;
+        const cells = mask.cells;
+        for (let y = 0; y < bh; y++) {
+          const row = (y0 + y) * mask.w + x0;
+          let o = y * bw * 4;
+          for (let x = 0; x < bw; x++, o += 4) {
+            if (cells[row + x] === v) { px[o] = px[o + 1] = px[o + 2] = px[o + 3] = 255; }
+          }
+        }
+        fg.putImageData(img, x0, y0);
+      }
+      ent.mask = mask;
+      ent.rev = mask.rev;
     }
+    // 켜진 자리만 옮겨 그린다 (그림 전체를 읽지 않는다)
+    const bw = b.x1 - b.x0, bh = b.y1 - b.y0;
+    mg.imageSmoothingEnabled = true;
+    mg.drawImage(full, b.x0, b.y0, bw, bh, b.x0 * scale, b.y0 * scale, bw * scale, bh * scale);
+    if (Math.abs(net) >= 0.5) {
+      // ★팽창·침식도 켜진 자리 둘레(반지름만큼 더)만 읽고 쓴다 — 비용이 칠한 자리 크기에 비례한다
+      const R = Math.ceil(Math.abs(net)) + 1;
+      const sx0 = Math.max(0, Math.floor(b.x0 * scale) - R), sy0 = Math.max(0, Math.floor(b.y0 * scale) - R);
+      const sx1 = Math.min(W, Math.ceil(b.x1 * scale) + R), sy1 = Math.min(H, Math.ceil(b.y1 * scale) + R);
+      const sw = sx1 - sx0, sh = sy1 - sy0;
+      if (sw > 0 && sh > 0) {
+        const im = mg.getImageData(sx0, sy0, sw, sh);
+        if (net > 0) dilateAlpha(im.data, sw, sh, net, 4, 3);
+        else erodeAlpha(im.data, sw, sh, -net, 4, 3);
+        mg.putImageData(im, sx0, sy0);
+      }
+    }
+    const mask2 = cv;
 
     // 여백을 두른 판 — 가운데에 마스크, 둘레에는 가장자리 한 줄을 늘려 깐다
     const pad = this.padCv!;
@@ -333,16 +394,16 @@ export class CensorRenderer {
     pg.setTransform(1, 0, 0, 1, 0, 0);
     pg.clearRect(0, 0, PW, PH);
     pg.imageSmoothingEnabled = false;
-    pg.drawImage(mask, m, m);
+    pg.drawImage(mask2, m, m);
     if (m > 0) {
-      pg.drawImage(mask, 0, 0, 1, H, 0, m, m, H);                 // 왼쪽 띠
-      pg.drawImage(mask, W - 1, 0, 1, H, m + W, m, m, H);         // 오른쪽 띠
-      pg.drawImage(mask, 0, 0, W, 1, m, 0, W, m);                 // 위 띠
-      pg.drawImage(mask, 0, H - 1, W, 1, m, m + H, W, m);         // 아래 띠
-      pg.drawImage(mask, 0, 0, 1, 1, 0, 0, m, m);                 // 네 모서리
-      pg.drawImage(mask, W - 1, 0, 1, 1, m + W, 0, m, m);
-      pg.drawImage(mask, 0, H - 1, 1, 1, 0, m + H, m, m);
-      pg.drawImage(mask, W - 1, H - 1, 1, 1, m + W, m + H, m, m);
+      pg.drawImage(mask2, 0, 0, 1, H, 0, m, m, H);                 // 왼쪽 띠
+      pg.drawImage(mask2, W - 1, 0, 1, H, m + W, m, m, H);         // 오른쪽 띠
+      pg.drawImage(mask2, 0, 0, W, 1, m, 0, W, m);                 // 위 띠
+      pg.drawImage(mask2, 0, H - 1, W, 1, m, m + H, W, m);         // 아래 띠
+      pg.drawImage(mask2, 0, 0, 1, 1, 0, 0, m, m);                 // 네 모서리
+      pg.drawImage(mask2, W - 1, 0, 1, 1, m + W, 0, m, m);
+      pg.drawImage(mask2, 0, H - 1, 1, 1, 0, m + H, m, m);
+      pg.drawImage(mask2, W - 1, H - 1, 1, 1, m + W, m + H, m, m);
     }
     pg.imageSmoothingEnabled = true;
 
@@ -664,14 +725,14 @@ export class CensorRenderer {
   }
 
   /** 저장용 — **원본 크기**로 한 장 굽는다. 화면에 쓰는 것과 같은 `draw` 를 지난다 */
-  async renderFull(boxes: RenderBox[], s: CoverSettings, type = "image/png"): Promise<Blob> {
+  async renderFull(scene: Scene, s: CoverSettings, type = "image/png"): Promise<Blob> {
     const cv = c2d(this.w, this.h);
     // ★저장은 화면 캐시와 섞이지 않게 제 렌더러로 돈다 (그릴 크기가 다르면 재료도 다르다)
     const one = new CensorRenderer(this.src, this.w, this.h);
     /* ★캐시를 물려주지 않는다 — 구름은 **그릴 크기에 매인 한 장**이라 화면용(축소)과
        저장용(원본 크기)이 다르다. 저장은 한 번뿐이라 다시 굽는 비용이 문제되지 않는다. */
     // ★저장은 **동기**로 — 뒤에서 굽는 길을 타면 저해상도가 저장된다
-    one.draw(cv, boxes, s, 1, true, false, true);
+    one.draw(cv, scene, s, 1, true, false, true);
     return await new Promise<Blob>((ok, no) =>
       cv.toBlob((b) => (b ? ok(b) : no(new Error("캔버스를 굽지 못했습니다"))), type));
   }

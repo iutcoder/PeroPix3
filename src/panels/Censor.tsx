@@ -70,7 +70,9 @@ export function Censor() {
          않게는 `App.tsx` 가 막아 둔다. */
       if (e.altKey && s.tab !== "before") {
         e.preventDefault();
-        s.tune({ brush: Math.max(0, Math.min(BRUSH_MAX, s.brush + (e.deltaY < 0 ? 1 : -1))) });
+        // ★한 눈금 1px, Shift 를 더하면 10px (칩의 가중치가 Alt+Shift 로 큰 걸음을 두는 것과 같다)
+        const step = (e.shiftKey ? 10 : 1) * (e.deltaY < 0 ? 1 : -1);
+        s.tune({ brushPx: Math.max(1, Math.min(BRUSH_MAX, s.brushPx + step)) });
         return;
       }
       const n = (s.tab === "after" ? s.after : s.images).length;

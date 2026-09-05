@@ -809,6 +809,8 @@ export const ko: Dict = {
     k_wheel: "다음 그림",
     k_rightKey: "우클릭",
     k_right: "이어진 덩어리 삭제",
+    shapeSquare: "사각",
+    shapeRound: "원형",
     dest: "저장 폴더",
     destBeside: "원본 옆",
     newFolder: "새 폴더",
