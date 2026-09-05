@@ -15,7 +15,7 @@
  *
  *  박스를 끄는 동안 일어나는 일은 `drawImage` 몇 번과 경로 채우기 하나뿐이다.
  */
-import { bucketAspect, bucketScale, cloudScale, plate, plateRGBA, spanOf } from "./steam.ts";
+import { SEEDS, bucketAspect, bucketScale, cloudScale, plate, plateRGBA, spanOf, warmFields } from "./steam.ts";
 import { makeNoise } from "./noise.ts";
 import type { Plate } from "./steam.ts";
 
@@ -95,7 +95,9 @@ export function erodeAlpha(a: Uint8Array | Uint8ClampedArray, W: number, H: numb
 /** 박스별 v2 무늬 판 — 씨앗·부드럽게·비율·배율·해상도에만 매인다. ★그림과 무관하므로 **렌더러가
  *  아니라 모듈**이 든다 — 그림을 넘겨 렌더러가 새로 생겨도 판은 그대로 쓴다. 개수만 막는다. */
 const plates = new Map<string, Plate>();
-const PLATES_MAX = 256;
+/** 128 판은 32KB, 256 판은 130KB — 512 장이면 넉넉히 잡아도 70MB 아래다. 비율·배율 버킷이 많아
+ *  획을 긋다 보면 수백 장이 생기므로 (256 이면 밀려나 다시 굽는 일이 잦았다) 이만큼 둔다 */
+const PLATES_MAX = 512;
 
 /** 그림 한 장에 딸린 렌더러. 재료 캐시를 들고 있으므로 **그림마다 하나** 만든다. */
 export class CensorRenderer {
@@ -165,7 +167,11 @@ export class CensorRenderer {
     }
 
     for (const [how, list] of groups) {
-      if (how === "steam") this.drawSteam(ctx, list, s, scale, quick);
+      if (how === "steam") {
+        // ★처음 제 해상도로 그릴 때 밭을 미리 예약한다 — 획 도중·손 뗀 프레임에 밭 굽기가 안 걸리게
+        if (!quick) warmFields(s.feather, SEEDS, [128, 256]);
+        this.drawSteam(ctx, list, s, scale, quick);
+      }
       else this.drawMasked(ctx, how, list, s, scale, W, H);
     }
   }
@@ -327,7 +333,7 @@ export class CensorRenderer {
     return bucketScale(cloudScale(Math.min(x2 - x1, y2 - y1) + Math.max(0, s.expand) * 2));
   }
 
-  private steamPlate(b: RenderBox, s: CoverSettings, scale: number): Plate {
+  private steamPlate(b: RenderBox, s: CoverSettings, scale: number, quick: boolean): Plate {
     const [x1, y1, x2, y2] = b.box;
     const w = (x2 - x1 + Math.max(0, s.expand) * 2) * scale;
     const h = (y2 - y1 + Math.max(0, s.expand) * 2) * scale;
@@ -340,9 +346,12 @@ export class CensorRenderer {
          크기(구름 전체 경계 상자에 따라 변하는 k 를 곱한 것)로 골라서, 획을 그을 때마다 상자가
          변해 **같은 조각의 판이 다른 해상도로 다시 구워졌다.** 그래서 화면 크기만 본다.
        ★640 은 없앴다 — 구름은 작업 격자(긴 변 340)에만 그려지므로 256 을 1.3배 늘려 읽어도
-         노이즈 파장(15px 이상)이 다 살고, 640 판 하나는 브라우저에서 40ms 다. */
+         노이즈 파장(15px 이상)이 다 살고, 640 판 하나는 브라우저에서 40ms 다.
+       ★끄는 동안(`quick`, 격자 170)은 **언제나 128** — 획 도중에 256 밭·판을 굽지 않게 (사용자 제보
+         2026-09-05: "이번엔 그리는 도중에 렉"). 손을 떼면 256 열쇠로 바뀌지만 그 판은 앞선 획들에서
+         이미 구워져 있고, 밭은 `warmFields` 가 미리 굽는다. */
     const need = Math.max(w, h) * spanOf(k);
-    const res = need <= 100 ? 128 : 256;
+    const res = quick || need <= 100 ? 128 : 256;
     const key = `${b.seed}|${s.feather}|${bucketAspect(w, h)}|${k}|${res}`;
     let p = plates.get(key);
     if (!p) {
@@ -447,7 +456,7 @@ export class CensorRenderer {
 
       for (const it of items) {
         if (tm) tm.acc += lap();
-        const p = this.steamPlate(it.b, s, scale);
+        const p = this.steamPlate(it.b, s, scale, quick);
         if (tm) tm.plates += lap();
         // 이 판이 격자에서 차지하는 크기·자리
         const dw = it.w * p.span * sx, dh = it.h * p.span * sy;

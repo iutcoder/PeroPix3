@@ -182,6 +182,29 @@ function noiseField(seed: number, feather: number, res: number) {
  *
  *  ★아래 상수는 **전부 v2 원문의 값**이다. 하나만 만져도 구름의 성격이 바뀌므로,
  *    바꿀 때는 무엇을 왜 바꾸는지 여기 적는다. */
+/** 씨앗 팔레트 전체의 노이즈 밭을 **손이 비었을 때** 미리 굽는다 — 한 번에 하나씩(타이머로 쪼개서).
+ *  ★★사용자 제보 2026-09-05: 손을 뗀 멈춤을 잡은 뒤 "이번엔 그리는 도중에 렉". 제 해상도 판(256)에
+ *    쓰는 밭은 씨앗마다 처음 한 번 약 20ms 인데, 그것이 획 도중이나 손을 뗀 프레임에 걸리면 그 프레임이
+ *    튄다. 검열 중 탭에 들어와 처음 그릴 때 부르면, 첫 획을 긋기 전에 대개 다 구워져 있다.
+ *  같은 (부드럽게, 해상도) 조합은 한 번만 예약한다. 이미 있는 밭은 건너뛴다. */
+/** 씨앗 팔레트의 크기 (`censorMask.seedOf` 가 이 안에서 고른다) */
+export const SEEDS = 8;
+const warmed = new Set<string>();
+export function warmFields(feather: number, seeds: number, resList: number[]) {
+  const tag = `${feather}|${resList.join(",")}`;
+  if (warmed.has(tag)) return;
+  warmed.add(tag);
+  const todo: [number, number][] = [];
+  for (const res of resList) for (let seed = 1; seed <= seeds; seed++) todo.push([seed, res]);
+  const step = () => {
+    const next = todo.shift();
+    if (!next) return;
+    noiseField(next[0], feather, next[1]);
+    setTimeout(step, 0);
+  };
+  setTimeout(step, 0);
+}
+
 export function plate(key: PlateKey): Plate {
   const { seed, feather } = key;
   const aspect = Math.max(0.05, key.aspect);

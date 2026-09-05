@@ -13,6 +13,7 @@
  *  겹친 사각형은 한 덩이 구름이 된다. 격자를 직접 받는 렌더러를 따로 만들지 않는다 — 한 벌이어야 한다.
  */
 import type { RenderBox } from "./censorRender.ts";
+import { SEEDS } from "./steam.ts";
 
 export const GRID = 8;
 
@@ -244,8 +245,8 @@ export function rectsOf(g: Grid): { method: string; box: [number, number, number
   return out;
 }
 
-/** 씨앗 팔레트의 크기 — 사각형의 씨앗은 이 안의 하나다 */
-export const SEEDS = 8;
+/** 씨앗 팔레트의 크기 — 사각형의 씨앗은 이 안의 하나다. 정본은 `steam.ts` (밭을 미리 굽는 쪽도 안다) */
+export { SEEDS };
 
 /** 사각형의 구름 씨앗 — **왼쪽 위 모서리**에서 골라, `SEEDS` 개 중 하나.
  *  ★오른쪽·아래로 더 칠해 사각형이 자라도 씨앗이 그대로라 구름이 통째로 바뀌지 않는다.
