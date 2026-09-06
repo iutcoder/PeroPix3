@@ -40,6 +40,22 @@ jobs:
         working-directory: src-tauri
         run: cargo test --target aarch64-apple-darwin
 
+      - name: Build macOS app bundle
+        run: >-
+          npx tauri build --bundles app
+          --config '{"build":{"beforeBuildCommand":""}}'
+
+      - name: Verify bundled runtime resources
+        run: |
+          APP=src-tauri/target/release/bundle/macos/PeroPix.app
+          test -x "$APP/Contents/MacOS/peropix"
+          test -f "$APP/Contents/Resources/backend/server.py"
+          test -f "$APP/Contents/Resources/models/censor/ntd11_anime_nsfw_segm_v5-variant1.onnx"
+          test -f "$APP/Contents/Resources/public/tags.json"
+          test -f "$APP/Contents/Resources/shared/terms.json"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$APP/Contents/Info.plist")" = \
+            "io.github.iutcoder.peropix3"
+
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
@@ -50,12 +66,18 @@ jobs:
         run: python3 -m pip install -r backend/requirements.txt
 
       - name: Import backend modules
+        env:
+          PEROPIX_DATA_DIR: ${{ runner.temp }}/peropix-data
+          PEROPIX_RESOURCE_DIR: ${{ github.workspace }}
         run: |
           python3 - <<'PY'
+          from pathlib import Path
           import sys
           sys.path.insert(0, 'backend')
           import server
           import censor
           import files
+          assert server.APP_DIR == Path('${{ runner.temp }}/peropix-data').resolve()
+          assert server.INNER_DIR == Path('${{ github.workspace }}').resolve()
           print('macOS backend imports OK')
           PY
