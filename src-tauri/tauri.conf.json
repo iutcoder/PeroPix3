@@ -36,7 +36,8 @@
       "../backend/requirements.txt": "backend/requirements.txt",
       "../models/censor/": "models/censor/",
       "../public/": "public/",
-      "../shared/": "shared/"
+      "../shared/": "shared/",
+      "python/": "python/"
     }
   }
 }
