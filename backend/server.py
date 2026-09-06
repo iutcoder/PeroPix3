@@ -14,6 +14,7 @@ import io
 import json
 import math
 import os
+import threading
 import time
 import traceback
 import uuid
@@ -29,7 +30,7 @@ import sys
 if str(Path(__file__).resolve().parent) not in sys.path:
     sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from fastapi import File, UploadFile, FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import File, Request, UploadFile, FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from PIL import Image
@@ -45,6 +46,7 @@ import genqueue
 import cliagent
 import agentsession
 import secretstore
+import accounts as accounts_mod
 import llm as llm_mod
 import agent as agent_mod
 from agent import App, Tools
@@ -316,21 +318,37 @@ class KeyGate:
     ★★**HTTP 미들웨어가 아니라 ASGI 층**이다 — `@app.middleware("http")` 는 웹소켓을
       안 지나간다. 소켓이야말로 진행 상황·생성 결과가 흐르는 통로라 빠지면 안 된다.
     ★맞히려는 쪽이 얻는 것은 403 뿐이다. 몇 번째 글자가 맞았는지 같은 실마리를 안 준다.
+    ★★**열쇠는 둘이다** (사용자 결정 2026-08-31). 화면이 쓰는 것은 **실행마다 바뀌고**,
+      바깥 에이전트(MCP)가 쓰는 것은 **고정**이다 — 안 그러면 앱을 켤 때마다 설정을 다시
+      붙여 넣어야 해서 아무도 안 쓴다. 고정 열쇠를 파일에 두어도 **웹페이지에 대한 방어는
+      그대로다**: 웹페이지는 파일을 못 읽는다. 그 파일을 읽을 수 있는 프로그램이라면
+      이미 토큰·워크스페이스를 통째로 읽을 수 있어 열쇠 하나가 더할 위험이 없다.
+    ★고정 열쇠는 **쓸 때 처음 만든다** (`mcp_key`) — MCP 를 안 쓰는 사용자에게는 아예 없다.
     """
 
-    def __init__(self, app_, prefix: str):
+    def __init__(self, app_, prefix: str, extra=None):
         self.app = app_
         self.prefix = prefix
+        #: 더 받아 줄 열쇠를 **그때그때 묻는다** — MCP 열쇠는 나중에 생길 수 있다
+        self.extra = extra or (lambda: [])
+
+    def _prefixes(self) -> list[str]:
+        return [p for p in [self.prefix, *self.extra()] if p]
 
     async def __call__(self, scope, receive, send):
         if not self.prefix or scope["type"] not in ("http", "websocket"):
             return await self.app(scope, receive, send)
 
         path = scope.get("path", "")
-        if path == self.prefix or path.startswith(self.prefix + "/"):
-            rest = path[len(self.prefix):] or "/"
-            scope = {**scope, "path": rest, "raw_path": rest.encode()}
-            return await self.app(scope, receive, send)
+        for i, pref in enumerate(self._prefixes()):
+            if path == pref or path.startswith(pref + "/"):
+                rest = path[len(pref):] or "/"
+                # ★★**어느 열쇠로 들어왔는지 남긴다** (사용자 결정 2026-08-31). 화면 열쇠(첫째)는
+                #   **이 앱의 조수**이고, 더 받아 준 열쇠는 **바깥 에이전트**(MCP)다. 규칙이
+                #   갈리므로 여기서 한 번 표시해 둔다 — 뒤에서는 다시 알아낼 방법이 없다.
+                state = {**(scope.get("state") or {}), "outside": i > 0}
+                scope = {**scope, "path": rest, "raw_path": rest.encode(), "state": state}
+                return await self.app(scope, receive, send)
 
         if scope["type"] == "websocket":
             # ★받기 전에 닫는다 — 핸드셰이크를 마치면 그때부터 방송이 흘러간다
@@ -350,7 +368,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-app.add_middleware(KeyGate, prefix=KEY_PREFIX)
+app.add_middleware(KeyGate, prefix=KEY_PREFIX, extra=lambda: mcp_prefixes())
 
 
 # ── 설정 ──────────────────────────────────────────────────────────
@@ -374,10 +392,13 @@ CONFIG = load_config()
 SECRETS = secretstore.Secrets(DATA_DIR / "secrets.json")
 if SECRETS.adopt(CONFIG):
     save_config(CONFIG)
+# ★NAI 계정은 **여럿**이다 (사용자 결정 2026-09-02) — 옛 `nai_token` 하나는 첫 계정으로 옮겨진다
+ACCOUNTS = accounts_mod.Accounts(SECRETS)
 
 
-def nai_token() -> str:
-    return os.environ.get("NAI_TOKEN") or SECRETS.get("nai_token")
+def nai_token(account: str | None = None) -> str:
+    """그 계정의 토큰. ★없거나 지워진 계정이면 첫 계정 — 요청을 거절하면 옛 워크스페이스가 통째로 멈춘다."""
+    return ACCOUNTS.token_of(account)
 
 
 def llm_settings(provider: str = "") -> dict:
@@ -392,6 +413,8 @@ def llm_settings(provider: str = "") -> dict:
         "model": (llm.get("models") or {}).get(pid, ""),
         "effort": (llm.get("efforts") or {}).get(pid, ""),
         "key": SECRETS.get(f"llm_key_{pid}"),
+        # 로컬 서버 주소 (공급자 `local` 만 쓴다, `llm.local_base`)
+        "localUrl": llm.get("localUrl") or "",
     }
 
 
@@ -420,8 +443,11 @@ _migrate_llm()
 
 
 # ── 모델 ──────────────────────────────────────────────────────────
-class TokenBody(BaseModel):
-    token: str
+class AccountBody(BaseModel):
+    """계정 추가·수정. 둘 다 비어도 되는 것은 수정 때 한쪽만 고치기 때문이다."""
+
+    token: str = ""
+    name: str = ""
 
 
 class RestoreBody(BaseModel):
@@ -443,6 +469,9 @@ class GenBody(BaseModel):
     #   주는 프레임을 그대로 앱에 넘긴다 (`nai.generate_streaming`). 꺼도 결과는 같다 —
     #   **보는 방식**만 달라진다. 화면이 옵션으로 켜고 끈다.
     stream: bool = True
+    #: ★★**어느 NAI 계정으로** (사용자 결정 2026-09-02). 워크스페이스가 고른 것을 화면이 싣는다
+    #   (`spec.account`). 없거나 지워졌으면 첫 계정이다 (`accounts.resolve`). 큐는 이 값으로 차선을 가른다.
+    account: str | None = None
     # 어디에 저장할지
     workspace: str = "새 작업"
     # ★세트 이름 — 저장 경로 한 칸이 된다 (`docs/terms-plan.md` 의 낱말표)
@@ -617,51 +646,178 @@ async def health():
             "hasLlm": bool(llm_settings().get("key"))}
 
 
-@app.post("/api/token")
-async def set_token(body: TokenBody):
-    """토큰 저장·삭제. ★**검사하고 받는다** (backend.py:4470-4500 이식).
+async def _check_nai_token(token: str) -> str:
+    """토큰을 **검사한다** (backend.py:4470-4500 이식). 돌려주는 것은 경고 문구다.
 
-    빈 값이면 지운다 (`secretstore.Secrets.set`). 값이 있으면 형태를 먼저 보고,
-    그 다음 NAI 에 물어본다 — ★**401 일 때만 막는다.** 그 밖의 응답·타임아웃·
+    형태를 먼저 보고, 그 다음 NAI 에 물어본다 — ★**401 일 때만 막는다.** 그 밖의 응답·타임아웃·
     네트워크 오류는 토큰이 틀렸다는 증거가 아니라서, 저장하고 경고만 남긴다
     (NAI 쪽 일시적 400 으로 멀쩡한 토큰이 등록조차 안 되던 문제)."""
+    if any(c.isspace() for c in token):
+        raise HTTPException(400, "토큰에 공백이 섞여 있습니다. 공백 없이 토큰만 붙여 넣으세요.")
+    try:
+        token.encode("ascii")
+    except UnicodeEncodeError:
+        raise HTTPException(400, "토큰에 쓸 수 없는 문자가 있습니다. 다시 복사해 주세요.")
+    if not token.startswith("pst-"):
+        raise HTTPException(400, "Persistent API Token 이 아닙니다. pst- 로 시작하는 값을 넣어 주세요.")
+
+    import httpx
+
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            r = await client.get(
+                "https://image.novelai.net/user/subscription",
+                headers={"Authorization": f"Bearer {token}"},
+            )
+        if r.status_code == 401:
+            raise HTTPException(400, "토큰이 만료됐거나 유효하지 않습니다. 새로 발급해 주세요.")
+        if r.status_code != 200:
+            return f"저장했지만 NAI 확인은 못 했습니다 (응답 {r.status_code}). 생성이 되면 문제없습니다."
+    except HTTPException:
+        raise
+    except Exception as e:
+        return f"저장했지만 NAI 확인은 못 했습니다 ({type(e).__name__}). 인터넷 연결을 확인해 주세요."
+    return ""
+
+
+# ── NAI 계정 (여럿) ────────────────────────────────────────────────
+# ★옛 `/api/token`(토큰 하나) 은 걷었다 (2026-09-02). 창구는 계정 목록 하나다 — 토큰 값은 어느 응답에도 안 실린다.
+@app.get("/api/accounts")
+async def list_accounts():
+    return {"items": ACCOUNTS.public(), "default": ACCOUNTS.default_id()}
+
+
+@app.post("/api/accounts")
+async def add_account(body: AccountBody):
+    """계정 추가. ★이름을 안 주면 자동 번호(「API n」)다 — 사용자가 나중에 고친다 (사용자 결정 2026-09-02)."""
     token = (body.token or "").strip()
-    warning = ""
-    if token:
-        if any(c.isspace() for c in token):
-            raise HTTPException(400, "토큰에 공백이 섞여 있습니다. 공백 없이 토큰만 붙여 넣으세요.")
-        try:
-            token.encode("ascii")
-        except UnicodeEncodeError:
-            raise HTTPException(400, "토큰에 쓸 수 없는 문자가 있습니다. 다시 복사해 주세요.")
-        if not token.startswith("pst-"):
-            raise HTTPException(400, "Persistent API Token 이 아닙니다. pst- 로 시작하는 값을 넣어 주세요.")
+    if not token:
+        raise HTTPException(400, "토큰을 넣어 주세요.")
+    warning = await _check_nai_token(token)
+    acc = ACCOUNTS.add(token, body.name)
+    return {"ok": True, **acc, "warning": warning, "hasToken": bool(nai_token())}
 
-        import httpx
 
-        try:
-            async with httpx.AsyncClient(timeout=15) as client:
-                r = await client.get(
-                    "https://image.novelai.net/user/subscription",
-                    headers={"Authorization": f"Bearer {token}"},
-                )
-            if r.status_code == 401:
-                raise HTTPException(400, "토큰이 만료됐거나 유효하지 않습니다. 새로 발급해 주세요.")
-            if r.status_code != 200:
-                warning = f"저장했지만 NAI 확인은 못 했습니다 (응답 {r.status_code}). 생성이 되면 문제없습니다."
-        except HTTPException:
-            raise
-        except Exception as e:
-            warning = f"저장했지만 NAI 확인은 못 했습니다 ({type(e).__name__}). 인터넷 연결을 확인해 주세요."
+@app.put("/api/accounts/{account_id}")
+async def update_account(account_id: str, body: AccountBody):
+    """이름 바꾸기·토큰 갈아 끼우기 — 준 것만 고친다. id 는 그대로라 워크스페이스의 선택이 안 끊긴다."""
+    token = (body.token or "").strip()
+    warning = await _check_nai_token(token) if token else ""
+    acc = ACCOUNTS.update(account_id, token=token or None, name=body.name or None)
+    if not acc:
+        raise HTTPException(404, "그 계정이 없습니다.")
+    # ★개명이면 도는 차선의 이름도 따라간다 — 큐 표시가 옛 이름으로 남지 않게
+    if account_id in Q.lanes:
+        Q.lanes[account_id].name = acc["name"]
+    return {"ok": True, **acc, "warning": warning}
 
-    SECRETS.set("nai_token", token)
-    return {"ok": True, "hasToken": bool(nai_token()), "warning": warning}
+
+@app.delete("/api/accounts/{account_id}")
+async def delete_account(account_id: str):
+    """★★**그 계정의 차선을 먼저 끊는다** (점검 2026-09-02). 토큰은 잡이 아니라 서버가 그때그때 계정에서 꺼내므로,
+    안 끊으면 남은 장이 **첫 계정의 토큰으로** 조용히 나간다 — 남의 Anlas 로 만드는 셈이다. 이미 NAI 로
+    나간 한 장은 못 끊으니 그것만 온다 (`cancel_queue` 와 같은 규칙)."""
+    if not ACCOUNTS.remove(account_id):
+        raise HTTPException(404, "그 계정이 없습니다.")
+    jobs, images, running = await _cancel_lanes(account_id)
+    return {"ok": True, "hasToken": bool(nai_token()), "cleared_jobs": jobs, "cleared_images": images, "running": running}
 
 
 # ── 에이전트 다리 (바깥에서 앱 도구를 부른다) ─────────────────────
 class AgentCall(BaseModel):
     name: str
     input: dict = {}
+
+
+# ── MCP (바깥 에이전트가 앱을 몬다) ──────────────────────────────
+#: 고정 열쇠가 사는 자리 — 비밀 파일이다 (`secrets.json`, 신고용 `config.json` 과 가른다)
+MCP_SECRET = "mcp_key"
+
+
+def mcp_prefixes() -> list[str]:
+    """KeyGate 가 **더 받아 줄** 앞머리. ★없으면 빈 목록 — 만들지 않는다.
+    문을 안 잠근 개발 모드(`KEY_PREFIX` 가 빈 문자열)에서는 애초에 KeyGate 가 지나간다."""
+    k = SECRETS.get(MCP_SECRET)
+    return [f"/k/{k}"] if k else []
+
+
+#: 지금 실행의 주소가 적히는 자리 — MCP 서버가 이걸 읽는다
+MCP_ENDPOINT = DATA_DIR / "mcp-endpoint.json"
+
+
+def write_mcp_endpoint() -> None:
+    """**포트는 켤 때마다 바뀔 수 있다** — 8770 이 차 있으면 빈 번호로 밀린다 (실측: 설치본이
+    8770 을 쥐고 있어 개발판이 51676 으로 떴다). 그래서 바깥 도구의 설정에 포트를 적어 두면
+    다음 실행에서 안 붙는다.
+
+    ★그래서 **주소를 파일에 적고** MCP 서버가 그것을 읽는다. 파일 자리는 안 바뀌므로 사용자가
+      한 번 붙여 넣은 설정은 계속 맞는다 — 켤 때마다 이 파일만 새로 쓰인다.
+    ★열쇠가 없으면 안 쓴다 — MCP 를 안 쓰는 사용자에게 파일을 만들지 않는다."""
+    # ★★**판정이 앱을 띄울 때는 쓰지 않는다** (실측 2026-08-31). 테스트가 FastAPI 앱을
+    #   세우면 startup 이 그대로 돌아, **돌고 있는 앱의 주소 파일을 8770 으로 덮었다**
+    #   (모듈 기본값). 그때부터 바깥 에이전트는 엉뚱한 곳에 붙는다.
+    #   ★표식은 `main()` 이 넣는다 — 리로드 워커도 환경을 물려받으므로 함께 지난다.
+    if not os.environ.get("PEROPIX_SERVING"):
+        return
+    k = SECRETS.get(MCP_SECRET)
+    if not k:
+        return
+    try:
+        # ★★**문이 안 잠겨 있으면 열쇠를 적지 않는다** (실측 2026-08-31). 개발 모드에서는
+        #   껍데기가 열쇠를 안 만들어 `KEY_PREFIX` 가 비고, KeyGate 가 통째로 지나간다 —
+        #   그런데 주소에 `/k/…` 를 붙이면 **그런 길이 없어 404** 가 온다. 실제로 밟았다.
+        MCP_ENDPOINT.write_text(
+            json.dumps({"port": CURRENT_PORT, "key": k if KEY_PREFIX else ""}, ensure_ascii=False),
+            encoding="utf-8")
+    except OSError as e:
+        say("error", "mcp", f"주소 파일을 못 썼습니다: {e}")
+
+
+def mcp_key() -> str:
+    """MCP 용 고정 열쇠 — **처음 물을 때 만든다.**
+
+    ★화면 열쇠(`APP_KEY`)와 달리 실행마다 바뀌지 않는다. 바깥 에이전트의 설정 파일에
+      한 번 적어 두고 계속 쓰는 것이라, 켤 때마다 바뀌면 쓸 수가 없다."""
+    k = SECRETS.get(MCP_SECRET)
+    if not k:
+        k = uuid.uuid4().hex + uuid.uuid4().hex[:16]
+        SECRETS.set(MCP_SECRET, k)
+        write_mcp_endpoint()   # ★막 만들었으니 지금 주소도 함께 남긴다
+    return k
+
+
+@app.get("/api/mcp/config")
+async def mcp_config():
+    """붙여 넣을 수 있는 **완성된 MCP 설정**을 준다 (사용자 결정 2026-08-31).
+
+    ★경로를 화면이 짐작하지 않는다 — 파이썬도 스크립트도 **지금 이 프로세스가 아는 것**이
+      정확하다 (배포판은 동봉 파이썬, 저장소는 PATH 의 파이썬).
+    ★열쇠는 여기서 처음 만들어진다 — 이 창구를 안 부르면 열쇠도 없다."""
+    # ★★경로는 **슬래시로** 적는다 (사용자 지적 2026-08-31: *"`\\` 가 두 번 적힌다"*).
+    #   JSON 은 역슬래시를 두 번 써야 하나가 되는데, 읽는 사람도 옮기는 에이전트도 헷갈린다.
+    #   윈도우는 슬래시 경로로도 프로세스를 띄운다 (실측: 파워셸·Node 둘 다 정상).
+    script = (Path(__file__).resolve().parent / "mcp_stdio.py").as_posix()
+    exe = Path(sys.executable).as_posix()
+    # ★★**주소를 싣지 않는다** — 포트가 실행마다 바뀔 수 있어 적어 두면 다음에 안 붙는다.
+    #   MCP 서버가 앱이 남긴 주소 파일을 읽는다 (`write_mcp_endpoint`). 그래서 설정에 남는 것은
+    #   **안 바뀌는 것**(경로)뿐이고, 한 번 붙여 넣으면 계속 맞는다.
+    #   ★열쇠는 여기서 만들어진다 — 만들면서 지금 주소도 파일에 남는다.
+    mcp_key()
+    server = {"type": "stdio", "command": exe, "args": [script]}
+    # ★★**등록 명령어를 짓지 않는다** (사용자 지시 2026-08-31). 도구마다 방법이 다르고
+    #   (클로드 코드·코덱스·데스크톱…) 셸마다 따옴표 규칙도 달라서, 맞히려 들면 한 도구에만
+    #   맞고 나머지는 깨진다 — 실제로 `claude mcp add-json` 한 줄을 만들어 봤더니 윈도우
+    #   파워셸이 JSON 안의 겹따옴표를 뭉개 `Invalid configuration` 이 났다.
+    #   대신 **설정만** 주고, 「이 양식대로 연동해 줘」라는 말을 화면이 앞에 붙여 사용자가
+    #   쓰는 에이전트에게 건넨다. 등록 방법은 그 에이전트가 제 도구에 맞게 고른다.
+    # ★★**요청문은 언제나 영어다** (사용자 지시 2026-08-31). 이 글을 읽는 것은 사람이 아니라
+    #   **에이전트**라 앱의 표시 언어를 따라갈 이유가 없다 — 도구 설정에서 가장 널리 통하는
+    #   말이 영어다. 그래서 i18n 이 아니라 **여기**서 만든다 (화면 문구와 성격이 다르다).
+    conf = json.dumps({"mcpServers": {"peropix": server}}, ensure_ascii=False, indent=2)
+    ask = ("Please register the MCP server below, using whatever setup method your tool supports "
+           "(config file or CLI). It connects to PeroPix, a desktop app that must be running.")
+    return {"name": "peropix", "server": server, "json": conf, "ask": ask,
+            "text": f"{ask}\n\n{conf}"}
 
 
 @app.get("/api/agent/system")
@@ -695,8 +851,19 @@ async def agent_tools():
 
 
 @app.post("/api/agent/call")
-async def agent_call(body: AgentCall):
-    return await tools.call(body.name, body.input)
+async def agent_call(body: AgentCall, request: Request):
+    """★★**바깥 에이전트는 앱의 대화에 관여하지 않는다** (사용자 결정 2026-08-31).
+
+    MCP 로 붙은 도구는 **그쪽 클라이언트가 이미 묻는다** — 클로드 코드·코덱스 모두 도구를
+    부르기 전에 사용자에게 확인한다. 우리가 또 물으면 두 번 묻는 셈이고, 그 창을 안 보고
+    있으면 카드가 600초를 붙들기만 한다. 기록도 그쪽 앱에 남으므로 여기 남길 이유가 없다.
+    ★**앱 안의 조수는 그대로 묻는다.** 그쪽은 우리가 `--allowedTools mcp__peropix__*` 로
+      클라이언트 승인을 꺼 두므로(`cliagent.argv`), 우리 카드가 유일한 방어선이다."""
+    # ★표식이 먼저다 — 개발 모드에서는 문을 안 잠가 열쇠로 못 가른다 (`mcp_stdio` 의 ★★주).
+    #   잠긴 배포판에서는 둘 다 맞는다: MCP 열쇠로 들어오고 표식도 달고 온다.
+    outside = (request.headers.get("x-peropix-outside") == "1"
+               or bool((request.scope.get("state") or {}).get("outside")))
+    return await tools.call(body.name, body.input, outside=outside)
 
 
 # ── 로컬 에이전트 CLI ─────────────────────────────────────────────
@@ -845,6 +1012,8 @@ class LlmConfigBody(BaseModel):
     effort: str | None = None
     # 빈 문자열이면 **그대로 둔다** (설정 화면이 키를 다시 안 보내도 지워지지 않게)
     key: str | None = None
+    #: 로컬 서버 주소. `None` 이면 그대로, 빈 문자열이면 기본값으로 되돌린다
+    localUrl: str | None = None
 
 
 class LlmChatBody(BaseModel):
@@ -895,7 +1064,8 @@ async def set_llm_config(body: LlmConfigBody):
     cur = dict(CONFIG.get("llm") or {})
     cur.pop("key", None)  # ★설정 파일에는 키가 **없다** - 비밀 파일로 간다
     pid = body.provider or llm_mod.provider_of(cur)
-    if pid not in llm_mod.PROVIDERS:
+    # ★닫아 둔 공급자(`local`, `llm.LOCAL_READY`)도 여기서 막힌다
+    if not llm_mod.exposed(pid):
         raise HTTPException(400, f"모르는 공급자: {pid}")
     cur["provider"] = pid
     models = dict(cur.get("models") or {})
@@ -906,6 +1076,8 @@ async def set_llm_config(body: LlmConfigBody):
         efforts = dict(cur.get("efforts") or {})
         efforts[pid] = body.effort.strip()
         cur["efforts"] = efforts
+    if body.localUrl is not None:
+        cur["localUrl"] = body.localUrl.strip()
     CONFIG["llm"] = cur
     save_config(CONFIG)
     if body.key is not None and body.key.strip():
@@ -981,10 +1153,11 @@ async def llm_chat(body: LlmChatBody):
 
 
 @app.get("/api/subscription")
-async def subscription():
+async def subscription(account: str | None = None):
+    """★계정별이다 (`?account=`) — 잔액·Opus 잔량은 계정마다 다르다. 없으면 첫 계정."""
     import httpx
 
-    token = nai_token()
+    token = nai_token(account)
     if not token:
         raise HTTPException(400, "NAI 토큰이 설정되지 않았습니다.")
     async with httpx.AsyncClient(timeout=20) as client:
@@ -1482,7 +1655,8 @@ async def _generate_one(body: GenBody) -> dict:
         tile_rect = (x, y, w, h)
 
     # ★vibe 인코딩은 **조립 전에** 한다 — 유료 호출이라 캐시 판정이 여기서 끝나야 한다
-    await nai.encode_vibes(req, nai_token(), vibes)
+    token = nai_token(body.account)
+    await nai.encode_vibes(req, token, vibes)
     payload = nai.build_payload(req)
     if body.stream:
         # ★★**중간 그림을 흘린다** — 그리는 동안 보여 주면 기다림이 짧게 느껴지고, 잘못 가고
@@ -1533,7 +1707,7 @@ async def _generate_one(body: GenBody) -> dict:
 
         pump = asyncio.create_task(_pump())
         try:
-            png, seed = await nai.generate_streaming(payload, nai_token(), _step)
+            png, seed = await nai.generate_streaming(payload, token, _step)
         finally:
             closed = True
             woke.set()
@@ -1542,7 +1716,7 @@ async def _generate_one(body: GenBody) -> dict:
             except Exception:
                 pump.cancel()
     else:
-        png, seed = await nai.generate_with_payload(payload, nai_token())
+        png, seed = await nai.generate_with_payload(payload, token)
 
     # ★인페인트 결과를 **보낸 원본 위에 소프트 마스크로 되붙인다** (7절).
     #   NAI 결과는 마스크 밖도 미세하게 달라져서, 그대로 저장하면 고치지 않은 자리가 바뀐다.
@@ -1665,6 +1839,8 @@ class UpscaleBody(BaseModel):
     file: str
     #: 버전 뿌리 — 없으면 이 파일이 뿌리다 (강화와 같은 자리를 쓴다)
     enhance_of: str | None = None
+    #: 어느 NAI 계정으로 (`GenBody.account` 와 같다)
+    account: str | None = None
 
 
 @app.post("/api/upscale")
@@ -1687,7 +1863,7 @@ async def upscale_image(body: UpscaleBody):
 
     b64 = base64.b64encode(src.read_bytes()).decode()
     try:
-        png = await nai.upscale(b64, w, h, nai_token())
+        png = await nai.upscale(b64, w, h, nai_token(body.account))
     except RuntimeError as e:
         raise HTTPException(502, str(e))
 
@@ -1832,7 +2008,11 @@ class QueueBody(BaseModel):
 async def _process_job(job: dict) -> None:
     qb: QueueBody = job["request"]
     job_id = job["id"]
-    await Q.broadcast({"type": "job_start", "job_id": job_id, "count": job["count"],
+    # ★★**이 잡의 차선** — 진행률·취소·「지금 만드는 씬」은 차선 것이다 (계정마다 나란히 돈다).
+    #   방송에는 `account` 를 실어 화면이 어느 줄인지 안다. `progress` 는 합계 + 차선별이다 (`Q.progress`).
+    lane: genqueue.Lane = job["lane"]
+    acc = lane.id
+    await Q.broadcast({"type": "job_start", "job_id": job_id, "count": job["count"], "account": acc,
                        "progress": Q.progress()})
 
     units = qb.items or [{}]
@@ -1842,11 +2022,11 @@ async def _process_job(job: dict) -> None:
     #   한 바퀴가 끝날 때마다 전체를 견줄 수 있어야 중간에 멈추고 고칠지 판단이 선다.
     for _ in range(max(1, qb.count)):
         for unit in units:
-            if Q.cancel_current:
+            if lane.cancel_current:
                 # ★취소는 **다음 장부터** 먹는다 — 이미 NAI 에 돈을 낸 장은 버리지 않는다
-                left = Q.total_images - Q.completed_images
-                Q.total_images = Q.completed_images
-                await Q.broadcast({"type": "job_cancelled", "job_id": job_id,
+                left = lane.total_images - lane.completed_images
+                lane.total_images = lane.completed_images
+                await Q.broadcast({"type": "job_cancelled", "job_id": job_id, "account": acc,
                                    "cancelled_images": left, "progress": Q.progress()})
                 return
             # ★단위(셀)마다 다른 값만 base 위에 덮는다 — 나머지 설정은 공유한다
@@ -1854,29 +2034,32 @@ async def _process_job(job: dict) -> None:
             # ★★**지금 만드는 씬을 알린다** (사용자 실측 2026-08-25). 화면이 자기 대기 목록의
             #   맨 앞을 「생성 중」으로 찍고 있었는데, 배치가 겹치면 그 순서가 실제와 어긋나
             #   **엉뚱한 칸에 「생성 중」이 뜨고 그림은 「대기 중」 칸에 나타났다.**
-            Q.current_cell = {"scene_group_id": one.scene_group_id, "cell_id": one.cell_id}
-            await Q.broadcast({"type": "job_progress", "job_id": job_id, "progress": Q.progress()})
+            # ★워크스페이스도 싣는다 (사용자 실측 2026-09-02: 복제한 워크스페이스는 씬 그룹 id 가 같아서,
+            #   한쪽에서 생성하면 다른 쪽에도 「생성 중」이 떴다). 화면은 제 워크스페이스 것만 본다
+            lane.current_cell = {"workspace": one.workspace, "scene_group_id": one.scene_group_id, "cell_id": one.cell_id}
+            await Q.broadcast({"type": "job_progress", "job_id": job_id, "account": acc, "progress": Q.progress()})
             try:
-                r = await _generate_one(one)
+                # ★토큰은 **차선의 계정**으로 — 요청이 든 값이 아니라 차선이 정본이다 (같은 값이지만 한 곳만 읽는다)
+                r = await _generate_one(one.model_copy(update={"account": acc}))
             except Exception as e:
                 print(f"[queue] 생성 실패 (job {job_id}, cell={one.cell}): {e}")
                 # ★★실패도 **한 장으로 센다** (v2 `backend.py:3178` 의 "에러도 완료로 카운트").
                 #   안 세면 `completed < total` 이 영원히 유지돼 큐 줄과 「생성 중」이
                 #   안 사라진다 (감사 2026-08-16).
-                Q.completed_images += 1
-                await Q.broadcast({"type": "image_error", "job_id": job_id, "error": str(e),
+                lane.completed_images += 1
+                await Q.broadcast({"type": "image_error", "job_id": job_id, "account": acc, "error": str(e),
                                    "cell": one.cell, "progress": Q.progress()})
                 continue
-            Q.completed_images += 1
+            lane.completed_images += 1
             # ★★자동 저장을 껐으면 **파일이 없다**. 그때는 기록으로 남기는 `image` 가 아니라
             #   미리보기로 보낸다 — 안 가리면 화면이 `file: null` 로 레코드를 만들어
             #   씬 칸에 깨진 칸이 생긴다 (감사 2026-08-16). 되돌려 볼 버퍼에도 안 쌓는다
             #   (몇 MB 짜리 base64 라 500장 버퍼를 금세 채운다).
             if not r.get("file"):
-                await Q.broadcast({"type": "image_preview", "job_id": job_id, **r,
+                await Q.broadcast({"type": "image_preview", "job_id": job_id, "account": acc, **r,
                                    "progress": Q.progress()})
                 continue
-            msg = {"type": "image", "job_id": job_id, **r}
+            msg = {"type": "image", "job_id": job_id, "account": acc, **r}
             # ★★**썸네일을 미리 구워 둔다** (사용자 지적 2026-08-26: *"생성 완료 알림이 오고
             #   1초 정도 지나야 이미지가 뜸"*). 화면이 쓰는 것은 원본이 아니라 파생 썸네일인데
             #   (`/api/thumb`), 그것이 **첫 요청 때** 구워졌다 — 열고·디코드하고·LANCZOS 로
@@ -1894,20 +2077,27 @@ async def _process_job(job: dict) -> None:
             msg["progress"] = Q.progress()
             await Q.broadcast(msg)
 
-    await Q.broadcast({"type": "job_done", "job_id": job_id, "progress": Q.progress()})
-    # ★★큐가 비면 진행률 회계를 0 으로 되돌린다 (v2 `backend.py:3209-3211` 이식).
+    await Q.broadcast({"type": "job_done", "job_id": job_id, "account": acc, "progress": Q.progress()})
+    # ★★차선의 큐가 비면 진행률 회계를 0 으로 되돌린다 (v2 `backend.py:3209-3211` 이식).
     #   안 되돌리면 completed/total 이 앱을 켠 뒤로 계속 쌓여서, 다음 배치가 "0/2" 가 아니라
     #   "8/10" 으로 보이고 진행바가 처음부터 80% 에서 시작한다.
     #   ★알림을 보낸 **뒤에** 되돌린다 — 순서를 바꾸면 끝난 배치의 장 수가 0 으로 나간다.
     #   ★`recent_images`·`image_sequence` 는 그대로 둔다 (새로고침 복원의 근거다).
-    if not Q.queue:
-        Q.completed_images = 0
-        Q.total_images = 0
+    #   ★차선마다 따로다 — 다른 계정이 아직 돌고 있어도 이쪽 회계는 여기서 끝난다.
+    if not lane.queue:
+        lane.completed_images = 0
+        lane.total_images = 0
 
 
 @app.on_event("startup")
 async def _start_queue():
     app.state.queue_task = asyncio.create_task(genqueue.run_loop(Q, _process_job))
+    # ★★**주소는 여기서 남긴다** (실측 2026-08-31). `main()` 에만 두면 개발 리로드 모드에서
+    #   워커가 그 길을 안 지나 **파일이 옛 주소로 남는다** — 실제로 시험 서버가 적어 둔 포트가
+    #   그대로 남아 개발판에 못 붙었다. 서버가 뜨는 자리는 어느 모드든 반드시 지난다.
+    write_mcp_endpoint()
+    # ★검열 모델을 뒤에서 미리 올린다 (`censor.warm` 의 ★★주). 데몬 스레드 — 끝나기 전에 서버가 내려가도 붙잡지 않는다
+    threading.Thread(target=censor.warm, name="censor-warm", daemon=True).start()
 
 
 @app.on_event("shutdown")
@@ -1922,29 +2112,49 @@ async def _stop_queue():
 @app.post("/api/generate/queue")
 async def generate_queue(body: QueueBody):
     n = max(1, len(body.items or [{}])) * max(1, body.count)
-    job_id = Q.add_job(body, n)
-    await Q.broadcast({"type": "queued", "job_id": job_id, "count": n, "progress": Q.progress()})
-    return {"ok": True, "job_id": job_id, "count": n}
+    # ★★차선은 **넣는 순간의 계정**으로 정해진다 (사용자 결정 2026-09-02, 1안). 없거나 지워진 계정은
+    #   첫 계정이다. 이 뒤로 워크스페이스의 계정을 바꿔도 이 잡은 이 차선에 남는다.
+    acc = ACCOUNTS.resolve(body.base.account)
+    job_id = Q.add_job(body, n, acc, ACCOUNTS.name_of(acc))
+    await Q.broadcast({"type": "queued", "job_id": job_id, "count": n, "account": acc, "progress": Q.progress()})
+    return {"ok": True, "job_id": job_id, "count": n, "account": acc}
 
 
 @app.post("/api/cancel-queue")
-async def cancel_queue():
-    """★**취소 창구는 이것 하나다** (사용자 결정 2026-08-18).
+async def cancel_queue(account: str | None = None):
+    """★**취소 창구는 이것 하나다** (사용자 결정 2026-08-18). `?account=` 를 주면 **그 차선만**,
+    없으면 전부다 (계정별 취소 — 사용자 결정 2026-09-02, 1안).
 
     지금 NAI 로 나간 한 장은 그대로 두고(원자적 API 라 못 끊는다) **나머지를 전부** 뺀다.
     예전에는 창구가 둘이었는데(`cancel-current`·`clear-queue`) 어느 쪽도 혼자서는
     배치를 못 멈췄다 — v3 는 배치 전체가 잡 하나라, 잡이 시작되면 대기 큐가 비어 있어
     「큐 비우기」가 지울 것이 없었다 (감사 D5).
     """
-    jobs, images, running = Q.cancel_all()
-    Q.total_images = max(Q.completed_images, Q.total_images - images)
+    jobs, images, running = await _cancel_lanes(account)
+    return {"ok": True, "cleared_jobs": jobs, "cleared_images": images, "running": running}
+
+
+async def _cancel_lanes(account: str | None) -> tuple[int, int, bool]:
+    """차선 하나(`account`)를, 없으면 전부 끊고 화면에 알린다 — 취소 창구와 계정 삭제가 함께 쓴다."""
+    lanes = [Q.lanes[account]] if account and account in Q.lanes else ([] if account else list(Q.lanes.values()))
+    jobs = images = 0
+    running = False
+    for ln in lanes:
+        j, i, r = ln.cancel_all()
+        # ★걷어낸 대기 장 수만큼 총량을 줄인다 — 차선마다 자기 것만
+        ln.total_images = max(ln.completed_images, ln.total_images - i)
+        jobs += j
+        images += i
+        running = running or r
+    if not lanes:
+        return jobs, images, running
     await Q.broadcast({"type": "queue_cancelled", "cleared_jobs": jobs,
-                       "cleared_images": images,
+                       "cleared_images": images, "account": account or None,
                        # ★아직 올 것이 몇 장인가 — 화면은 이 수만큼만 대기 칸을 남긴다.
                        #   돌고 있으면 in-flight 한 장, 아니면 하나도 없다
                        "remaining": 1 if running else 0,
                        "progress": Q.progress()})
-    return {"ok": True, "cleared_jobs": jobs, "cleared_images": images, "running": running}
+    return jobs, images, running
 
 
 @app.get("/api/vibe-cache")
@@ -2080,8 +2290,10 @@ async def ws_endpoint(websocket: WebSocket, clientId: str | None = None):
         Q._unregister(client_id, websocket)
 
 
-@app.get("/api/file/{ws}/{rel:path}")
+@app.api_route("/api/file/{ws}/{rel:path}", methods=["GET", "HEAD"])
 async def get_file(ws: str, rel: str):
+    """★HEAD 도 받는다 — 화면이 깨진 그림을 보고 **정말 없는지** 몸체 없이 묻는 창구다
+    (`store/workspace.forgetMissing`). FastAPI 의 `@app.get` 은 HEAD 를 안 붙여 405 가 났다 (실측 2026-09-06)."""
     p = store.file_path(ws, rel)
     if not p:
         raise HTTPException(404, "not found")
@@ -2540,6 +2752,11 @@ class CensorApply(CensorSource):
     suffix: str = "_censored"
     # ★결과를 둘 폴더 (아웃풋 루트 기준). 비면 원본 옆에 둔다. v2 의 `censored` 폴더 자리다
     dest: str | None = None
+    #: 저장 자리 — **일괄변환과 같은 세 갈래**다 (`tools.MODES`, 사용자 지시 2026-09-04).
+    #  `overwrite` 원본 자리에 (옛 파일은 휴지통) · `sub` 첫 그림 아래 `output/` · `folder` 고른 폴더.
+    #  ★`sub`·`folder` 의 실제 폴더는 화면이 `dest` 로 준다 — 어느 것이 「첫 그림」인지는
+    #    한 장씩 오는 이 창구가 알 수 없기 때문이다 (일괄변환은 목록을 통째로 받는다).
+    mode: str = ""
     # 밖에서 떨군 그림에는 원본 경로가 없다. 저장할 이름을 화면이 준다
     name: str | None = None
 
@@ -2633,7 +2850,9 @@ async def translate_text(body: TranslateReq):
 
 
 @app.get("/api/censor/models")
-async def censor_models():
+def censor_models():
+    """번들된 모델 목록. ★`def` 다 — 클래스 이름을 읽으려면 세션을 만들어야 해서(첫 호출 ~1초, 디스크가
+    차가우면 더), `async` 로 두면 그동안 서버 전체가 멈춘다 (`censor.warm` 의 ★★주)."""
     return {"models": censor.models()}
 
 
@@ -2665,7 +2884,8 @@ def censor_image(body: CensorImage):
         r = body.max_side / max(w, h)
         out = im.resize((max(1, int(w * r)), max(1, int(h * r))), Image.LANCZOS)
     buf = io.BytesIO()
-    out.convert("RGB").save(buf, format="WEBP", quality=92)
+    # ★알파를 남긴다 (`tools.thumb_image` 의 ★★주) — 떼면 투명 경계가 색 노이즈로 덮인다
+    tools_mod.keep_alpha(out).save(buf, format="WEBP", quality=92)
     return {
         "image": "data:image/webp;base64," + base64.b64encode(buf.getvalue()).decode(),
         "width": w,
@@ -2673,15 +2893,54 @@ def censor_image(body: CensorImage):
     }
 
 
+def _censor_pack(rendered: bytes, src: Path | None) -> tuple[bytes, str, str]:
+    """화면이 구운 PNG 를 **저장할 형식으로 다시 압축한다** → (바이트, 형식, 확장자).
+
+    ★★사용자 지적 2026-09-06: *"검열 완료된 이미지의 용량이 너무 큰데"*. 캔버스 `toBlob` 의 PNG 는 **RGBA
+      4채널에 빠른 압축**이라 같은 그림을 RGB 로 다시 압축한 것보다 1.8배쯤 크다 (합성 832×1216 실측:
+      4.08MB → 2.33MB, 픽셀은 그대로). 덮개는 원본 위에 합성된 것이라 알파가 전부 255 다 — 떼어도 잃는 것이
+      없다. 알파가 하나라도 255 가 아니면(투명 원본) 그대로 둔다.
+    ★원본이 JPEG 면 JPEG 품질 95 로 (v2 `renderCensoredImageOnCanvas` 와 같다 — jpg 원본을 PNG 로 내면
+      용량이 몇 배로 분다). WebP 원본은 WebP(무손실, `meta.write` 규칙). 그 밖은 PNG."""
+    img = Image.open(io.BytesIO(rendered))
+    if img.mode == "RGBA" and img.getchannel("A").getextrema()[0] == 255:
+        img = img.convert("RGB")
+    elif img.mode not in ("RGB", "RGBA"):
+        img = img.convert("RGB")
+    ext = (src.suffix.lower() if src else "") or ".png"
+    if ext in (".jpg", ".jpeg"):
+        fmt, ext = "JPEG", ".jpg"
+        if img.mode == "RGBA":
+            img = img.convert("RGB")
+    elif ext == ".webp":
+        fmt = "WEBP"
+    else:
+        fmt, ext = "PNG", ".png"
+    out = io.BytesIO()
+    if fmt == "JPEG":
+        img.save(out, format="JPEG", quality=95)
+    elif fmt == "WEBP":
+        img.save(out, format="WEBP", lossless=True)
+    else:
+        img.save(out, format="PNG")
+    return out.getvalue(), fmt, ext
+
+
 @app.post("/api/censor/apply")
 def censor_apply(body: CensorApply):
-    """가린 그림을 **새 파일로** 저장한다 (원본은 그대로).
+    """가린 그림을 저장한다. 자리는 `mode` 가 정한다 (일괄변환과 같은 세 갈래).
 
-    ★덮어쓰기 경로를 만들지 말 것 — 생성물은 Anlas 가 든 원본이다.
+    ★★**덮어쓰기가 생겼다** (사용자 지시 2026-09-04: *"저장 방식을 파일 일괄변환이랑 동일한
+      선택지를 고를 수 있게"*). 여기 있던 *"덮어쓰기 경로를 만들지 말 것 — 생성물은 Anlas 가
+      든 원본이다"* 는 그 지시로 걷혔다. 대신 **지우지 않는다** — 옛 파일은 휴지통으로 가고
+      (`tools.retire`), 물러날 자리가 없으면 덮어쓰기를 **하지 않고 세운다.**
     ★박스가 **0개여도 저장한다.** 일괄 저장에서 "찾은 게 없는 장"이 결과 폴더에서 빠지면
       그 폴더가 원본 묶음의 대역이 되지 못한다 (v2 `completeCensoring` 도 그대로 넘긴다).
     ★★**픽셀은 화면이 그려 보낸다.** 여기서 다시 그리지 않는다 (`CensorApply` 의 ★★주)."""
-    _, src = _censor_open(body)
+    # ★★연 그림은 **바로 닫는다.** 자리(`src`)만 쓰는데 열어 둔 채로 두면 윈도우가 파일을
+    #   잡고 있어 **덮어쓰기가 휴지통으로 못 옮긴다** (실측 2026-09-04: WinError 32).
+    _probe, src = _censor_open(body)
+    _probe.close()
     raw_img = body.image.split(",", 1)[-1] if body.image else ""
     if not raw_img:
         raise HTTPException(400, "그린 그림이 없습니다")
@@ -2689,33 +2948,74 @@ def censor_apply(body: CensorApply):
         rendered = base64.b64decode(raw_img)
     except (binascii.Error, ValueError) as e:
         raise HTTPException(400, f"그림을 못 읽었습니다: {e}")
+    # ★알파를 떼고 원본 형식으로 다시 압축한다 — 아래 어느 갈래도 브라우저 PNG 를 그대로 쓰지 않는다
+    try:
+        packed, fmt, ext = _censor_pack(rendered, src)
+    except Exception as e:
+        raise HTTPException(400, f"그림을 못 읽었습니다: {e}")
 
     # 어디에 둘까. 폴더를 골랐으면 거기, 아니면 원본 옆
     stem = Path(body.name).stem if body.name else (src.stem if src else "censored")
     folder = src.parent if src else WS_ROOT.resolve()
-    if body.dest is not None:
+    # ★★**덮어쓰기** — 원본 자리에 같은 이름으로 선다 (꼬리표를 안 붙인다). 옛 파일은
+    #   지우지 않고 휴지통으로 간다 (`tools._retire` 와 같은 규칙: 뿌리 안이면 앱 휴지통,
+    #   밖이면 OS 휴지통). 물러날 자리가 없으면 **덮어쓰지 않고 세운다.**
+    if body.mode == "overwrite":
+        if src is None:
+            raise HTTPException(400, "원본 자리를 모르는 그림은 덮어쓸 수 없습니다. 저장 폴더를 정해 주세요.")
+        dst = src.parent / f"{src.stem}{ext}"
+        # ★생성 설정은 **물러나기 전에** 읽어 둔다 (휴지통으로 간 뒤에는 못 읽는다)
         try:
-            folder = files.under(WS_ROOT, body.dest)
-        except ValueError as e:
-            raise HTTPException(400, str(e))
+            old_bytes = src.read_bytes()
+            # ★★`with` 로 **반드시 닫는다** — 안 닫으면 윈도우가 파일을 잡고 있어 휴지통으로
+            #   못 옮긴다 (실측 2026-09-04: WinError 32 로 덮어쓰기가 통째로 실패했다)
+            with Image.open(io.BytesIO(old_bytes)) as _im:
+                keep_meta = (meta.read_raw(old_bytes), dict(_im.info))
+        except Exception:
+            keep_meta = None
+        gone = [q for q in {src, dst} if q.exists()]
+        if gone and not tools_mod.retire(WS_ROOT, gone):
+            raise HTTPException(400, "옛 파일을 휴지통으로 못 보내 덮어쓰기를 멈췄습니다.")
+        try:
+            if keep_meta is None:
+                raise ValueError("옮길 설정이 없다")
+            dst.write_bytes(meta.write(packed, keep_meta[0], fmt, 95, keep_meta[1]))
+        except Exception:
+            dst.write_bytes(packed)
+        root = WS_ROOT.resolve()
+        rel = dst.relative_to(root) if str(dst).startswith(str(root)) else dst
+        return {"file": str(rel).replace("\\", "/"), "name": dst.name}
+    if body.dest is not None:
+        # ★★**절대 경로면 그대로 쓴다** (일괄변환 `tools.convert` 와 같은 규칙). 「저장 폴더 지정」은 윈도우
+        #   폴더 찾기로 고른 절대 경로이고, 밖에서 가져온 그림의 `output/` 하위도 절대 경로다 — 루트 안만
+        #   받던 때는 그 둘이 전부 400 이었다 (사용자 제보 2026-09-06: "검열 완료를 누르면 아무 파일도
+        #   안 뜨고 어디에도 저장 안 됨"). 상대 경로는 예전대로 아웃풋 루트 아래.
+        p = Path(body.dest)
+        if p.is_absolute():
+            folder = p
+        else:
+            try:
+                folder = files.under(WS_ROOT, body.dest)
+            except ValueError as e:
+                raise HTTPException(400, str(e))
         folder.mkdir(parents=True, exist_ok=True)
     if src is None and not body.name:
         # 갈 곳도 이름도 없다. 옛 계약대로 바이트로 돌려준다
-        return {"image": "data:image/png;base64," + base64.b64encode(rendered).decode()}
+        return {"image": "data:image/png;base64," + base64.b64encode(packed).decode()}
 
-    dst = folder / f"{stem}{body.suffix}.png"
+    dst = folder / f"{stem}{body.suffix}{ext}"
     n = 2
     while dst.exists():
-        dst = folder / f"{stem}{body.suffix}_{n}.png"
+        dst = folder / f"{stem}{body.suffix}_{n}{ext}"
         n += 1
     # ★생성 설정을 데려간다 — 검열본에서도 재생성할 수 있어야 한다
     try:
         if src is None:
             raise ValueError("원본 파일이 없다")
         raw = meta.read_raw(src.read_bytes())
-        dst.write_bytes(meta.write(rendered, raw, "PNG", 95, dict(Image.open(src).info)))
+        dst.write_bytes(meta.write(packed, raw, fmt, 95, dict(Image.open(src).info)))
     except Exception:
-        dst.write_bytes(rendered)
+        dst.write_bytes(packed)
     root = WS_ROOT.resolve()
     rel = dst.relative_to(root) if str(dst).startswith(str(root)) else dst
     return {"file": str(rel).replace("\\", "/"), "name": dst.name}
@@ -2823,6 +3123,29 @@ async def log_reveal():
         raise HTTPException(500, str(e))
 
 
+class OpenDir(BaseModel):
+    path: str = ""
+
+
+@app.post("/api/files/open-dir")
+async def files_open_dir(body: OpenDir):
+    """**절대 경로 폴더**를 탐색기로 연다 — 검열의 「폴더 열기」가 저장 자리(고른 폴더·밖에서 가져온 그림의
+    `output/`)를 열 때. `files.reveal` 은 아웃풋 루트 안만 열어서 그 자리를 못 열었다.
+    ★있는 폴더만, 절대 경로만 연다 (파일이나 상대 경로는 400). `files.open_dir` 의 주석이 말하는 「사용자가
+      준 경로」란 자유 입력을 뜻한다 — 여기 오는 것은 OS 폴더 찾기로 고른 자리와 그림이 있는 폴더뿐이다."""
+    p = Path(body.path)
+    if not body.path or not p.is_absolute():
+        raise HTTPException(400, "열 수 있는 폴더가 아닙니다")
+    # ★★없는 자리면 **있는 데까지** 올라가 연다 (`files.reveal` 과 같은 규칙. 사용자 지적 2026-09-06:
+    #   검열 후 탭에서 파일을 지운 뒤 「폴더 열기」가 400 이었다 — 표시된 경로가 사라졌어도 그 위는 열 수 있다)
+    while not p.is_dir() and p.parent != p:
+        p = p.parent
+    if not p.is_dir():
+        raise HTTPException(400, "열 수 있는 폴더가 아닙니다")
+    await asyncio.to_thread(files.open_dir, p)
+    return {"ok": True}
+
+
 @app.post("/api/files/reveal")
 async def files_reveal(body: FilesName):
     """탐색기에서 연다 — ★파일이면 고른 채로.
@@ -2872,6 +3195,9 @@ def main():
     ap.add_argument("--port", type=int, default=8770)
     args = ap.parse_args()
     CURRENT_PORT = args.port
+    # ★**여기부터가 진짜 서비스다** — 주소 파일은 이 표식이 있을 때만 쓰인다 (위 ★★주).
+    #   리로드 워커는 환경을 물려받으므로 그쪽에서도 켜져 있다.
+    os.environ["PEROPIX_SERVING"] = "1"
     # ★개발 중에는 **파이썬을 고치면 알아서 다시 뜬다** (사용자 지시 2026-08-08).
     #   예전엔 사이드카가 앱과 함께만 떠서, 백엔드를 고치면 앱을 통째로 재실행해야 했다.
     #   ★보는 곳은 `backend/` **하나뿐**이다 — 작업 폴더를 보게 두면 그림이 한 장 생길

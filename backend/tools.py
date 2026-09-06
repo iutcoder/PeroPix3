@@ -75,12 +75,26 @@ def _thumb(data: bytes, max_side: int) -> str:
 
 
 def thumb_image(im: Image.Image, max_side: int) -> str:
-    """이미 연 그림을 줄여 data URL 로. 태거처럼 그림을 이미 들고 있는 자리가 쓴다."""
-    small = im.convert("RGB")
+    """이미 연 그림을 줄여 data URL 로. 태거처럼 그림을 이미 들고 있는 자리가 쓴다.
+
+    ★★**알파를 떼지 않는다** (사용자 지적 2026-09-06: *"투명 이미지가 생성 직후랑 갤러리 등에서는
+      정상적으로 표시되는데, exif 리더의 썸네일이나 검열모드 등에서는 누끼 경계 부분이 노이즈가
+      엄청 심해짐"*). 투명 PNG 는 알파가 0 에 가까운 픽셀의 RGB 에 쓰레기 값이 들어 있다 — 브라우저는
+      알파를 곱해 가리지만, `convert("RGB")` 로 알파를 떼면 그 값이 그대로 드러나 경계가 색 노이즈로
+      덮인다. 갤러리 썸네일(`thumbs.derive`)이 그렇듯 알파를 남긴 WebP 로 준다."""
+    small = keep_alpha(im)
     small.thumbnail((max_side, max_side), Image.LANCZOS)
     buf = io.BytesIO()
-    small.save(buf, format="JPEG", quality=80)
-    return "data:image/jpeg;base64," + base64.b64encode(buf.getvalue()).decode("ascii")
+    small.save(buf, format="WEBP", quality=80)
+    return "data:image/webp;base64," + base64.b64encode(buf.getvalue()).decode("ascii")
+
+
+def keep_alpha(im: Image.Image) -> Image.Image:
+    """저장·전송용 모드로 — 알파가 있으면 RGBA, 없으면 RGB. ★`convert("RGB")` 로 알파를 떼지 않는다 (위 ★★주)"""
+    if im.mode in ("RGB", "RGBA"):
+        return im
+    has_alpha = "A" in im.getbands() or (im.mode == "P" and "transparency" in im.info)
+    return im.convert("RGBA" if has_alpha else "RGB")
 
 
 def probe(root: Path, items: list[Item]) -> dict:
@@ -145,6 +159,13 @@ def _free(d: Path, stem: str, ext: str) -> Path:
 MODES = ("overwrite", "sub", "folder")
 #: 「첫 이미지 하위에 output 폴더를 만들어 저장」이 만드는 폴더 이름
 SUB_DIR = "output"
+
+
+def retire(root: Path, paths: list[Path]) -> bool:
+    """★검열 저장도 같은 규칙을 쓴다 (`server.censor_apply` 의 덮어쓰기).
+    돌려주는 것은 **다 물러났는가** — 거짓이면 부르는 쪽이 덮어쓰기를 멈춘다."""
+    _retire(root, paths)
+    return not any(p.exists() for p in paths)
 
 
 def _retire(root: Path, paths: list[Path]) -> None:

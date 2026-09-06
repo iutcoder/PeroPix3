@@ -59,6 +59,17 @@ export default defineConfig({
   server: {
     port: 1420,
     strictPort: true,
+    /* ★★**큰 폴더는 감시에서 뺀다** (2026-09-05 실측: 앱이 무한 로딩·빈 화면). 뷔트는 기본으로
+       `node_modules`·`.git` 만 빼고 프로젝트 전체를 감시하는데, 웹뷰 캐시(`webview`, 18,000개 파일이
+       앱이 켜진 동안 계속 바뀐다)·Rust 산출물(`src-tauri/target`, 16,000개)·작업 폴더·임시 폴더까지
+       46,000여 개를 감시하다 이벤트 루프가 막혀 `main.tsx` 한 장에 16초, 그 다음 모듈은 응답이 없었다.
+       같은 요청이 이 목록을 넣으면 0.2~1초다. 코드(`src`)·`public`·`index.html` 은 그대로 감시한다. */
+    watch: {
+      ignored: [
+        "**/webview/**", "**/src-tauri/**", "**/workspaces/**", "**/models/**", "**/gallery/**",
+        "**/_tmp/**", "**/_archive/**", "**/_dist/**", "**/dist/**", "**/logs/**", "**/backend/**",
+      ],
+    },
   },
   build: {
     target: "chrome110",

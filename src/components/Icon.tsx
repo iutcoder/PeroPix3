@@ -251,6 +251,9 @@ export const Icon = {
   ),
   /** 꺼짐 — 블록의 `○` */
   dotOff: s(<circle cx="12" cy="12" r="7" />),
+  /** 검열 붓 모양 — 사각·원 */
+  shapeSquare: s(<rect x="5" y="5" width="14" height="14" rx="1" />),
+  shapeRound: s(<circle cx="12" cy="12" r="7" />),
   spark: s(
     <>
       <path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9z" />

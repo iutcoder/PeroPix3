@@ -13,7 +13,8 @@ import { toast } from "../store/toast";
 import { MAX_PER_IMAGE } from "../lib/anlas";
 import { costNow } from "../lib/costNow";
 import { usageDuration, usageFullInSeconds, usageLow, usagePercent, usageRefillPerHour } from "../lib/opusUsage";
-import { useSub } from "../store/sub";
+import { useCurrentSub, useSub } from "../store/sub";
+import { currentAccountId, useAccounts, useCurrentAccount } from "../store/accounts";
 import { useAnlasMeter } from "../store/anlasMeter";
 import { useHasToken } from "../store/health";
 import { Icon } from "../components/Icon";
@@ -32,8 +33,12 @@ import { Icon } from "../components/Icon";
  */
 export function GenerateFooter({ compact = false }: { compact?: boolean }) {
   const t = useI18n((s) => s.t);
-  // 구독 상태는 **스토어 하나**가 들고 있다 (업스케일 값 표시도 같은 곳을 본다)
-  const sub = useSub((s) => s.sub);
+  // 구독 상태는 **스토어 하나**가 들고 있다 (업스케일 값 표시도 같은 곳을 본다).
+  // ★★**지금 워크스페이스의 계정** 것이다 (사용자 결정 2026-09-02) — 워크스페이스를 옮기면 그쪽 계정으로 바뀐다
+  const sub = useCurrentSub();
+  const accounts = useAccounts((s) => s.items);
+  const account = useCurrentAccount();
+  const setAccount = useWs((s) => s.setAccount);
   const { params, set, busy, error, generateAll } = useGen();
   const { progress, phase, cancelAll } = useQueue();
   /** 잔액을 다시 물어본 횟수 — 누를 때마다 아이콘을 **한 바퀴 더** 돌린다 (v2 `refreshAnlasBtn`).
@@ -41,7 +46,7 @@ export function GenerateFooter({ compact = false }: { compact?: boolean }) {
   const [turns, setTurns] = useState(0);
   /** ★★취소를 **받았다**는 상태 (사용자 지적 2026-08-19: 눌러도 눌린 느낌이 없었다).
    *  받은 뒤에는 다시 못 누르고, 단추가 「취소 중」으로 바뀐다. 배치가 끝나면 저절로 풀린다. */
-  const [cancelled, setCancelled] = useState(false);
+  const [cancelled, setCancelled] = useState<Record<string, boolean>>({});
   /** ★★막 눌렀다 (사용자 지적 2026-08-19: 눌린 느낌이 없다). 큐가 돌기 시작하기까지
    *  잠깐이지만 그 사이에 아무 반응이 없으면 **안 눌린 줄 안다.** 그동안 눌린 모양으로 두고
    *  다시 못 누르게 한다 — 그 뒤로는 `running` 이 이어받는다. */
@@ -110,18 +115,29 @@ export function GenerateFooter({ compact = false }: { compact?: boolean }) {
      같은 것을 쓴다 — 자동 승인이 「Anlas 가 나가는가」로 갈리기 때문이다 (사용자 결정).
      여기 조립을 되살리지 말 것: 두 벌이 되면 푸터에 보이는 값과 승인 카드의 값이 갈린다. */
   const cost = costNow(1);
-  const running = progress.total > progress.completed;
+  /** ★★**이 워크스페이스의 차선** (계정별 큐, 사용자 결정 2026-09-02). 차선 정보가 없는 옛 백엔드면 합계다.
+   *  `laneId` 가 있으면 숫자·취소가 그 차선 것이다 — 다른 계정이 도는 것은 여기 안 섞인다 */
+  const laneId = progress.lanes && account ? account.id : undefined;
+  /** 계정이 둘 이상 — 큐 상태는 최종 프롬프트 위의 줄이 맡고 여기서는 안 띄운다 (사용자 지시 2026-09-02) */
+  const multi = accounts.length > 1;
+  const mine = (laneId && progress.lanes?.[laneId]) || progress;
+  const running = mine.total > mine.completed;
+  const laneKey = Object.entries(progress.lanes ?? {}).filter(([, l]) => l.total > l.completed || l.queue_length > 0).map(([id]) => id).join(",");
   useEffect(() => {
-    if (!running) setCancelled(false);
-  }, [running]);
+    // ★멈춘 차선의 「취소 중」 표시를 걷는다 — 전부 멈추면 전체 것도 (`"*"`)
+    const live = new Set(laneKey.split(",").filter(Boolean));
+    setCancelled((c) => Object.fromEntries(Object.entries(c).filter(([k]) => (k === "*" ? running : live.has(k)))));
+  }, [running, laneKey]);
   /** ★★취소를 누르면 **받았다고 말한다** (사용자 지적 2026-08-19: 눌러도 아무 일이 없어
    *  보였다). NAI 는 이미 나간 한 장을 못 끊으므로 **지금 것은 끝까지 나오고** 나머지가
-   *  빠진다 — 그 사실을 그 자리에서 알린다. 안 알리면 「안 눌렸다」로 읽혀 또 누르게 된다. */
-  const cancelQueue = async () => {
-    if (!running || cancelled) return;
-    setCancelled(true);
+   *  빠진다 — 그 사실을 그 자리에서 알린다. 안 알리면 「안 눌렸다」로 읽혀 또 누르게 된다.
+   *  ★`lane` 을 주면 **그 계정의 차선만** 취소한다 (1안) */
+  const cancelQueue = async (lane?: string) => {
+    const key = lane ?? "*";
+    if (!running || cancelled[key]) return;
+    setCancelled((c) => ({ ...c, [key]: true }));
     toast(t("queue.cancelSent"));
-    await cancelAll();
+    await cancelAll(lane);
   };
   /** ★한 장이 140 Anlas 를 넘으면 **생성을 막는다** — 공홈과 같은 판정이다
    *  (v2 `index.html:15878-15882`. 합계가 아니라 개별 장 비용 기준이라, 여러 장을 걸어
@@ -198,15 +214,15 @@ export function GenerateFooter({ compact = false }: { compact?: boolean }) {
         ? t("queue.stFailed")
         : phase === "partial"
           ? t("queue.stPartial")
-          : `${progress.completed}/${progress.total}`;
+          : `${mine.completed}/${mine.total}`;
   const stateInk =
     phase === "failed" ? "var(--err-ink)" : phase === "partial" ? "var(--warn)" : phase === "done" ? "var(--ok)" : "var(--accent-ink)";
   /** 끝났으면 100% 로 채워 둔다 (v2 `progressFill.style.width = '100%'`) */
   const pct =
     phase === "done" || phase === "failed" || phase === "partial"
       ? 100
-      : progress.total > 0
-        ? Math.min(100, Math.round((progress.completed / progress.total) * 100))
+      : mine.total > 0
+        ? Math.min(100, Math.round((mine.completed / mine.total) * 100))
         : 0;
 
   const genBtn = (
@@ -290,7 +306,7 @@ export function GenerateFooter({ compact = false }: { compact?: boolean }) {
         <button
           data-queue-cancel="compact"
           onClick={() => void cancelQueue()}
-          disabled={!running || cancelled}
+          disabled={!running || !!cancelled["*"]}
           /* ★안내는 한 열쇠에 통째로 담는다 — 코드에서 이으면 잇는 기호가 번역을 안 탄다 */
           data-tip={t("queue.cancelHint")}
           style={{
@@ -300,8 +316,8 @@ export function GenerateFooter({ compact = false }: { compact?: boolean }) {
             textAlign: "center",
             /* ★★`CQ` 두 글자는 좁은 레일에서 넘쳤다 (사용자 지적 2026-08-19) — 한 글자다.
                ★받은 뒤에는 흐려지고 안 눌린다. */
-            color: running && !cancelled ? "var(--err-ink)" : "var(--ink-ghost)",
-            borderColor: running && !cancelled ? "var(--err)" : "var(--line)",
+            color: running && !cancelled["*"] ? "var(--err-ink)" : "var(--ink-ghost)",
+            borderColor: running && !cancelled["*"] ? "var(--err)" : "var(--line)",
           }}
         >
           C
@@ -317,7 +333,7 @@ export function GenerateFooter({ compact = false }: { compact?: boolean }) {
               fontVariantNumeric: "tabular-nums",
             }}
           >
-            {progress.completed}/{progress.total}
+            {mine.completed}/{mine.total}
           </div>
         )}
       </div>
@@ -502,7 +518,8 @@ export function GenerateFooter({ compact = false }: { compact?: boolean }) {
         <div
           style={{
             height: "100%",
-            width: running || phase !== "idle" ? `${pct}%` : 0,
+            // ★계정이 여럿이면 진행은 위의 차선 줄이 말한다 — 여기는 선만 남는다 (자리는 그대로)
+            width: !multi && (running || phase !== "idle") ? `${pct}%` : 0,
             background: stateInk,
             transition: "width 0.18s linear",
           }}
@@ -529,6 +546,33 @@ export function GenerateFooter({ compact = false }: { compact?: boolean }) {
           color: "var(--ink-faint)",
         }}
       >
+        {/* ★★**이 워크스페이스의 NAI 계정** (사용자 결정 2026-09-02) — 채팅창 하단의 모델 선택기처럼
+            이 줄의 맨 앞에 산다. 잔액·요금·큐 줄이 전부 이 계정을 따른다. 바꿔도 **이미 큐에 넣은 것은
+            안 옮겨진다** (1안 — 큐는 넣을 때의 계정을 든다). ★계정이 **둘 이상일 때만** 뜬다 (사용자 지시
+            2026-09-02) — 하나면 고를 것이 없다. 계정이 없으면 위의 토큰 안내가 대신한다. */}
+        {accounts.length > 1 && (
+          <select
+            data-account-pick
+            value={account?.id ?? ""}
+            onChange={(e) => setAccount(e.target.value)}
+            data-tip={t("gen.accountHint")}
+            style={{
+              background: "var(--panel)",
+              border: "1px solid var(--line)",
+              borderRadius: "var(--r-2)",
+              padding: "1px var(--sp-2)",
+              fontSize: "var(--text-2xs)",
+              color: "var(--ink-soft)",
+              maxWidth: 120,
+            }}
+          >
+            {accounts.map((a) => (
+              <option key={a.id} value={a.id}>
+                {a.name}
+              </option>
+            ))}
+          </select>
+        )}
         {/* ★비용이 **어떻게 나왔나** — v2 의 `총액 (장당 × N슬롯 × M회)` (index.html:19031-19039).
             총액은 버튼에 있으므로 여기서는 분해만 보인다 (같은 값을 두 번 두지 않는다) */}
         {!cost.free && count > 1 && (
@@ -540,29 +584,33 @@ export function GenerateFooter({ compact = false }: { compact?: boolean }) {
 
         {/* ★★취소·진행은 **이 줄의 빈 자리**에 산다 (사용자 지시 2026-08-21).
             새 줄로 만들면 그만큼 위가 밀려 생성 버튼이 움직인다 — 그래서 여기다. */}
-        {(running || phase !== "idle") && (
+        {/* ★★여기 숫자는 **이 워크스페이스의 계정(차선)** 것이다 (사용자 지적 2026-09-02: 합계를 적으니
+            나란히 가던 「0/3 · 0/3」이 「0/6」으로 보였다). 취소도 이 차선만.
+            ★★**계정이 하나일 때만** 뜬다 (사용자 지시 2026-09-02) — 둘 이상이면 최종 프롬프트 위의 줄
+            (`panels/QueueLanes`)이 차선 전부를 보여 주므로 여기는 비운다. 같은 정보를 두 곳에 안 띄운다. */}
+        {!multi && (running || phase !== "idle") && (
           <span
             data-queue-state={phase}
             style={{ color: stateInk, fontVariantNumeric: "tabular-nums", whiteSpace: "nowrap" }}
           >
             {stateText}
-            {running && progress.queue_length > 0 && ` · ${t("queue.waiting", { n: progress.queue_length })}`}
+            {running && mine.queue_length > 0 && ` · ${t("queue.waiting", { n: mine.queue_length })}`}
           </span>
         )}
-        {running && (
+        {!multi && running && (
           <button
             data-queue-cancel
-            onClick={() => void cancelQueue()}
-            disabled={cancelled}
+            onClick={() => void cancelQueue(laneId)}
+            disabled={!!cancelled[laneId ?? "*"]}
             data-tip={t("queue.cancelHint")}
             style={{
               ...qbtn,
               padding: "0 var(--sp-2)",
-              color: cancelled ? "var(--ink-ghost)" : "var(--err-ink)",
-              borderColor: cancelled ? "var(--line)" : "var(--err)",
+              color: cancelled[laneId ?? "*"] ? "var(--ink-ghost)" : "var(--err-ink)",
+              borderColor: cancelled[laneId ?? "*"] ? "var(--line)" : "var(--err)",
             }}
           >
-            {cancelled ? t("queue.cancelling") : t("queue.cancel")}
+            {cancelled[laneId ?? "*"] ? t("queue.cancelling") : t("queue.cancel")}
           </button>
         )}
 
@@ -606,7 +654,7 @@ export function GenerateFooter({ compact = false }: { compact?: boolean }) {
           data-tip={t("gen.anlasRefresh")}
           onClick={() => {
             setTurns((n) => n + 1);
-            void useSub.getState().load();
+            void useSub.getState().load(currentAccountId());
           }}
           style={{
             display: "grid",

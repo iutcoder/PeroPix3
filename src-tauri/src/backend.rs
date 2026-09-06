@@ -273,6 +273,24 @@ fn trim_at(text: &str, keep: u64, hard: u64) -> usize {
     cut
 }
 
+/// 바이트째로 받아 자른다 — 남길 몸통을 돌려준다.
+///
+/// ★★**UTF-8 이 아닌 바이트가 섞여 있어도 자른다** (2026-09-05 실측: 파일이 46MB·106만 줄까지
+///   자랐다). 파이썬 자식이 콘솔 코드페이지(cp949)로 찍은 줄이 섞이면 `read_to_string` 이
+///   실패했고, 실패하면 자르기를 **조용히 건너뛰어** 상한이 없는 것과 같았다. 깨진 바이트는
+///   � 로 바꿔서라도 자른다. 앞으로는 자식에게 `PYTHONIOENCODING=utf-8` 을 주므로 새 줄은
+///   전부 UTF-8 이지만, 옛 파일은 이 길로 한 번에 정리된다 (업데이트 뒤 첫 실행).
+fn trim_bytes(bytes: &[u8], keep: u64, hard: u64) -> String {
+    let text = String::from_utf8_lossy(bytes);
+    let cut = trim_at(&text, keep, hard);
+    let kept = &text[cut..];
+    if kept.starts_with(MARK) {
+        kept.to_string()
+    } else {
+        format!("{CUT_NOTE}{kept}")
+    }
+}
+
 fn open_log(root: &Path) -> Option<File> {
     let dir = root.join("logs");
     let _ = std::fs::create_dir_all(&dir);
@@ -284,15 +302,8 @@ fn open_log(root: &Path) -> Option<File> {
     }
 
     if std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0) > LOG_MAX {
-        if let Ok(text) = std::fs::read_to_string(&path) {
-            let cut = trim_at(&text, LOG_KEEP, LOG_HARD);
-            let kept = &text[cut..];
-            let body = if kept.starts_with(MARK) {
-                kept.to_string()
-            } else {
-                format!("{CUT_NOTE}{kept}")
-            };
-            let _ = std::fs::write(&path, body);
+        if let Ok(bytes) = std::fs::read(&path) {
+            let _ = std::fs::write(&path, trim_bytes(&bytes, LOG_KEEP, LOG_HARD));
         }
     }
 
@@ -344,6 +355,10 @@ pub fn spawn() -> std::io::Result<Child> {
         .env("PEROPIX_KEY", backend_key())
         .env("PEROPIX_DATA_DIR", &root)
         .env("PEROPIX_RESOURCE_DIR", &resources)
+        // ★★파이썬의 출력은 **UTF-8 로** — 안 주면 윈도우 콘솔 코드페이지(cp949)로 찍어 로그에
+        //   두 인코딩이 섞이고, 한글이 깨져 보이며, 자르기(`trim_bytes` 주석)가 막혔다 (2026-09-05)
+        .env("PYTHONIOENCODING", "utf-8")
+        .env("PYTHONUTF8", "1")
         .current_dir(&root)
         .stdout(out.map(Stdio::from).unwrap_or_else(Stdio::null))
         .stderr(err.map(Stdio::from).unwrap_or_else(Stdio::null));
@@ -356,7 +371,7 @@ pub fn spawn() -> std::io::Result<Child> {
 
 #[cfg(test)]
 mod log_tests {
-    use super::{lock_file, trim_at, MARK};
+    use super::{lock_file, trim_at, trim_bytes, MARK};
 
     /// 실행 세 회분을 만든다 — 각 회는 경계 한 줄 + 본문 몇 줄
     fn runs(n: usize, body: usize) -> String {
@@ -402,6 +417,26 @@ mod log_tests {
         let kept = &text[cut..];
         assert_eq!(kept.matches(MARK).count(), 1);
         assert!(kept.contains("실행3 줄"));
+    }
+
+    /// ★★cp949 바이트가 섞인 옛 로그도 자른다 — `read_to_string` 이 실패해 자르기가 건너뛰어지던
+    ///   그 파일(46MB)이 업데이트 뒤 첫 실행에서 정리되어야 한다
+    #[test]
+    fn 유효하지_않은_바이트가_섞여도_자른다() {
+        let mut bytes = Vec::new();
+        for i in 1..=5 {
+            bytes.extend_from_slice(format!("{MARK}\n").as_bytes());
+            for _ in 0..20 {
+                bytes.extend_from_slice(format!("실행{i} 줄 ").as_bytes());
+                bytes.extend_from_slice(&[0xbe, 0xc8, 0xb3, 0xe7]); // cp949 「안녕」
+                bytes.push(b'\n');
+            }
+        }
+        let kept = trim_bytes(&bytes, 300, u64::MAX);
+        assert!(kept.starts_with(MARK), "실행 경계에서 시작해야 한다");
+        assert!(kept.contains("실행5 줄"), "마지막 실행은 남는다");
+        assert!(!kept.contains("실행1 줄"), "앞쪽 실행은 걷어낸다");
+        assert!(kept.contains('\u{FFFD}'), "깨진 바이트는 � 로 바뀐다");
     }
 
     #[test]

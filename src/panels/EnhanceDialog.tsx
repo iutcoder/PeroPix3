@@ -15,7 +15,8 @@ import { useWs } from "../store/workspace";
 import { imgUrl } from "../lib/imgUrl";
 import { Icon } from "../components/Icon";
 import { anlasCost, MAX_PER_IMAGE } from "../lib/anlas";
-import { useSub } from "../store/sub";
+import { useCurrentSub } from "../store/sub";
+import { currentAccountId } from "../store/accounts";
 import { useAnlasMeter } from "../store/anlasMeter";
 import { useSceneFocus } from "../store/sceneFocus";
 import { allScenes } from "../store/workspace";
@@ -64,7 +65,7 @@ export function EnhanceDialog({
 }) {
   const t = useI18n((s) => s.t);
   const { base, params } = useGen();
-  const opus = useSub((s) => (s.sub?.tier ?? 0) >= 3);
+  const opus = (useCurrentSub()?.tier ?? 0) >= 3;
   const ws = useWs((s) => s.current);
   const records = useWs((s) => s.records);
   const setNow = useWs((s) => s.activeSceneGroup());
@@ -273,6 +274,8 @@ export function EnhanceDialog({
              `set`=세트 이름 · `scene_group_id`=그 세트의 id. 개명 뒤에도 여기가 옛 짝
              (`char`=탭 이름, `tab`=세트 이름)으로 남아 저장 경로의 탭 칸이 비어 있었다. */
           workspace: ws, tab: tabName, scene_group: setName, scene_group_id: setNow?.id ?? null,
+          // ★이 워크스페이스의 계정으로 (점검 2026-09-02: 빠져 있어 강화가 첫 계정으로 나갔다)
+          account: currentAccountId(),
           ...(found ? { cell: found.cell.name, cell_id: found.cell.id } : {}),
         },
         jobs,
