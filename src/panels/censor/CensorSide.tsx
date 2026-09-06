@@ -188,6 +188,12 @@ export function CensorSide() {
           </>
         )}
 
+        {/* ★★방식과 그 아래 옵션은 **검열 중·후에서만** 보인다 (사용자 제안 2026-09-06: *"검열전에서
+            검열방식 선택을 없애면 되지않나?"*). 검열 전 탭은 캔버스에 아무것도 안 그리므로(`CensorStage`
+            의 `tab === "before"` 갈래) 여기서 바꿔도 보이는 것이 없고, 검열 중 상태에서 바꾸면 칠해 둔
+            마스크에는 안 걸려 돌아왔을 때 단추와 화면이 어긋났다. 검열 시작은 마지막에 고른 방식으로
+            굽고, 방식은 검열 중에서 바꾸면 모든 장에 함께 걸린다 (`setMethod`). */}
+        {editable && (
         <Sec label={t("censor.method")}>
           <div style={{ display: "flex", flexWrap: "wrap", gap: "var(--sp-2)" }}>
             {METHODS.map(([m, key]) => (
@@ -283,6 +289,7 @@ export function CensorSide() {
             <span style={num}>{c.peek}</span>
           </Line>
         </Sec>
+        )}
 
         {editable && (
           <Sec label={t("censor.keys")}>
