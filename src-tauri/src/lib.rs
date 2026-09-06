@@ -1,6 +1,5 @@
 mod backend;
 
-use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::sync::OnceLock;
 use std::time::Instant;
@@ -37,112 +36,7 @@ fn app_root() -> String {
     backend::root().to_string_lossy().to_string()
 }
 
-/// 쌓아 둔 새 판이 있나 — 화면이 「지금 다시 켜기」를 낼지 정하는 근거.
-#[tauri::command]
-fn update_staged() -> bool {
-    false
-}
-
-/// **갈아 끼우고 다시 켠다** (사용자 지시 2026-08-26).
-///
-/// ★★차례가 곧 안전이다: **사이드카를 먼저 내린다** → 파일을 옮긴다 → 새 exe 를 띄운다 →
-///   우리는 나간다. 파이썬이 살아 있으면 `python/` 안의 파일이 잡혀 있어 못 옮긴다.
-/// ★옮기다 실패하면 **그 자리에서 멈추고 그대로 둔다** — 옛것은 `.update/old/` 에 온전히
-///   있고, 다음에 켤 때 같은 자리를 다시 시도한다 (`update.rs` 머리 주석).
-#[tauri::command]
-fn apply_update(app: tauri::AppHandle) -> Result<(), String> {
-    let _ = app;
-    Err("macOS 포트에서는 자동 업데이트를 사용하지 않습니다".into())
-    /*
-    /* ★데우기는 **여기 없다** — 「설치 중」 단계 안에서 백엔드가 한다 (`backend/update.py`
-       의 `warm`). 처음에는 여기서 했는데, 그러면 「다시 켜기」를 누른 뒤 12초가 조용히 흘러
-       **누른 것이 안 먹은 것처럼** 보였다 (사용자 지적 2026-08-27). 이 자리는 즉시여야 한다. */
-    /* ★★**띄우기 전에 자물쇠를 놓는다** (2026-08-27에 잡았다). 안 놓으면 새로 뜬 앱이
-         「이 폴더의 PeroPix 가 이미 실행 중」으로 보고 **곧바로 스스로 닫는다** — 업데이트가
-         끝나면 앱이 사라지는 셈이다. `app.exit(0)` 은 아래에서 부르므로, 그때까지 우리는
-         아직 살아 있다.
-       ★놓는 것은 자물쇠뿐이다 — 창·백엔드는 그대로 두고 순서만 앞당긴다. */
-    if let Some(l) = app.try_state::<InstanceLock>() {
-        if let Ok(mut g) = l.0.lock() {
-            g.take();
-        }
-    }
-    update::relaunch(&root).map_err(|e| format!("다시 켜지 못했습니다: {e}"))?;
-    app.exit(0);
-    Ok(()) */
-}
-
-/// 같은 폴더를 두 번 열지 못하게 잡아 둔 표식 — **놓을 수 있게** 들고 있는다.
-/// ★업데이트가 새 판을 띄우기 직전에 놓는다 (`apply_update` 의 ★★주).
 struct InstanceLock(std::sync::Mutex<Option<std::fs::File>>);
-
-/// 웹뷰(WebView2)의 저장소를 **앱 폴더 안**으로 끌어온다 (사용자 지적 2026-08-26).
-///
-/// ★★기본 자리는 `%LOCALAPPDATA%\<앱 식별자>\EBWebView` 이고, 그 이름이 **설치 경로가 아니라
-///   앱 식별자**라 포터블 두 벌이 **같은 저장소를 함께 쓴다.** 거기 든 것이 가볍지 않다 —
-///   생성 파라미터(`store/gen`)·검열 설정(`store/censor`)·엔진 선택(`store/cli`)·언어가
-///   전부 localStorage 다. 한쪽에서 모델을 바꾸면 다른 쪽도 바뀐다.
-/// ★자리를 옮기면 **앱을 지웠을 때 밖에 아무것도 안 남는다** — 포터블의 본뜻에 맞다.
-/// ★WebView2 로더가 읽는 환경변수로 지정한다. **웹뷰가 만들어지기 전에** 놓아야 한다.
-fn use_local_webview_profile() {
-    /* ★웹뷰 저장소도 **앱 것**이라 `app/` 안이다 (2026-08-27 배치 정리).
-       ★★옛 자리(`webview/`)에 있던 것은 **옮겨 온다** — 거기에 localStorage 가 들어 있어
-         그냥 새 자리를 쓰면 생성 옵션·검열 설정·언어가 처음으로 되돌아간다. */
-    let root = backend::root();
-    let dir = backend::inner(&root).join("webview");
-    let legacy = root.join("webview");
-    if legacy.is_dir() && !dir.exists() {
-        let _ = std::fs::create_dir_all(dir.parent().unwrap_or(&root));
-        let _ = std::fs::rename(&legacy, &dir);
-    }
-    if std::fs::create_dir_all(&dir).is_err() {
-        return; // 못 만들면 기본 자리로 둔다 — 저장소 때문에 앱이 안 뜨면 안 된다
-    }
-    migrate_webview_profile(&dir);
-    std::env::set_var("WEBVIEW2_USER_DATA_FOLDER", &dir);
-}
-
-/// 옛 자리(`%LOCALAPPDATA%`)의 설정을 **한 번만** 옮겨 온다.
-///
-/// ★자리를 옮기는 순간 그동안 쓰던 설정이 초기화된 것처럼 보이는데, 사용자에게는 아무 일도
-///   안 일어난 것처럼 보여야 한다.
-/// ★**설정만** 데려온다 (`Local Storage`·`IndexedDB`). 캐시·쿠키는 다시 만들어지는 것이라
-///   옮길 이유가 없고, 통째로 복사하면 수백 MB 가 든다.
-/// ★실패해도 조용히 넘어간다 — 못 옮기면 설정이 기본값으로 시작할 뿐이다.
-fn migrate_webview_profile(dir: &Path) {
-    if dir.join("EBWebView").exists() {
-        return; // 이미 이 자리에서 돌고 있다
-    }
-    let Some(local) = std::env::var_os("LOCALAPPDATA").map(PathBuf::from) else {
-        return;
-    };
-    let old = local.join("com.peropix.app").join("EBWebView").join("Default");
-    if !old.exists() {
-        return;
-    }
-    let to = dir.join("EBWebView").join("Default");
-    for name in ["Local Storage", "IndexedDB"] {
-        let _ = copy_tree(&old.join(name), &to.join(name));
-    }
-    println!("[webview] 옛 저장소에서 설정을 옮겨 왔습니다: {}", old.display());
-}
-
-fn copy_tree(from: &Path, to: &Path) -> std::io::Result<()> {
-    if !from.exists() {
-        return Ok(());
-    }
-    std::fs::create_dir_all(to)?;
-    for e in std::fs::read_dir(from)? {
-        let e = e?;
-        let (src, dst) = (e.path(), to.join(e.file_name()));
-        if e.file_type()?.is_dir() {
-            copy_tree(&src, &dst)?;
-        } else {
-            std::fs::copy(&src, &dst)?;
-        }
-    }
-    Ok(())
-}
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {

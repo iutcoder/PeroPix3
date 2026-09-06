@@ -820,23 +820,6 @@ function handle(m: Record<string, any>, set: Setter, get: () => S) {
       set({ steps: { ...get().steps, [cell]: `data:${mime};base64,${m.b64}` } });
       break;
     }
-    /* ★★**업데이트 진행률·완료** (사용자 지시 2026-08-26). 받는 것은 백엔드가 하고
-       (`backend/update.py`), 화면은 그 소식만 받아 막대를 그린다. */
-    case "update_progress":
-      void import("./update").then(({ useUpdate }) =>
-        useUpdate.getState().setProgress(Number(m.done ?? 0), Number(m.total ?? 0)),
-      );
-      break;
-    case "update_unpack":
-      // ★다 받았다 — 이제 푸는 중이라고 화면에 알린다 (`store/update` 의 ★★주)
-      void import("./update").then(({ useUpdate }) => useUpdate.getState().unpack());
-      break;
-    case "update_staged":
-      // ★취소는 실패가 아니다 — 붉은 줄을 띄우지 않는다 (`useUpdate.finish`)
-      void import("./update").then(({ useUpdate }) =>
-        useUpdate.getState().finish(!!m.ok, !!m.cancelled),
-      );
-      break;
     case "image":
       render(m, set, get);
       batchOk++;
