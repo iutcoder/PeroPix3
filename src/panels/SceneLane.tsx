@@ -2086,6 +2086,8 @@ function SceneRow(
                 src={takeSrc(r, p.base, p.ws, true)}
                 alt=""
                 draggable={false}
+                // ★밖에서 지운 파일은 X 로 두지 않고 그 칸을 뺀다 (`store/workspace.forgetMissing` 의 ★★주)
+                onError={() => void useWs.getState().forgetMissing(r.file)}
                 /* ★★**`loading="lazy"` 를 안 쓴다** (사용자 지적 2026-08-28: *"탭 이동할 때마다
                      씬에 놓인 썸네일들이 렌더가 안 돼. 커서를 한 번 올려주면 그때 렌더돼"*).
                    이 줄은 **이미 보이는 구간만 그린다**(위 `from`·`to`) — 그리는 것이 곧 보이는

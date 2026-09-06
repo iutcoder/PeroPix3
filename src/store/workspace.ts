@@ -1,5 +1,7 @@
 import { create } from "zustand";
-import { api, type TrashEntry } from "../lib/backend";
+import { api, backendUrl, type TrashEntry } from "../lib/backend";
+import { imgUrl } from "../lib/imgUrl";
+import { useSceneFocus } from "./sceneFocus";
 import { usePrompt, defaultBase, defaultUc, type Char, type Thumb } from "./prompt";
 import { t } from "../i18n";
 import { toast, undoToast } from "./toast";
@@ -326,6 +328,8 @@ type S = {
   /** ★지우기 = **휴지통으로 이동**. 파일이 실제로 자리에서 없어지고, `Ctrl+Z` 로 되돌아온다.
    *  비우는 것은 앱을 켤 때 (24시간 지난 것) — `backend/trash.py` 머리 주석. */
   deleteFiles: (files: string[], opts?: { undo?: boolean }) => Promise<void>;
+  /** 화면이 그림을 못 읽었다 — **정말 없으면** 그 장을 목록에서 뺀다 (`forgetMissing` 의 ★★주) */
+  forgetMissing: (file: string) => Promise<void>;
   activeSceneGroup: () => SceneGroup | undefined;
   setActiveSceneGroup: (id: string) => void;
   /** 그 탭(`chars`)의 생성 옵션을 담아 둔다 (`store/gen` 이 부른다) */
@@ -1336,6 +1340,33 @@ export const useWs = create<S>((set, get) => ({
       get().addRecord(more.record);
     }
     return { file: r.file, cell: cell.id };
+  },
+
+  /** 그림을 못 읽었을 때 **파일이 정말 없는지** 서버에 묻고, 없으면 그 장을 화면에서 뺀다.
+   *
+   *  ★★사용자 지적 2026-09-06: *"로컬 탐색기에서 내가 직접 파일을 지웠을 때, 앱이 해당 이미지를
+   *    그냥 x로 띄움. 파일이 없으면 이미지 슬롯 자체를 지우는게 나을거 같음"*.
+   *    서버는 열 때 **파일이 있는 줄만** 준다(`live_records`) — 파일의 존재가 정본이다. 다만 켜 둔
+   *    사이에 지운 것은 이 목록이 모르므로, 그림이 깨질 때 같은 규칙을 그 자리에서 한 번 더 적용한다.
+   *  ★깨졌다고 바로 빼지 않는다 — 서버가 잠깐 죽었거나 주소가 틀려도 `<img>` 는 똑같이 깨진다.
+   *    원본 주소에 HEAD 로 물어 **404 일 때만** 뺀다. 이름을 바꾸는 중이면 서버가 자취를 따라가
+   *    (`file_path`) 404 가 아니다.
+   *  ★색인은 안 건드린다 — 다음에 열 때 `live_records` 가 어차피 거른다. 휴지통에서 되돌리면
+   *    그대로 다시 보인다 (2026-08-28 결정). */
+  async forgetMissing(file) {
+    const ws = get().current;
+    if (!ws || !get().records.some((r) => r.file === file)) return;
+    let status = 0;
+    try {
+      status = (await fetch(imgUrl(await backendUrl(), ws, file), { method: "HEAD" })).status;
+    } catch {
+      return;
+    }
+    if (status !== 404) return;
+    set({ records: get().records.filter((r) => r.file !== file) });
+    const f = useSceneFocus.getState();
+    if (f.file === file) f.focus(f.cell, null);
+    if (f.picked.includes(file)) f.setPicked(f.picked.filter((x) => x !== file));
   },
 
   async deleteFiles(files, opts = {}) {

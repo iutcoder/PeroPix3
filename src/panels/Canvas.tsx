@@ -787,6 +787,8 @@ function ScenePreview() {
           src={cur ? takeSrc(cur, base, ws, false) : imgUrl(base, ws, file)}
           alt=""
           draggable={false}
+          // ★밖에서 지운 파일은 X 로 두지 않고 그 장을 뺀다 (`store/workspace.forgetMissing` 의 ★★주)
+          onError={() => void useWs.getState().forgetMissing(file)}
           /* ★★큰 그림도 **끌면 카드 커버**가 된다 (덱·손패·프롬프트 배너가 받는다).
                싱글 캔버스를 걷을 때 이 출발점이 씬 칸의 것과 함께 사라져 있었다
                (사용자 지적 2026-08-18). 고스트는 `DragLayer` 가 작게 그리므로 화면을 안 가린다.

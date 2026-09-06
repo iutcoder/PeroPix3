@@ -2356,8 +2356,10 @@ async def ws_endpoint(websocket: WebSocket, clientId: str | None = None):
         Q._unregister(client_id, websocket)
 
 
-@app.get("/api/file/{ws}/{rel:path}")
+@app.api_route("/api/file/{ws}/{rel:path}", methods=["GET", "HEAD"])
 async def get_file(ws: str, rel: str):
+    """★HEAD 도 받는다 — 화면이 깨진 그림을 보고 **정말 없는지** 몸체 없이 묻는 창구다
+    (`store/workspace.forgetMissing`). FastAPI 의 `@app.get` 은 HEAD 를 안 붙여 405 가 났다 (실측 2026-09-06)."""
     p = store.file_path(ws, rel)
     if not p:
         raise HTTPException(404, "not found")
