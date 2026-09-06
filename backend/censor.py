@@ -210,6 +210,20 @@ def _nms(boxes: np.ndarray, scores: np.ndarray, iou: float) -> list[int]:
     return keep
 
 
+def flatten_white(img: Image.Image) -> Image.Image:
+    """탐지 입력용 RGB — 투명 그림은 **흰 바탕에 깐다**.
+
+    ★`convert("RGB")` 는 알파만 떼어, 알파 0 픽셀의 RGB 쓰레기 값이 그대로 탐지기에 들어간다
+      (사용자 지적 2026-09-06, `tools.thumb_image` 의 ★★주). 생성 쪽(`imgutil`)이 베이스 그림에
+      하는 것과 같은 규칙이다."""
+    if img.mode in ("RGBA", "LA") or (img.mode == "P" and "transparency" in img.info):
+        rgba = img.convert("RGBA")
+        canvas = Image.new("RGBA", rgba.size, (255, 255, 255, 255))
+        canvas.alpha_composite(rgba)
+        return canvas.convert("RGB")
+    return img.convert("RGB")
+
+
 def detect(
     img: Image.Image,
     model: str | None = None,
@@ -229,7 +243,7 @@ def detect(
     targets = targets if targets is not None else labels
     min_conf = 0.01 if return_all else min([label_conf.get(x, default_conf) for x in targets] + [default_conf])
 
-    im = img.convert("RGB")
+    im = flatten_white(img)
     canvas, r, (padx, pady) = _letterbox(im, size, rect)
     x = canvas.transpose(2, 0, 1)[None] / 255.0
     # ★★한 번에 하나씩 (`_RUN` 의 ★★주). 겹쳐 돌리면 프로세스가 죽는다

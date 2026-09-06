@@ -2943,7 +2943,8 @@ def censor_image(body: CensorImage):
         r = body.max_side / max(w, h)
         out = im.resize((max(1, int(w * r)), max(1, int(h * r))), Image.LANCZOS)
     buf = io.BytesIO()
-    out.convert("RGB").save(buf, format="WEBP", quality=92)
+    # ★알파를 남긴다 (`tools.thumb_image` 의 ★★주) — 떼면 투명 경계가 색 노이즈로 덮인다
+    tools_mod.keep_alpha(out).save(buf, format="WEBP", quality=92)
     return {
         "image": "data:image/webp;base64," + base64.b64encode(buf.getvalue()).decode(),
         "width": w,
