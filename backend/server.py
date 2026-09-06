@@ -3200,7 +3200,13 @@ async def files_open_dir(body: OpenDir):
     ★있는 폴더만, 절대 경로만 연다 (파일이나 상대 경로는 400). `files.open_dir` 의 주석이 말하는 「사용자가
       준 경로」란 자유 입력을 뜻한다 — 여기 오는 것은 OS 폴더 찾기로 고른 자리와 그림이 있는 폴더뿐이다."""
     p = Path(body.path)
-    if not body.path or not p.is_absolute() or not p.is_dir():
+    if not body.path or not p.is_absolute():
+        raise HTTPException(400, "열 수 있는 폴더가 아닙니다")
+    # ★★없는 자리면 **있는 데까지** 올라가 연다 (`files.reveal` 과 같은 규칙. 사용자 지적 2026-09-06:
+    #   검열 후 탭에서 파일을 지운 뒤 「폴더 열기」가 400 이었다 — 표시된 경로가 사라졌어도 그 위는 열 수 있다)
+    while not p.is_dir() and p.parent != p:
+        p = p.parent
+    if not p.is_dir():
         raise HTTPException(400, "열 수 있는 폴더가 아닙니다")
     await asyncio.to_thread(files.open_dir, p)
     return {"ok": True}
