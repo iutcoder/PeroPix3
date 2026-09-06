@@ -2951,7 +2951,6 @@ def censor_image(body: CensorImage):
     }
 
 
-@app.post("/api/censor/apply")
 def _censor_pack(rendered: bytes, src: Path | None) -> tuple[bytes, str, str]:
     """화면이 구운 PNG 를 **저장할 형식으로 다시 압축한다** → (바이트, 형식, 확장자).
 
@@ -2985,6 +2984,7 @@ def _censor_pack(rendered: bytes, src: Path | None) -> tuple[bytes, str, str]:
     return out.getvalue(), fmt, ext
 
 
+@app.post("/api/censor/apply")
 def censor_apply(body: CensorApply):
     """가린 그림을 저장한다. 자리는 `mode` 가 정한다 (일괄변환과 같은 세 갈래).
 
