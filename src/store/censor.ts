@@ -87,8 +87,15 @@ type Saved = {
   steamAlpha: number;
   /** 스팀 「경사」 0~100 — 알파 경사의 시작점을 안쪽으로 당겨 완만하게. 칠한 넓이는 그대로 (사용자 결정 2026-09-06) */
   steamFade: number;
-  /** 붓을 끄는 동안 덮개가 옅어지는 정도 — ★모든 방식 공통 (CensorSide 의 ★★주) */
+  /** 붓을 끄는 동안 덮개가 옅어지는 정도 — ★모든 방식에 있다 (CensorSide 의 ★★주). 값은 방식마다 따로다 (아래 `methodOpts`) */
   peek: number;
+  /** ★★방식마다 따로 두는 값의 보관함 — 넓히기·부드럽게·들춰보기 (사용자 지적 2026-09-06: *"모든 검열방식의
+   *  옵션이 전부 각 검열별로 저장되어야함. 지금 일부 수치가 서로 공유함"*). 나머지 옵션은 이름부터 방식 전용이라
+   *  (`mosaic*`·`blur`·`color`·`steam*`) 원래 섞이지 않았고, 이 셋만 하나의 값을 모든 방식이 같이 썼다.
+   *  ★**지금 방식의 값은 `expand`·`feather`·`peek` 이 정본**이고, 여기에는 다른 방식의 값만 잠들어 있다 —
+   *    방식을 바꿀 때 지금 값을 넣고 새 방식의 값을 꺼낸다 (`setMethod`). 저장할 때도 지금 값을 함께 넣는다.
+   *  ★처음 가 보는 방식은 지금 값을 그대로 물려받는다 — 옛 저장본(하나의 값)과 이어지고, 그때부터 갈린다. */
+  methodOpts: Record<string, { expand: number; feather: number; peek: number }>;
   /** 붓 지름 (px). ★1px 단위 (사용자 지시 2026-09-05: *"8단위로만 되어서 불편. 1단위로"*) */
   brushPx: number;
   /** 붓 모양 — 사각·원 (사용자 지시 2026-09-05: *"원형·사각 다 있는 게 좋을 듯. 네모가 기본"*) */
@@ -118,6 +125,7 @@ const DEFAULTS: Saved = {
   // ★0 = v2 원문 (100% 가 0.6 까지). 올릴수록 속이 좁아지고 자락이 길어진다
   steamFade: 0,
   peek: 30,
+  methodOpts: {},
   // 40px. 젖꼭지 하나를 한두 번에 덮는 크기
   brushPx: 40,
   brushShape: "square",
@@ -136,7 +144,9 @@ function load(): Saved {
       delete got.steamOpacity;
       // ★옛 붓 반지름(칸, `brush`)은 버린다 — 지름 px(`brushPx`)와 뜻이 달라 옮길 수 없다
       delete got.brush;
-      return { ...DEFAULTS, ...got };
+      // ★방식별 보관함에 지금 방식의 값이 있으면 그것이 정본이다 (`methodOpts` 의 ★★주)
+      const mine = got.methodOpts?.[got.method];
+      return { ...DEFAULTS, ...got, ...(mine ?? {}) };
     }
   } catch {}
   return DEFAULTS;
@@ -787,7 +797,11 @@ export const useCensor = create<S>((set, get) => ({
       if (g) remap(g, methodIndex(m));
     }
     // ★검열 전 탭에서는 박스에 안 건다 — 거기 박스는 「찾은 것」이고 방식은 다음 검열의 값이다
-    s.tune({ method: m }, "draw");
+    /* ★★넓히기·부드럽게·들춰보기는 방식마다 따로다 (`methodOpts` 의 ★★주) — 지금 값을 재우고 새 방식의 값을 깨운다.
+       처음 가는 방식이면 지금 값을 물려받는다. `feather` 가 바뀌므로 구름 무늬까지 다시 만든다 (`tune` 의 heavy). */
+    const cur = { expand: s.expand, feather: s.feather, peek: s.peek };
+    const methodOpts = { ...s.methodOpts, [s.method]: cur };
+    s.tune({ method: m, methodOpts, ...(methodOpts[m] ?? cur) }, "draw");
   },
 
   /** 다시 그리라고 알린다. 무대가 `rev` 를 보고 캔버스를 새로 그린다.
@@ -822,9 +836,11 @@ function fillConf(cur: Record<string, number>, classes: string[], base: number) 
 function save(s: Saved) {
   const { model, targets, labelConf, conf, floor, method, color, expand, feather, mosaic,
     mosaicOpacity, blur, steamBright, steamAlpha, steamFade, peek, brushPx, brushShape, dest, destMode } = s;
+  // ★지금 방식의 값을 보관함에도 넣어 적는다 — 다음에 열 때 방식마다 제 값으로 시작한다
+  const methodOpts = { ...s.methodOpts, [method]: { expand, feather, peek } };
   try {
     localStorage.setItem(KEY, JSON.stringify({ model, targets, labelConf, conf, floor, method,
-      color, expand, feather, mosaic, mosaicOpacity, blur, steamBright, steamAlpha, steamFade, peek, brushPx, brushShape, dest, destMode }));
+      color, expand, feather, mosaic, mosaicOpacity, blur, steamBright, steamAlpha, steamFade, peek, brushPx, brushShape, dest, destMode, methodOpts }));
   } catch {}
 }
 
