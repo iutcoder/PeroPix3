@@ -87,13 +87,19 @@ pub fn backend_port() -> u16 {
     })
 }
 
-/// 이 앱이 서 있는 자리 — `backend/server.py` 를 품은 폴더다.
-///
-/// ★★**데이터도 여기 쌓인다** (`server.py` 의 `APP_DIR`): `data/`·`workspaces/`·`gallery/`.
-///   그래서 이 값이 곧 **인스턴스의 신원**이다 — 웹뷰 저장소를 가르는 것도, 같은 폴더를
-///   두 번 열지 못하게 막는 것도, 화면이 「내 백엔드가 맞나」를 묻는 것도 이 값으로 한다.
+/// 사용자 데이터가 사는 자리. 개발 중에는 저장소 루트, 번들에서는 macOS Application
+/// Support를 쓴다. `.app/Contents/Resources`는 코드 서명의 일부이며 쓰기 가능한 저장소가 아니다.
 pub fn root() -> PathBuf {
-    find_repo_root().unwrap_or_else(app_dir)
+    if let Some(path) = std::env::var_os("PEROPIX_DATA_DIR") {
+        return PathBuf::from(path);
+    }
+    if let Some(repo) = find_repo_root() {
+        return repo;
+    }
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .map(|home| home.join("Library/Application Support/io.github.iutcoder.peropix3"))
+        .unwrap_or_else(app_dir)
 }
 
 /// 자식 프로세스 핸들.
@@ -134,20 +140,19 @@ fn app_dir() -> PathBuf {
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_default())
 }
 
-/// **앱이 도는 데 필요한 것들이 사는 자리** (사용자 지시 2026-08-27: *"유저가 접근하는
-/// 폴더는 한정적인데 너무 다 나와 있는 느낌"*).
-///
-/// ★★배포판은 `app/` 안에 넣는다 — `backend`·`python`·`models`·`webview`·`version.json`.
-///   바깥에는 **사람이 여는 것만** 남는다 (`gallery`·`logs`·`workspaces`·`data`).
-/// ★저장소에서 개발할 때는 `app/` 이 없다. 그때는 뿌리가 곧 그 자리다 — 두 배치를
-///   **한 함수가** 가른다. 자리를 아는 곳이 여럿이면 한쪽만 고쳐진다.
-pub fn inner(root: &Path) -> PathBuf {
-    let nested = root.join("app");
-    if nested.join("backend").join("server.py").exists() {
-        nested
-    } else {
-        root.to_path_buf()
+/// 백엔드와 모델 같은 읽기 전용 자원 위치. Tauri는 macOS에서 이들을
+/// `.app/Contents/Resources`에 둔다.
+fn resources() -> PathBuf {
+    if let Some(path) = std::env::var_os("PEROPIX_RESOURCE_DIR") {
+        return PathBuf::from(path);
     }
+    if let Some(repo) = find_repo_root() {
+        return repo;
+    }
+    app_dir()
+        .parent()
+        .map(|contents| contents.join("Resources"))
+        .unwrap_or_else(app_dir)
 }
 
 /// 개발 중에는 실행 파일이 `src-tauri/target/debug` 에 있으므로 저장소 루트를 거슬러 찾는다.
@@ -167,11 +172,14 @@ fn find_repo_root() -> Option<PathBuf> {
 
 /// macOS 앱에 번들된 파이썬, 개발용 가상환경, PATH 순으로 찾는다.
 fn find_python(root: &Path) -> PathBuf {
-    let home = inner(root);
+    let home = resources();
     for candidate in [
         home.join("python/bin/python3"),
         root.join(".venv/bin/python3"),
         root.join("venv/bin/python3"),
+        PathBuf::from("/opt/homebrew/bin/python3"),
+        PathBuf::from("/usr/local/bin/python3"),
+        PathBuf::from("/usr/bin/python3"),
     ] {
         if candidate.is_file() {
             return candidate;
@@ -189,7 +197,9 @@ fn find_python(root: &Path) -> PathBuf {
 ///   ★핸들을 살려 둔다 — 닫으면 잠금이 풀린다. 프로세스가 죽으면 커널이 알아서 놓아 준다
 ///     (크래시·강제 종료에도 자물쇠가 남지 않는다).
 pub fn lock_app_dir() -> Option<File> {
-    lock_file(&root().join(".instance.lock"))
+    let root = root();
+    std::fs::create_dir_all(&root).ok()?;
+    lock_file(&root.join(".instance.lock"))
 }
 
 fn lock_file(path: &Path) -> Option<File> {
@@ -305,7 +315,8 @@ pub fn log_line(msg: &str) {
 pub fn spawn() -> std::io::Result<Child> {
     let root = root();
     let python = find_python(&root);
-    let script = inner(&root).join("backend").join("server.py");
+    let resources = resources();
+    let script = resources.join("backend").join("server.py");
     let log = open_log(&root);
 
     let mut head = String::new();
@@ -331,6 +342,8 @@ pub fn spawn() -> std::io::Result<Child> {
         .arg(backend_port().to_string())
         // ★열쇠는 **환경변수로만** 넘긴다 — 명령줄에 실으면 작업 관리자에서 그대로 보인다
         .env("PEROPIX_KEY", backend_key())
+        .env("PEROPIX_DATA_DIR", &root)
+        .env("PEROPIX_RESOURCE_DIR", &resources)
         .current_dir(&root)
         .stdout(out.map(Stdio::from).unwrap_or_else(Stdio::null))
         .stderr(err.map(Stdio::from).unwrap_or_else(Stdio::null));

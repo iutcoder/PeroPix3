@@ -82,10 +82,10 @@ def _app_dir() -> Path:
     return here.parent if here.name == "app" else here
 
 
-APP_DIR = _app_dir()
+APP_DIR = Path(os.environ.get("PEROPIX_DATA_DIR") or _app_dir()).expanduser().resolve()
 #: **앱 것이 사는 자리** — 배포판은 `app/`, 저장소에서는 뿌리와 같다.
 #  ★`version.json`·`models/` 처럼 **갈아 끼워지는 것**이 여기 있다 (`censor.MODEL_DIR` 도 같다).
-INNER_DIR = Path(__file__).resolve().parent.parent
+INNER_DIR = Path(os.environ.get("PEROPIX_RESOURCE_DIR") or Path(__file__).resolve().parent.parent).resolve()
 # ★★**버전은 파일이 정본이다** (`version.json`, 사용자 결정 2026-08-26). 포터블을 묶을 때
 #   `scripts/portable.ps1` 이 `tauri.conf.json` 의 버전을 그대로 적어 넣는다 — 업데이트가
 #   「지금 무엇을 쓰고 있나」를 이걸로 안다. 소스의 상수는 **개발 중에만** 쓰는 기본값이다.
