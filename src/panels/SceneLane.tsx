@@ -3,7 +3,7 @@ import { useI18n } from "../i18n";
 import { DropLine } from "../components/DropLine";
 import { useGen } from "../store/gen";
 import { usePrompt } from "../store/prompt";
-import { runningPendingId, useQueue } from "../store/queue";
+import { runningPendingId, stepKey, useQueue } from "../store/queue";
 import { LANE_MAX, LANE_MIN, useUi } from "../store/ui";
 import { allCells, useWs, takesOfScene, type Rec, type SceneCard, type Slot } from "../store/workspace";
 import { newestFirst } from "../lib/takes";
@@ -371,8 +371,8 @@ export function SceneLane() {
        예전에는 `pending`·`laneSize`·`headw` 도 딸림값이라, **생성이 끝나 큐가 줄기만 해도**
        줄이 저 혼자 굴러갔다 (*"생성 완료시 슬롯을 강제 스크롤"*).
        나머지 값은 굴릴 이유가 아니라 **자리를 셈할 재료**일 뿐이므로 ref 로 읽는다. */
-  const scrollBits = useRef({ pending, headw, laneSize, vert, groupId: tab?.id });
-  scrollBits.current = { pending, headw, laneSize, vert, groupId: tab?.id };
+  const scrollBits = useRef({ pending, headw, laneSize, vert, groupId: tab?.id, ws });
+  scrollBits.current = { pending, headw, laneSize, vert, groupId: tab?.id, ws };
   useEffect(() => {
     const el = scrollRef.current;
     /* ★★**「생성 중」 칸을 골랐을 때도 굴린다** (사용자 지적 2026-08-25: *"생성 중인 걸 휠로
@@ -380,8 +380,8 @@ export function SceneLane() {
        대기 칸에는 **파일이 없다** — 예전에는 `focusFile` 이 비면 통째로 물러나서, 휠로
        대기 칸에 닿는 순간 줄이 멈춘 채였다. 고를 수 있는 것은 둘이므로 둘 다 받는다. */
     if (!el || !focusCell || (!focusFile && !focusPending)) return;
-    const { pending, headw, laneSize, vert, groupId } = scrollBits.current;
-    const waiting = pending.filter((p) => p.groupId === groupId && p.cellId === focusCell).length;
+    const { pending, headw, laneSize, vert, groupId, ws } = scrollBits.current;
+    const waiting = pending.filter((p) => p.groupId === groupId && p.cellId === focusCell && p.workspace === ws).length;
     const cw = Math.min(LANE_MAX, Math.max(LANE_MIN, laneSize));
     const step = cw + GAP;
     /* ★셈은 폴백이다 (아래 ★★주) — 대기 칸은 줄의 **앞쪽**에 늦게 넣은 것부터 선다 */
@@ -560,7 +560,8 @@ export function SceneLane() {
 
   const h = Math.min(LANE_MAX, Math.max(LANE_MIN, laneSize));
   const w = h;
-  const queued = pending.filter((p) => p.groupId === tab.id);
+  // ★**이 워크스페이스**에 넣은 것만 — 씬 그룹 id 는 워크스페이스를 건너 겹칠 수 있다 (`Pending.workspace` 의 ★주)
+  const queued = pending.filter((p) => p.groupId === tab.id && p.workspace === ws);
 
   /** 그 씬의 결과 (숨긴 것 제외).
    *  ★갈 씬이 없는 결과는 **첫 씬**이 받는다 (`takesOfScene`, v2 이식 — 감사 D6)
@@ -964,7 +965,7 @@ export function SceneLane() {
                 onPick={pick}
                 onPickPending={(cellId, id) => useSceneFocus.getState().focusPending(cellId, id)}
                 takes={takesOfCell}
-                stepOf={(id) => steps[id] ?? ""}
+                stepOf={(id) => steps[stepKey(ws, id)] ?? ""}
                 isStarred={isStarred}
                 onStar={toggleStar}
                 queuedOf={(cellId) => queued.filter((p) => p.cellId === cellId)}
@@ -2085,6 +2086,8 @@ function SceneRow(
                 src={takeSrc(r, p.base, p.ws, true)}
                 alt=""
                 draggable={false}
+                // ★밖에서 지운 파일은 X 로 두지 않고 그 칸을 뺀다 (`store/workspace.forgetMissing` 의 ★★주)
+                onError={() => void useWs.getState().forgetMissing(r.file)}
                 /* ★★**`loading="lazy"` 를 안 쓴다** (사용자 지적 2026-08-28: *"탭 이동할 때마다
                      씬에 놓인 썸네일들이 렌더가 안 돼. 커서를 한 번 올려주면 그때 렌더돼"*).
                    이 줄은 **이미 보이는 구간만 그린다**(위 `from`·`to`) — 그리는 것이 곧 보이는

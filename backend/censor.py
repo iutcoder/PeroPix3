@@ -68,7 +68,9 @@ def models() -> list[dict]:
     out = []
     for p in sorted(MODEL_DIR.glob("*.onnx"), key=lambda f: f.stat().st_size):
         try:
-            _, names, size, _, _ = _load(p.name)
+            # ★세션 생성은 잠그고 한다 (`_RUN` 의 ★주) — 서버가 뜰 때 `warm()` 이 뒤에서 같은 모델을 열고 있을 수 있다
+            with _RUN:
+                _, names, size, _, _ = _load(p.name)
         except Exception:
             names, size = {}, (0, 0)
         out.append(
@@ -129,6 +131,26 @@ def _load(file: str):
     # ★YOLO26(XL)은 **NMS 를 모델이 이미 한다**(end2end). 출력 모양이 통째로 다르다
     e2e = str(meta.get("end2end", "")).lower() == "true"
     return sess, names, size, not fixed, e2e
+
+
+def warm() -> None:
+    """서버가 뜰 때 **뒤에서** 모델을 미리 올리고 한 번 돌려 둔다 (사용자 지시 2026-09-06: *"검열 모델은
+    앱 열때 미리 로드해놔야할듯"*).
+
+    ★★검열 모드에 처음 들어가면 화면이 한동안 안 켜졌다. 모델 목록 요청이 번들된 모델 **전부**의 세션을
+      만드는데(클래스 이름이 모델 안에 있다), 그 요청이 `async def` 라 이벤트 루프 위에서 돌아 파일 트리·
+      썸네일까지 **모든 요청이 그동안 멈췄다.** 목록 요청은 `def` 로 옮겼고(스레드풀), 여기서 미리 올려
+      두면 들어갈 때 기다릴 것이 없다.
+    ★첫 추론도 함께 돌린다 — DirectML 은 첫 `run` 에 셰이더를 굽느라 **1.4초**가 더 든다 (실측
+      2026-09-06: 첫 1.43s → 다음 0.14s). 작은 그림 한 장이면 된다 — 레터박스가 모델 크기로 늘린다.
+    ★실패해도 조용히 넘긴다 — `onnxruntime` 이 없는 얇은 파이썬에서도 서버는 떠야 한다. 필요할 때
+      실제 요청이 같은 오류를 다시 만나 화면에 알린다."""
+    dummy = Image.new("RGB", (64, 64), (128, 128, 128))
+    for p in sorted(MODEL_DIR.glob("*.onnx"), key=lambda f: f.stat().st_size):
+        try:
+            detect(dummy, p.name, None, {}, 0.25, False)
+        except Exception:
+            pass
 
 
 def default_model() -> str:
@@ -210,6 +232,20 @@ def _nms(boxes: np.ndarray, scores: np.ndarray, iou: float) -> list[int]:
     return keep
 
 
+def flatten_white(img: Image.Image) -> Image.Image:
+    """탐지 입력용 RGB — 투명 그림은 **흰 바탕에 깐다**.
+
+    ★`convert("RGB")` 는 알파만 떼어, 알파 0 픽셀의 RGB 쓰레기 값이 그대로 탐지기에 들어간다
+      (사용자 지적 2026-09-06, `tools.thumb_image` 의 ★★주). 생성 쪽(`imgutil`)이 베이스 그림에
+      하는 것과 같은 규칙이다."""
+    if img.mode in ("RGBA", "LA") or (img.mode == "P" and "transparency" in img.info):
+        rgba = img.convert("RGBA")
+        canvas = Image.new("RGBA", rgba.size, (255, 255, 255, 255))
+        canvas.alpha_composite(rgba)
+        return canvas.convert("RGB")
+    return img.convert("RGB")
+
+
 def detect(
     img: Image.Image,
     model: str | None = None,
@@ -229,7 +265,7 @@ def detect(
     targets = targets if targets is not None else labels
     min_conf = 0.01 if return_all else min([label_conf.get(x, default_conf) for x in targets] + [default_conf])
 
-    im = img.convert("RGB")
+    im = flatten_white(img)
     canvas, r, (padx, pady) = _letterbox(im, size, rect)
     x = canvas.transpose(2, 0, 1)[None] / 255.0
     # ★★한 번에 하나씩 (`_RUN` 의 ★★주). 겹쳐 돌리면 프로세스가 죽는다

@@ -21,9 +21,10 @@ export function useDeckPeek(): boolean {
 
   useEffect(() => {
     if (saving) {
-      if (useUi.getState().rightCollapsed) {
+      const ui = useUi.getState();
+      if (ui.rightCollapsed[ui.mode]) {
         peeked.current = true;
-        useUi.setState({ rightCollapsed: false });
+        ui.setFold("right", false);
       }
       return;
     }
@@ -33,7 +34,7 @@ export function useDeckPeek(): boolean {
       // 넣었다 — 편 채로 두고 그 상태를 적어 둔다
       useUi.getState().commitLayout();
     } else {
-      useUi.setState({ rightCollapsed: true });
+      useUi.getState().setFold("right", true);
     }
   }, [saving]);
 

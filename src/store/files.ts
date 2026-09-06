@@ -46,6 +46,8 @@ type S = {
   move: (files: string[], dest: string) => Promise<void>;
   remove: (files: string[]) => Promise<void>;
   reveal: (path: string) => Promise<void>;
+  /** 절대 경로 폴더를 연다 (아웃풋 루트 밖 — 검열 저장 자리). `reveal` 은 루트 안만 연다 */
+  openDir: (path: string) => Promise<void>;
 };
 
 export const useFiles = create<S>((set, get) => ({
@@ -205,6 +207,14 @@ export const useFiles = create<S>((set, get) => ({
 
   async reveal(path) {
     await api("/api/files/reveal", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ path }),
+    });
+  },
+
+  async openDir(path) {
+    await api("/api/files/open-dir", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ path }),

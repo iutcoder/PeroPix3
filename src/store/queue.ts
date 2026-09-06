@@ -31,16 +31,30 @@ import { t } from "../i18n";
  *      실제로 렌더한 집합으로 판정하므로, 브로드캐스트가 앞서도 복원분을 안 건너뛴다.
  */
 
+/** 차선(계정) 하나의 진행률 — 서버 `Lane.progress()` 그대로 */
+export type LaneProgress = {
+  completed: number;
+  total: number;
+  queue_length: number;
+  /** ★`workspace` 가 있다 — 복제한 워크스페이스는 씬 그룹 id 가 같아서, 그것만으로는 어느 쪽인지 모른다 */
+  current_cell?: { workspace?: string; scene_group_id: string | null; cell_id: string | null } | null;
+  /** 계정 이름 — 줄에 적는다 */
+  name?: string;
+};
+
 export type QueueProgress = {
   completed: number;
   total: number;
   queue_length: number;
+  /** ★★**계정별 차선** (사용자 결정 2026-09-02). 계정이 여럿이면 나란히 돈다 — 위 세 값은 그 합계다.
+   *  줄은 차선마다 하나씩 그린다 (`GenerateFooter`·`App` 의 `QueueStatus`). 옛 백엔드는 안 준다. */
+  lanes?: Record<string, LaneProgress>;
   /** ★★**서버가 지금 만들고 있는 씬** (2026-08-25). 화면의 「생성 중」 표시가 이것을 본다 —
    *  예전에는 화면이 **자기 대기 목록의 맨 앞**을 찍었는데, 배치가 겹치면 그 순서가 실제
    *  진행과 어긋나 **엉뚱한 칸에 「생성 중」이 뜨고 그림은 「대기 중」 칸에 나타났다**
    *  (사용자 실측). 무엇을 만드는지는 서버가 정본이다.
    *  ★옛 백엔드는 안 준다 — 없으면 화면이 옛 방식으로 물러선다. */
-  current_cell?: { scene_group_id: string | null; cell_id: string | null } | null;
+  current_cell?: { workspace?: string; scene_group_id: string | null; cell_id: string | null } | null;
 };
 
 /** 큐가 지금 어느 상태인가 — v2 `statusText` 이식 (`index.html:16119-16127, 16467-16493`).
@@ -55,7 +69,16 @@ export type QueuePhase = "idle" | "running" | "done" | "failed" | "partial";
  *  `queued` 카드를 띄운다 (`batch.ts start`) — 눌렀는지 알 수 있고 어디에 생길지도 보인다.
  *  우리 레코드는 **완료된 파일**뿐이라 이 목록이 그 자리를 대신한다.
  *  그림이 도착하면 같은 (scene_group_id, cell_id) 의 대기 하나를 지운다. */
-export type Pending = { id: string; groupId: string | null; cellId: string | null };
+export type Pending = {
+  id: string;
+  groupId: string | null;
+  cellId: string | null;
+  /** 어느 계정(차선)으로 넣었나 — 계정별 취소·마무리가 **자기 것만** 걷어내는 열쇠 */
+  account: string;
+  /** ★어느 워크스페이스에 넣었나 (사용자 실측 2026-09-02: 복제한 워크스페이스는 씬 그룹 id 가 같아서
+   *  한쪽에서 생성하면 **모든** 워크스페이스에 「생성 중」 칸이 떴다). 화면은 제 워크스페이스 것만 그린다 */
+  workspace: string;
+};
 
 type S = {
   connected: boolean;
@@ -80,8 +103,9 @@ type S = {
   enqueue: (base: Record<string, unknown>, items?: Record<string, unknown>[], count?: number) => Promise<void>;
   /** 이 탭의 대기 목록 (슬롯 순서대로). 맨 앞이 **지금 만드는 중**이다 */
   pendingOf: (groupId: string) => Pending[];
-  /** ★취소는 **하나**다 — 지금 나간 장만 남기고 나머지를 전부 뺀다 (사용자 결정 2026-08-18) */
-  cancelAll: () => Promise<void>;
+  /** ★취소는 **하나**다 — 지금 나간 장만 남기고 나머지를 전부 뺀다 (사용자 결정 2026-08-18).
+   *  `account` 를 주면 **그 계정의 차선만** (계정별 취소, 사용자 결정 2026-09-02) */
+  cancelAll: (account?: string) => Promise<void>;
 };
 
 const KEY = "peropix.ws_client_id";
@@ -89,12 +113,19 @@ const EMPTY: QueueProgress = { completed: 0, total: 0, queue_length: 0 };
 
 let sock: WebSocket | null = null;
 let seqId = 1;
-/** 직전에 돌고 있었나 — 멈추는 **그 순간**만 알린다 */
-let wasBusy = false;
+/** 직전에 돌고 있던 **차선(계정)들** — 멈추는 **그 순간**만 알린다.
+ *  ★★차선마다 따로다 (사용자 실측 2026-09-02: 계정 셋을 돌리니 셋째의 완료 알림이 안 왔다). 표식이 하나면
+ *    둘째 계정이 끝나며 내린 표식을, 이미 마지막 장이 나가 있던 셋째 계정은 다시 못 세워 알림이 막힌다.
+ *  ★차선 정보가 없는 옛 백엔드는 `"*"` 하나로 예전처럼 돈다. */
+const busyLanes = new Set<string>();
 let retry = 0;
-/** 이번 배치의 성공·실패 장 수 (v2 `batchImageCount`·`batchErrorCount`). 끝날 때 문구를 가른다 */
-let batchOk = 0;
-let batchErr = 0;
+/** 이번 배치의 성공·실패 장 수 (v2 `batchImageCount`·`batchErrorCount`). 끝날 때 문구를 가른다.
+ *  ★계정(차선)마다 따로 센다 — 한 계정의 실패가 다른 계정의 「완료」를 「일부 실패」로 만들면 안 된다 */
+const batch: Record<string, { ok: number; err: number }> = {};
+const bump = (account: string, key: "ok" | "err") => {
+  const b = (batch[account] ??= { ok: 0, err: 0 });
+  b[key]++;
+};
 /** 끝난 문구를 잠시 보여 준 뒤 `idle` 로 (v2 `resetTimer`, 2초) */
 let phaseTimer: ReturnType<typeof setTimeout> | null = null;
 /** 마지막 수신 시각 — 하트비트의 근거 (`performance.now()` 라 시계 변경과 무관하다) */
@@ -133,6 +164,10 @@ function startHeartbeat() {
   }, 20000);
 }
 
+/** 중간 그림(`steps`)의 열쇠 — **워크스페이스 + 칸**. 칸 id 는 워크스페이스를 건너 겹치므로 (`Pending.workspace`
+ *  의 ★주) 칸만으로 들면 다른 워크스페이스의 지난 프레임이 이 칸 위에 뜬다 (사용자 실측 2026-09-02). */
+export const stepKey = (workspace: string, cell: string) => `${workspace}::${cell}`;
+
 /** 지금 붙는 중인가 — `connect()` 가 `await` 를 만나기 **전에** 세우는 표식.
  *  ★소켓이 생기기 전 구간을 이것이 지킨다 (`connect` 의 ★주) */
 let connecting = false;
@@ -147,10 +182,19 @@ let connecting = false;
 export function runningPendingId(groupId: string | null | undefined): string | null {
   const { progress, pending } = useQueue.getState();
   if (!(progress.total > progress.completed)) return null;
-  const mine = pending.filter((p) => p.groupId === groupId);
-  const cur = progress.current_cell;
-  const cell = cur && cur.scene_group_id === groupId ? cur.cell_id : null;
-  return (cell ? mine.find((p) => p.cellId === cell)?.id : mine[0]?.id) ?? null;
+  // ★★대기 칸도 **이 워크스페이스 것**만 (사용자 실측 2026-09-02: 씬 그룹·칸 id 가 워크스페이스마다 같아서,
+  //   다른 워크스페이스의 대기 칸을 집어 돌려주면 이 화면의 어느 칸과도 안 맞아 「생성 중」이 안 떴다)
+  const here = useWs.getState().current;
+  const mine = pending.filter((p) => p.groupId === groupId && p.workspace === here);
+  // ★★차선(계정)마다 「지금 만드는 씬」이 하나씩이다 (2026-09-02). **이 씬 그룹을 만드는 차선**을 찾는다 —
+  //   다른 계정이 다른 워크스페이스를 만드는 중이라고 이 그룹의 맨 앞 칸에 「생성 중」을 찍으면 안 된다.
+  //   차선 정보가 없는 옛 백엔드일 때만 맨 앞으로 물러선다.
+  const lanes = progress.lanes ? Object.values(progress.lanes) : null;
+  const cells = lanes ? lanes.map((l) => l.current_cell) : [progress.current_cell];
+  // ★워크스페이스까지 맞아야 한다 — 복제한 워크스페이스는 씬 그룹 id 가 같다 (`Pending.workspace` 의 ★주)
+  const cell = cells.find((c) => c && c.scene_group_id === groupId && (!c.workspace || c.workspace === here))?.cell_id ?? null;
+  if (cell) return mine.find((p) => p.cellId === cell)?.id ?? null;
+  return lanes ? null : (mine[0]?.id ?? null);
 }
 
 export const useQueue = create<S>((set, get) => ({
@@ -236,10 +280,22 @@ export const useQueue = create<S>((set, get) => ({
           id: `p${seqId++}`,
           groupId,
           cellId: ((it.cell_id as string) ?? (base.cell_id as string)) ?? null,
+          // ★넣는 쪽이 해석한 계정이다 (`store/gen`·`store/genRemote`) — 서버의 차선과 같은 값
+          account: String(base.account ?? ""),
+          workspace: String(base.workspace ?? ""),
         });
       }
     }
     set({ pending: [...get().pending, ...add] });
+    /* ★생성을 누르면 **방금 넣은 대기 칸(가장 최근 것)** 을 고른다 (사용자 지시 2026-09-03,
+       `useUi.focusNewPending`, 기본 끔). 대기 칸은 줄의 앞쪽에 늦게 넣은 것부터 서므로
+       `add` 의 마지막이 곧 맨 앞 칸이다. 그림이 나오면 `consumePending` 이 그 장으로 옮긴다.
+       ★보고 있는 워크스페이스에 넣은 것일 때만 — 다른 워크스페이스로 보낸 생성(MCP·원격)에
+         화면이 끌려가면 안 된다. 칸이 없는 항목(씬 없는 강화)은 고를 자리가 없으니 건너뛴다. */
+    const last = add[add.length - 1];
+    if (useUi.getState().focusNewPending && last?.cellId && last.workspace === useWs.getState().current) {
+      useSceneFocus.getState().focusPending(last.cellId, last.id);
+    }
     try {
       await api("/api/generate/queue", {
         method: "POST",
@@ -255,7 +311,7 @@ export const useQueue = create<S>((set, get) => ({
       const ids = new Set(add.map((x) => x.id));
       set({ pending: get().pending.filter((x) => !ids.has(x.id)) });
       // ★재려고 적어 둔 기준선도 버린다. 안 버리면 **다음 배치**가 이 기준선으로 재진다
-      useAnlasMeter.getState().disarm();
+      useAnlasMeter.getState().disarm(String(base.account ?? "") || undefined);
       throw e;
     }
   },
@@ -265,8 +321,8 @@ export const useQueue = create<S>((set, get) => ({
    *  `pending` 을 통째로 비웠는데, 서버는 이미 나간 한 장을 끝까지 받아 낸다 —
    *  **카드는 사라지는데 그림은 계속 나오는** 상태가 됐다.
    *  실제로 멈춘 것이 몇 장인지는 서버만 알고, `queue_cancelled` 가 그것을 실어 온다. */
-  async cancelAll() {
-    await api("/api/cancel-queue", { method: "POST" });
+  async cancelAll(account) {
+    await api(`/api/cancel-queue${account ? `?account=${encodeURIComponent(account)}` : ""}`, { method: "POST" });
   },
 }));
 
@@ -315,7 +371,7 @@ async function flushSpec(out: Record<string, unknown>) {
  *    갖고, 화면 버튼은 확인 창으로, 조수는 **승인 카드**로 묻는다 (`docs/…` 2-5).
  *  ★등록되지 않은 이름은 아래 옛 분기로 내려간다 — 프롬프트 편집처럼 아직 옮기지 않은 것들이다.
  */
-async function runAction(action: string, args: Record<string, any>): Promise<Record<string, unknown>> {
+async function runAction(action: string, args: Record<string, any>, ask = true): Promise<Record<string, unknown>> {
   const [{ getAction }, { askApprove, needsAsk }] = await Promise.all([
     import("../lib/actions"),
     import("../lib/approve"),
@@ -325,7 +381,10 @@ async function runAction(action: string, args: Record<string, any>): Promise<Rec
   if (def) {
     try {
       const risk = typeof def.confirm === "function" ? await def.confirm(args) : (def.confirm ?? "ask");
-      if (needsAsk(risk)) {
+      /* ★★**바깥 에이전트(MCP)는 안 묻는다** (사용자 결정 2026-08-31) — 그쪽 클라이언트가
+         이미 묻고, 기록도 그쪽 앱에 남는다. 백엔드가 어느 열쇠로 들어왔는지 보고 `ask` 로
+         알려 준다 (`backend/server.py` 의 `agent_call`). 앱 안 조수는 그대로 묻는다. */
+      if (ask && needsAsk(risk)) {
         const body = def.preview ? await def.preview(args) : undefined;
         /* ★제목은 **사람이 읽는 한 줄**이다 — `desc` 는 LLM 용이라 길고 마크다운이 섞여 있어
            카드가 설명서처럼 보인다 (QA 실측 2026-08-25). */
@@ -360,6 +419,7 @@ async function legacyAction(action: string, args: Record<string, any>): Promise<
      자동 승인 설정도 승인 카드도 앱에 있기 때문이다. 백엔드는 위험도만 정해 넘긴다
      (`backend/agent.py` 의 `TOOL_RISK`·`approve`). */
   if (action === "ask_approve") {
+    // ★바깥에서 온 것은 여기까지 오지 않는다 (백엔드가 `approve` 를 건너뛴다)
     const { askApprove, needsAsk } = await import("../lib/approve");
     const risk = (args.risk === "hard" ? "hard" : "ask") as "hard" | "ask";
     // ★자동 승인 설정을 **여기서도 그대로** 본다 — 기준이 두 벌이 되면 안 된다
@@ -788,6 +848,14 @@ function handle(m: Record<string, any>, set: Setter, get: () => S) {
     //   ★그래도 **자리는 같다**: 씬 줄의 그 씬 칸에 「미저장」 칸으로 들어간다
     //     (v2 `index.html:12146` — 미저장도 저장된 것과 같은 슬롯 카드다).
     case "image_preview": {
+      // ★다른 워크스페이스의 미저장 그림은 이 화면의 미리보기에 넣지 않는다 — 대기 칸만 지운다
+      //   (`render` 의 ★★주와 같은 까닭, 사용자 실측 2026-09-02)
+      if (m.workspace && m.workspace !== useWs.getState().current) {
+        consumePending(m, set, get, false);
+        takeProgress(m.progress, set);
+        bump(String(m.account ?? ""), "ok");
+        break;
+      }
       const take = usePreviews.getState().add(m);
       /* ★★**보고 있던 대기 칸에 미저장 그림이 나오면 그 그림으로 옮겨 간다** (사용자 지적
          2026-08-30: 자동 저장을 끄면 생성 완료 때 선택이 풀렸다). 저장된 그림은 `consumePending`
@@ -804,7 +872,7 @@ function handle(m: Record<string, any>, set: Setter, get: () => S) {
       //   끝날 때까지 남는다 (`settleBatch` 가 마지막에야 비운다)
       consumePending(m, set, get);
       takeProgress(m.progress, set);
-      batchOk++;
+      bump(String(m.account ?? ""), "ok");
       break;
     }
     /* ★★**그리는 중인 그림** (사용자 지시 2026-08-26) — 서버가 NAI 스트림에서 받은 프레임을
@@ -817,12 +885,13 @@ function handle(m: Record<string, any>, set: Setter, get: () => S) {
       /* ★형식은 **서버가 알려 준다** — 중간 그림은 줄여 보내느라 JPEG 이다
          (`imgutil.preview_jpeg`). 옛 서버가 안 실어 주면 예전대로 PNG 로 읽는다. */
       const mime = String(m.mime ?? "image/png");
-      set({ steps: { ...get().steps, [cell]: `data:${mime};base64,${m.b64}` } });
+      // ★열쇠는 워크스페이스 + 칸 (`stepKey` 의 ★주)
+      set({ steps: { ...get().steps, [stepKey(String(m.workspace ?? ""), cell)]: `data:${mime};base64,${m.b64}` } });
       break;
     }
     case "image":
       render(m, set, get);
-      batchOk++;
+      bump(String(m.account ?? ""), "ok");
       takeProgress(m.progress, set);
       break;
     case "queued":
@@ -831,34 +900,44 @@ function handle(m: Record<string, any>, set: Setter, get: () => S) {
     case "job_progress":
       takeProgress(m.progress, set);
       break;
-    case "job_done":
+    case "job_done": {
       takeProgress(m.progress, set);
-      // ★생성이 끝났으면 **잔액을 다시 묻는다** (v2 `index.html:16429-16432`).
+      const acc = String(m.account ?? "") || null;
+      // ★생성이 끝났으면 **그 계정의 잔액을 다시 묻는다** (v2 `index.html:16429-16432`).
       //   안 물으면 화면의 Anlas 는 앱을 켠 순간 값에 영영 멈춰 있다
-      void useSub.getState().load();
-      // 대기 잡이 남아 있으면 아직 배치가 안 끝났다 (v2 도 `queue_length === 0` 으로 갈랐다)
-      if ((m.progress?.queue_length ?? 0) === 0) settleBatch(false, set, get);
+      void useSub.getState().load(acc ?? undefined);
+      // 대기 잡이 남아 있으면 아직 배치가 안 끝났다 (v2 도 `queue_length === 0` 으로 갈랐다).
+      // ★★**그 차선의** 대기다 — 다른 계정이 아직 돌고 있어도 이쪽 배치는 여기서 끝난다
+      if (laneLeft(m.progress, acc) === 0) settleBatch(false, acc, set, get);
       break;
-    case "job_cancelled":
+    }
+    case "job_cancelled": {
       takeProgress(m.progress, set);
+      const acc = String(m.account ?? "") || null;
       // ★취소는 **끝난 문구를 안 남긴다** — v2 도 상태를 「준비」로 되돌리기만 했다
-      if ((m.progress?.queue_length ?? 0) === 0) settleBatch(true, set, get);
+      if (laneLeft(m.progress, acc) === 0) settleBatch(true, acc, set, get);
       break;
+    }
     // ★취소 — **실제로 멈춘 것만** 걷어낸다 (감사 D5).
     //   `remaining` 은 아직 올 장 수다: 돌고 있었으면 지금 NAI 로 나간 한 장, 아니면 0.
     //   대기 칸은 서버가 만드는 순서 그대로 쌓이므로(`enqueue`), 남길 것은 **맨 앞** 것이다.
     case "queue_cancelled": {
       takeProgress(m.progress, set);
       const keep = Math.max(0, Number(m.remaining ?? 0));
+      const acc = String(m.account ?? "") || null;
       const pend = get().pending;
-      if (pend.length > keep) set({ pending: pend.slice(0, keep) });
+      // ★계정별 취소면 **그 차선의 대기 칸**만 걷어낸다 — 다른 계정의 것은 그대로 돈다
+      const mine = acc ? pend.filter((p) => p.account === acc) : pend;
+      if (mine.length > keep) {
+        const drop = new Set(mine.slice(keep).map((p) => p.id));
+        set({ pending: pend.filter((p) => !drop.has(p.id)) });
+      }
       // 남은 장이 없으면 여기서 배치가 끝난 것이다 — 돌고 있으면 그 장이 온 뒤
       // `job_cancelled` 가 마무리한다 (거기서도 같은 `settleBatch` 를 부른다)
-      if (keep === 0) settleBatch(true, set, get);
+      if (keep === 0) settleBatch(true, acc, set, get);
       else {
         // 배치 회계만 되돌린다 (v2 `index.html:16542-16544`)
-        batchOk = 0;
-        batchErr = 0;
+        for (const a of acc ? [acc] : Object.keys(batch)) delete batch[a];
       }
       break;
     }
@@ -874,7 +953,7 @@ function handle(m: Record<string, any>, set: Setter, get: () => S) {
     // ★AI 가 시킨 **행동** — 이름 붙은 것만 한다 (도구 목록은 백엔드가 갖는다).
     //   생성은 프롬프트 조립·시드 규칙이 전부 화면에 있어서 여기서 해야 한다
     case "do": {
-      void runAction(m.action, m.args ?? {}).then((result) =>
+      void runAction(m.action, m.args ?? {}, m.ask !== false).then((result) =>
         sock?.send(JSON.stringify({ type: "done", id: m.id, result })),
       );
       break;
@@ -889,7 +968,7 @@ function handle(m: Record<string, any>, set: Setter, get: () => S) {
       //   화면이 하나도 없어서, 20장이 전부 실패해도 아무 일도 안 일어났다 (감사 2026-08-16).
       set({ error: String(m.error ?? "") });
       toast(queueErrorText(String(m.error ?? "")), "warn");
-      batchErr++;
+      bump(String(m.account ?? ""), "err");
       takeProgress(m.progress, set);
       break;
   }
@@ -900,7 +979,10 @@ function handle(m: Record<string, any>, set: Setter, get: () => S) {
 function takeProgress(p: QueueProgress | undefined, set: Setter) {
   if (!p) return;
   const running = p.total > p.completed || p.queue_length > 0;
-  if (running) wasBusy = true;
+  // ★돌고 있는 차선마다 표식을 세운다 — 끝은 그 차선의 표식으로만 알린다 (`busyLanes` 의 ★★주)
+  if (p.lanes) {
+    for (const [id, l] of Object.entries(p.lanes)) if (l.total > l.completed || l.queue_length > 0) busyLanes.add(id);
+  } else if (running) busyLanes.add("*");
   set({ progress: p, ...(running ? { phase: "running" as QueuePhase } : {}) });
 }
 
@@ -910,30 +992,49 @@ function takeProgress(p: QueueProgress | undefined, set: Setter) {
  *    돌아서, 취소·실패로 큐가 끝나면 **대기 카드가 유령으로 남고** 완료 알림도 안 울렸다
  *    (감사 A7). v2 는 `job_done`·`job_cancelled` 에서 각각 정리했다
  *    (`index.html:16460, 16483, 16504-16511`). */
-function settleBatch(cancelled: boolean, set: Setter, get: () => S) {
-  // ★큐가 다 비면 남은 대기는 **오지 않는다** (취소·실패). 자리를 계속 잡고 있으면 유령이 된다
-  if (get().pending.length) set({ pending: [] });
+/** 그 차선에 **아직 안 시작한 잡**이 몇이나 남았나. 차선 정보가 없으면(옛 백엔드) 전체 대기다 */
+function laneLeft(p: QueueProgress | undefined, account: string | null): number {
+  if (!p) return 0;
+  if (account && p.lanes?.[account]) return p.lanes[account].queue_length ?? 0;
+  return p.queue_length ?? 0;
+}
 
+/** `account` 가 있으면 **그 차선의** 배치가 끝난 것이다 — 대기 칸·회계·잔액 재기를 그쪽 것만 마무리한다.
+ *  없으면(옛 백엔드) 전부다. */
+function settleBatch(cancelled: boolean, account: string | null, set: Setter, get: () => S) {
+  // ★큐가 다 비면 남은 대기는 **오지 않는다** (취소·실패). 자리를 계속 잡고 있으면 유령이 된다
+  const pend = get().pending;
+  const rest = account ? pend.filter((p) => p.account !== account) : [];
+  if (rest.length !== pend.length) set({ pending: rest });
+
+  let okN = 0;
+  let errN = 0;
+  for (const a of account ? [account] : Object.keys(batch)) {
+    const b = batch[a];
+    if (!b) continue;
+    okN += b.ok;
+    errN += b.err;
+    delete batch[a];
+  }
   // 취소는 성패를 따지지 않는다 — 그냥 「준비」로 돌아간다
   const phase: QueuePhase = cancelled
     ? "idle"
-    : batchErr > 0 && batchOk === 0
+    : errN > 0 && okN === 0
       ? "failed"
-      : batchErr > 0
+      : errN > 0
         ? "partial"
         : "done";
-  const done = batchOk;
-  batchOk = 0;
-  batchErr = 0;
+  const done = okN;
   set({ phase });
 
   // ★**실제로 청구된 Anlas 를 잰다** (`store/anlasMeter`). 잰다는 것은 잔액 차이다.
   //   ★온전히 끝난 배치에서만 잰다. 취소·실패·일부 실패는 몇 장이 실제로 나갔는지
   //     알 수 없어 숫자가 틀리게 나온다. 그때는 아무 말도 하지 않는다.
-  if (phase === "done") void useAnlasMeter.getState().settle();
-  else useAnlasMeter.getState().disarm();
+  //   ★계정마다 따로 잰다 — 끝난 차선의 계정으로 (`store/anlasMeter` 머리 주석)
+  if (phase === "done") void useAnlasMeter.getState().settle(account ?? undefined);
+  else useAnlasMeter.getState().disarm(account ?? undefined);
 
-  if (!cancelled) announceDone(done);
+  if (!cancelled) announceDone(done, account);
 
   if (phaseTimer) clearTimeout(phaseTimer);
   if (phase !== "idle") {
@@ -946,9 +1047,15 @@ function settleBatch(cancelled: boolean, set: Setter, get: () => S) {
 
 /** 「다 됐다」를 한 번만 알린다 — **돌다가 멈춘 그 순간**에만.
  *  ★두 경로가 함께 쓴다: 브로드캐스트(`job_done`)와 재접속 복원(`applyStatus`). */
-function announceDone(n: number) {
-  if (!wasBusy) return;
-  wasBusy = false;
+function announceDone(n: number, account: string | null) {
+  // ★그 차선이 돌고 있었을 때만 — 차선을 모르면(옛 백엔드·재접속 복원) 세워진 표식 아무거나
+  if (account) {
+    if (!busyLanes.has(account)) return;
+    busyLanes.delete(account);
+  } else {
+    if (!busyLanes.size) return;
+    busyLanes.clear();
+  }
   const ui = useUi.getState();
   if (ui.notifyDone) toast(t("queue.allDone", { n }));
   // ★화면을 안 보고 있을 때를 위해 소리로도 알린다 (v2 `notifySoundOnComplete`)
@@ -972,18 +1079,32 @@ function applyStatus(status: Record<string, any> | undefined, set: Setter, get: 
   const idle = (status.queue_length ?? 0) === 0 && !status.is_processing;
   if (idle && get().pending.length) set({ pending: [] });
   // ★다 끝났으면 한 번만 알린다 — 여러 장 돌려 놓고 다른 일을 하다 놓치는 것을 막는다.
-  //   `wasBusy` 로 **돌다가 멈춘 순간**만 잡는다 (가만히 있을 때 계속 울리지 않게).
+  //   `busyLanes` 로 **돌다가 멈춘 순간**만 잡는다 (가만히 있을 때 계속 울리지 않게).
   //   ★평소의 끝은 `settleBatch` 가 받는다. 이 자리는 **끊겼다 다시 붙었더니 그 사이
   //     끝나 있던** 경우를 위한 것이다 — 알리는 창구는 `announceDone` 하나로 모았다.
   const done = status.completed_images ?? 0;
   const total = status.total_images ?? 0;
-  if (idle && total > 0 && done >= total) announceDone(done);
-  wasBusy = !idle;
+  if (idle && total > 0 && done >= total) announceDone(done, null);
+  if (idle) busyLanes.clear();
+  else busyLanes.add("*");
+  // ★★차선도 옮겨 담는다 (사용자 실측 2026-09-02: 재접속 복원이 차선 없이 합계만 넣어서, 나란히 가던
+  //   「0/3 · 0/3」이 잠시 뒤 「0/6」으로 합쳐졌다). 상태의 차선은 `Lane.status()` 꼴이라 이름을 맞춘다
+  const lanesIn = status.lanes as Record<string, Record<string, any>> | undefined;
+  const lanes = lanesIn
+    ? Object.fromEntries(
+        Object.entries(lanesIn).map(([id, l]) => [
+          id,
+          { completed: l.completed_images ?? 0, total: l.total_images ?? 0, queue_length: l.queue_length ?? 0,
+            current_cell: l.current_cell ?? null, name: l.name },
+        ]),
+      )
+    : undefined;
   set({
     progress: {
       completed: status.completed_images ?? 0,
       total: status.total_images ?? 0,
       queue_length: status.queue_length ?? 0,
+      ...(lanes ? { lanes } : {}),
     },
     phase: idle ? "idle" : "running",
   });
@@ -997,12 +1118,16 @@ function applyStatus(status: Record<string, any> | undefined, set: Setter, get: 
 
 /** 이 장에 해당하는 대기 하나를 지운다 (같은 슬롯의 맨 앞 것).
  *  ★저장된 그림과 미저장 그림이 **같이 쓴다** — 어느 쪽이든 대기 칸은 하나 줄어야 한다. */
-function consumePending(m: Record<string, any>, set: Setter, get: () => S) {
-  /* ★그 칸의 중간 그림을 놓는다 — 완성본이 왔는데 남겨 두면 그 위에 흐린 미리보기가 겹친다 */
+function consumePending(m: Record<string, any>, set: Setter, get: () => S, mine = true) {
+  /* ★그 칸의 중간 그림을 놓는다 — 완성본이 왔는데 남겨 두면 그 위에 흐린 미리보기가 겹친다.
+     ★★**어느 워크스페이스의 그림이든** 놓는다 (사용자 실측 2026-09-02: 보고 있지 않은 워크스페이스의 그림이
+       완성될 때 안 놓으니, 그리로 가면 다음 「생성 중」 칸에 지난 프레임이 떠 있었다). 열쇠가 워크스페이스 +
+       칸이라 다른 워크스페이스의 같은 칸 id 것을 잘못 놓을 일은 없다 (`stepKey`). */
   const cell = String(m.cell_id ?? "");
-  if (cell && get().steps[cell]) {
+  const sk = stepKey(String(m.workspace ?? useWs.getState().current), cell);
+  if (cell && get().steps[sk]) {
     const steps = { ...get().steps };
-    delete steps[cell];
+    delete steps[sk];
     set({ steps });
   }
   /* ★★★**보고 있던 대기 칸에 그림이 나오면, 그 그림으로 옮겨 간다** (사용자 지적 2026-08-26:
@@ -1016,13 +1141,17 @@ function consumePending(m: Record<string, any>, set: Setter, get: () => S) {
      ★대기 칸을 고르고 있을 때만 돈다 — 이미 어떤 장을 보고 있으면 새 그림이 나와도
        **화면을 뺏지 않는다** (사용자가 보던 것을 지키는 규칙 그대로다). */
   const f0 = useSceneFocus.getState();
-  if (f0.pending && m.file && (m.cell_id ?? null) === (f0.cell || null)) {
+  if (mine && f0.pending && m.file && (m.cell_id ?? null) === (f0.cell || null)) {
     f0.focus(f0.cell, String(m.file));
   }
 
+  // ★워크스페이스까지 맞춘다 — 씬 그룹·칸 id 는 워크스페이스를 건너 겹친다 (`Pending.workspace` 의 ★주).
+  //   서버가 워크스페이스를 안 실어 준 옛 그림(`sync` 복원의 아주 옛 줄)은 예전처럼 id 로만 본다
   const pend = get().pending;
+  const wsOf = m.workspace ? String(m.workspace) : null;
   const at = pend.findIndex(
-    (p) => p.groupId === (m.scene_group_id ?? null) && p.cellId === (m.cell_id ?? null),
+    (p) => p.groupId === (m.scene_group_id ?? null) && p.cellId === (m.cell_id ?? null)
+      && (wsOf === null || p.workspace === wsOf),
   );
   if (at < 0) return;
   set({ pending: pend.filter((_, i) => i !== at) });
@@ -1034,8 +1163,13 @@ function render(m: Record<string, any>, set: Setter, get: () => S) {
   if (seq && get().seen.has(seq)) return;
 
   const ws = useWs.getState();
-  // 다른 워크스페이스의 결과는 이 화면과 무관하다 (큐는 앱 전체가 공유한다)
-  if (m.workspace && m.workspace !== ws.current) return;
+  // ★★다른 워크스페이스의 결과는 이 화면의 목록에 안 넣는다 (큐는 앱 전체가 공유한다). 다만 **대기 칸은
+  //   지운다** — 예전에는 여기서 그냥 돌아가서, 보고 있지 않은 워크스페이스에 건 배치의 대기 칸이 그림이
+  //   나와도 영영 남았다 (사용자 실측 2026-09-02). 그 워크스페이스로 가면 그림은 서버 목록에서 온다.
+  if (m.workspace && m.workspace !== ws.current) {
+    consumePending(m, set, get, false);
+    return;
+  }
 
   ws.addRecord({
     // ★시각은 **서버가 찍은 것**이다 (`_generate_one` 의 `ts`). 화면이 자기 시계로 찍으면

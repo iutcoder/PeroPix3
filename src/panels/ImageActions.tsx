@@ -1,4 +1,5 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { Icon } from "../components/Icon";
 import { useI18n } from "../i18n";
 import { fitSizeToBase, useGen } from "../store/gen";
@@ -17,7 +18,8 @@ import { usePrompt } from "../store/prompt";
 import type { ShotEnv } from "../store/workspace";
 import { api } from "../lib/backend";
 import { upscaleCost } from "../lib/anlas";
-import { useSub } from "../store/sub";
+import { useCurrentSub } from "../store/sub";
+import { currentAccountId } from "../store/accounts";
 import { useWs, type Rec } from "../store/workspace";
 import type { ImageMeta } from "../store/gallery";
 import { sendToTagger } from "./tools/TaggerTool";
@@ -105,7 +107,7 @@ export function ImageActions({
   const [busy, setBusy] = useState(false);
   /** 시드 강조는 **커서를 올린 동안만** (사용자 지시 2026-08-19) */
   const [seedHot, setSeedHot] = useState(false);
-  const opus = useSub((s) => (s.sub?.tier ?? 0) >= 3);
+  const opus = (useCurrentSub()?.tier ?? 0) >= 3;
   const [seen, setSeen] = useState<ImageMeta | null>(null);
 
   /** ★쿼리를 하나 붙여 받는다 — 같은 주소를 `<img>` 가 no-cors 로 먼저 캐시해 두면
@@ -245,7 +247,8 @@ export function ImageActions({
         const r = await api<{ file: string; record: Rec }>("/api/upscale", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ workspace: upscale.ws, file: f }),
+          // ★그 워크스페이스의 계정으로 — 잔액을 그쪽에서 쓴다 (`store/accounts`)
+          body: JSON.stringify({ workspace: upscale.ws, file: f, account: currentAccountId() }),
         });
         // ★목록을 **다시 읽지 않는다** — 서버가 돌려준 레코드 한 줄만 얹으면 화면이 따라온다
         useWs.getState().addRecord(r.record);
@@ -367,17 +370,6 @@ export function ImageActions({
         {/* ★아이콘만 쓰는 자리는 **이름을 툴팁이 말한다** (사용자 지시 2026-08-19).
             글자로 남긴 것: i2i · 인페인트 · 업스케일(값이 붙는다) — 그림만으로는 뜻이 안 잡히는
             것들이다. 프롬프트 보기·설정·복제는 2026-08-29 에 아이콘으로 옮겼다 (위 ★★주). */}
-        {onClone && (
-          <button
-            data-act-clone
-            onClick={() => void runClone()}
-            disabled={busy}
-            data-tip={t("act.clone")}
-            style={iconBtn}
-          >
-            {Icon.duplicate}
-          </button>
-        )}
 
         {!isMulti && (
           <>
@@ -446,6 +438,11 @@ export function ImageActions({
             </span>
           </button>
         )}
+        {/* ★★**이미지 변형 무리의 끝** (사용자 지시 2026-09-04). 앞은 이 그림을 재료로
+            다시 그리는 것들(i2i·인페인트·강화·업스케일), 뒤는 그림을 **어디로 보내거나 여는**
+            것들이다 — 성격이 달라 눈으로도 갈라 둔다. */}
+        <span data-act-sep style={{ width: 1, alignSelf: "stretch", background: "var(--line)" }} />
+
         {revealPath && !isMulti && (
           <button
             data-act-reveal
@@ -469,30 +466,18 @@ export function ImageActions({
             {Icon.folderOpen}
           </button>
         )}
-        {onKeep && (
-          <button
-            data-act-keep
-            onClick={() => void onKeep()}
-            /* ★아이콘만 있는 단추라 툴팁이 **이름**을 맡는다 — 설명은 걷었다 (2026-08-26).
-               ★문구를 코드에서 잇지 않는다 — 잇는 기호와 어순이 번역을 안 탄다 */
-            data-tip={t("gallery.keep")}
-            style={iconBtn}
-          >
-            {Icon.images}
-          </button>
-        )}
-        {onConvert && (
-          /* ★생성 직후 메타데이터를 지워 내보내는 길 (사용자 지시 2026-08-29) —
-             파일 관리의 「일괄 이름 변환으로 보낸다」와 같은 창구로 간다 */
-          <button
-            data-act-convert
-            onClick={() => void onConvert()}
-            data-tip={t("tools.sendConvert")}
-            style={iconBtn}
-          >
-            {Icon.external}
-          </button>
-        )}
+        {/* ★★**「어디로 보낼까」는 한 단추로 묶는다** (사용자 지시 2026-09-04).
+            탭·갤러리·일괄변환은 전부 *이 그림을 다른 자리로 보내는* 같은 몸짓이라, 아이콘
+            셋으로 늘어놓으면 줄만 길고 무엇이 무엇인지 아이콘으로는 안 잡힌다.
+            ★단추는 일괄변환이 쓰던 아이콘, 갈래는 **글자**로 (같은 지시). */}
+        <SendMenu
+          busy={busy}
+          items={[
+            onClone && { mark: "clone", label: t("act.clone"), run: runClone },
+            onKeep && { mark: "keep", label: t("gallery.keep"), run: onKeep },
+            onConvert && { mark: "convert", label: t("tools.sendConvert"), run: onConvert },
+          ].filter((x): x is SendItem => !!x)}
+        />
         {extra}
 
         {/* ★시드·해상도는 **맨 뒤 우측**이다 (페로픽스파이 `.result-meta .seed`,
@@ -715,22 +700,147 @@ function PromptView({
 /** 아이콘만 있는 단추 — 글자 단추와 **같은 높이**로 선다 (줄이 들쭉날쭉하면 안 된다) */
 /** ★단추 모양은 이 줄이 정본이다 — `extra` 로 끼워 넣는 쪽도 같은 자를 쓴다
  *  (갤러리의 지우기 단추). 자리마다 새로 만들면 한 줄 안에서 크기가 갈린다. */
+/** ★★**줄의 키는 하나다** (사용자 지시 2026-09-04: *"업스케일 버튼 기준으로 통일"*).
+ *  아이콘만 있는 것과 글자만 있는 것은 속의 줄 높이가 달라 **내용에 따라 키가 갈렸다**
+ *  (아이콘 16px · 12px 글자의 줄 상자 14px). 높이를 못 박고 가운데 정렬로 두면 무엇이 들어가든
+ *  같은 키다. 값은 업스케일 단추의 원래 키다 — 아이콘 16 + 위아래 여백 6 + 테두리 2. */
+const ACT_H = 24;
+
 export const iconBtn: React.CSSProperties = {
-  display: "grid",
+  display: "inline-grid",
   placeItems: "center",
+  boxSizing: "border-box",
+  height: ACT_H,
   border: "1px solid var(--line)",
   borderRadius: "var(--r-2)",
   background: "var(--panel)",
   color: "var(--ink-soft)",
-  padding: "3px var(--sp-2)",
+  padding: "0 var(--sp-2)",
   minWidth: 28,
 };
 
 const btn: React.CSSProperties = {
+  display: "inline-flex",
+  alignItems: "center",
+  justifyContent: "center",
+  boxSizing: "border-box",
+  height: ACT_H,
   border: "1px solid var(--line)",
   borderRadius: "var(--r-2)",
   background: "var(--panel)",
   color: "var(--ink-soft)",
-  padding: "3px var(--sp-3)",
+  padding: "0 var(--sp-3)",
   fontSize: "var(--text-2xs)",
 };
+
+type SendItem = { mark: string; label: string; run: () => void | Promise<void> };
+
+/** 「보내기」 — 이 그림을 **다른 자리로** 보내는 갈래를 한 단추에 모은다.
+ *
+ *  ★목록은 `document.body` 에 띄운다 (portal). 이 줄은 그림 위에 겹쳐 있고 `overflow` 가
+ *    걸린 조상이 있어서, 안에서 펼치면 잘린다.
+ *  ★갈 곳이 하나뿐이면 **메뉴를 안 연다** — 한 줄짜리 목록은 누르는 수만 늘린다.
+ */
+function SendMenu({ busy, items }: { busy: boolean; items: SendItem[] }) {
+  const t = useI18n((s) => s.t);
+  const [open, setOpen] = useState(false);
+  const [at, setAt] = useState<{ x: number; y: number } | null>(null);
+  const ref = useRef<HTMLButtonElement | null>(null);
+  /** 펼친 목록. ★★**닫기 검사에서 빼야 한다** — 캡처 단계로 듣기 때문에 항목을 누르면
+   *  `click` 이 오기 **전에** `pointerdown` 이 먼저 닫아 버려, 눌러도 아무 일도 안 일어났다
+   *  (사용자 지적 2026-09-04: *"보내기가 전부 작동 안 함"*). */
+  const menuRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const close = (e: Event) => {
+      const n = e.target instanceof Node ? e.target : null;
+      if (n && (ref.current?.contains(n) || menuRef.current?.contains(n))) return;
+      setOpen(false);
+    };
+    const key = (e: KeyboardEvent) => e.key === "Escape" && setOpen(false);
+    /* ★★**캡처 단계**로 듣는다 (사용자 지적 2026-09-04: *"이미지를 다른 거 선택하면 선택 팝업
+       사라져야 하는데 그대로 있음"*). 씬 칸·갤러리 칸은 `pointerdown` 에 `stopPropagation` 을
+       걸어 두어(끌기와 클릭을 가르려고), 거품 단계에서 듣는 이 창구까지 올라오지 않았다.
+       캡처는 그 앞을 지나므로 어디를 눌러도 닫힌다. */
+    document.addEventListener("pointerdown", close, true);
+    document.addEventListener("keydown", key);
+    window.addEventListener("scroll", close, true);
+    return () => {
+      document.removeEventListener("pointerdown", close, true);
+      document.removeEventListener("keydown", key);
+      window.removeEventListener("scroll", close, true);
+    };
+  }, [open]);
+
+  if (!items.length) return null;
+
+  const fire = (it: SendItem) => {
+    setOpen(false);
+    void it.run();
+  };
+
+  return (
+    <>
+      <button
+        ref={ref}
+        data-act-send
+        disabled={busy}
+        data-tip={t("act.send")}
+        onClick={() => {
+          if (items.length === 1) return fire(items[0]);
+          const r = ref.current?.getBoundingClientRect();
+          if (r) setAt({ x: r.left, y: r.top });
+          setOpen((v) => !v);
+        }}
+        style={iconBtn}
+      >
+        {Icon.external}
+      </button>
+      {open && at
+        && createPortal(
+          <div
+            ref={menuRef}
+            data-act-send-menu
+            style={{
+              position: "fixed",
+              // ★단추 **위쪽**에 편다 — 이 줄은 그림 아래에 붙어 있어 아래로 펴면 화면 밖이다
+              left: at.x,
+              bottom: window.innerHeight - at.y + 6,
+              zIndex: 60,
+              minWidth: 150,
+              padding: "var(--sp-1)",
+              display: "flex",
+              flexDirection: "column",
+              gap: 1,
+              background: "var(--panel)",
+              border: "1px solid var(--line)",
+              borderRadius: "var(--r-2)",
+              boxShadow: "0 6px 20px rgba(0,0,0,.28)",
+            }}
+          >
+            {items.map((it) => (
+              <button
+                key={it.mark}
+                data-act-send-to={it.mark}
+                onClick={() => fire(it)}
+                style={{
+                  textAlign: "left",
+                  padding: "6px var(--sp-3)",
+                  borderRadius: "var(--r-1)",
+                  border: "1px solid transparent",
+                  background: "transparent",
+                  color: "var(--ink)",
+                  fontSize: "var(--text-2xs)",
+                  whiteSpace: "nowrap",
+                }}
+              >
+                {it.label}
+              </button>
+            ))}
+          </div>,
+          document.body,
+        )}
+    </>
+  );
+}

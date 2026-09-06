@@ -1,6 +1,6 @@
 import { useEffect, useRef } from "react";
 import { useI18n } from "../i18n";
-import { useCensor, type Tab } from "../store/censor";
+import { BRUSH_MAX, dirOf, isAbsPath, savePathOf, useCensor, type Tab } from "../store/censor";
 import { useFiles, type FileNode } from "../store/files";
 import { useGen } from "../store/gen";
 import { fileMgrThumb } from "../lib/imgUrl";
@@ -65,6 +65,16 @@ export function Censor() {
     if (!el) return;
     const onWheel = (e: WheelEvent) => {
       const s = useCensor.getState();
+      /* ★★**Alt+휠 = 붓 크기** (사용자 지시 2026-09-05: *"조작키를 알트 + 휠로 변경"* — 칠하다 말고
+         손을 옮기지 않아도 되게. 칩의 가중치와 같은 조합이다). Alt 단독 누름이 창의 메뉴 모드를 깨우지
+         않게는 `App.tsx` 가 막아 둔다. */
+      if (e.altKey && s.tab !== "before") {
+        e.preventDefault();
+        // ★한 눈금 1px, Shift 를 더하면 10px (칩의 가중치가 Alt+Shift 로 큰 걸음을 두는 것과 같다)
+        const step = (e.shiftKey ? 10 : 1) * (e.deltaY < 0 ? 1 : -1);
+        s.tune({ brushPx: Math.max(1, Math.min(BRUSH_MAX, s.brushPx + step)) });
+        return;
+      }
       const n = (s.tab === "after" ? s.after : s.images).length;
       if (n < 2) return;
       e.preventDefault();
@@ -74,19 +84,25 @@ export function Censor() {
     return () => el.removeEventListener("wheel", onWheel);
   }, [c.tab]);
 
-  /** 단축키. ★입력칸에 커서가 있으면 먹지 않는다 (숫자칸에 1 을 못 치면 곤란하다) */
+  /** 단축키. ★**글자를 치는 칸**에 커서가 있으면 먹지 않는다 (숫자칸에 1 을 못 치면 곤란하다).
+   *  ★★슬라이더·체크박스는 글자 칸이 아니다 — 여기서 걸러 버리면 슬라이더를 만진 뒤로 단축키가
+   *    전부 죽는다 (사용자 제보 2026-09-05: *"컨트롤 제트도 안 됨, 단축키 다 안 되는 거 보니까 입력을
+   *    안 먹고 있는 듯"*). 무대는 `pointerdown` 의 기본 동작을 막고 있어 눌러도 포커스가 안 옮겨지므로,
+   *    직전에 만진 슬라이더가 포커스를 쥔 채 남는다 (무대 쪽에서도 누를 때 포커스를 푼다). */
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const el = e.target as HTMLElement | null;
-      if (el && /^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName)) return;
+      if (el && (el.tagName === "TEXTAREA" || el.tagName === "SELECT" || el.isContentEditable
+        || (el.tagName === "INPUT" && !/^(range|checkbox|radio|button|color)$/.test((el as HTMLInputElement).type)))) return;
       const s = useCensor.getState();
-      if (s.tab !== "before" && (e.key === "1" || e.key === "2" || e.key === "3")) {
+      if (s.tab !== "before" && (e.key === "1" || e.key === "2")) {
         e.preventDefault();
-        return s.set({ tool: e.key === "1" ? "select" : e.key === "2" ? "add" : "delete", sel: -1 });
+        return s.set({ tool: e.key === "1" ? "brush" : "erase" });
       }
-      if (e.key === "Delete" && s.tab !== "before" && s.sel >= 0) {
+      // ★`code` 로 본다 — 한글 자판이 켜져 있으면 `key` 가 "ㅋ" 로 오는 수가 있다
+      if (s.tab !== "before" && e.code === "KeyZ" && (e.ctrlKey || e.metaKey) && !e.shiftKey) {
         e.preventDefault();
-        return s.removeBox(s.sel);
+        return s.undoPaint();
       }
       if (e.key === "ArrowLeft") return s.step(-1);
       if (e.key === "ArrowRight") return s.step(1);
@@ -94,6 +110,23 @@ export function Censor() {
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, []);
+
+  /* 저장 자리 — 검열 전·중은 지금 설정이 가리키는 폴더, 검열 후는 보고 있는 장이 있는 폴더.
+     덮어쓰기는 원본 자리(그 장의 폴더). 루트 안은 `reveal`, 밖(절대 경로)은 `openDir` 로 연다. */
+  const curIm = c.cur();
+  const savePath = c.tab === "after" ? (curIm ? dirOf(curIm) : "") : savePathOf(c, c.images);
+  const saveLabel = c.tab === "after"
+    ? savePath || t("censor.openFolder")
+    : savePath === null ? t("tools.destOverwrite") : savePath || t("tools.needDest");
+  const openTarget = savePath === null ? (curIm ? dirOf(curIm) : "") : savePath;
+  const openSaveDir = async () => {
+    try {
+      if (isAbsPath(openTarget)) await useFiles.getState().openDir(openTarget);
+      else await useFiles.getState().reveal(openTarget);
+    } catch (e) {
+      toast(String(e), "warn");
+    }
+  };
 
   const Row = ({ node, depth }: { node: FileNode; depth: number }) => (
     <>
@@ -174,35 +207,21 @@ export function Censor() {
 
         <span style={{ flex: 1 }} />
 
-        {/* 저장 폴더. 결과가 갈 자리 (v2 의 `censored` 폴더 드롭다운) */}
-        <span style={{ fontSize: "var(--text-2xs)", color: "var(--ink-faint)" }}>{t("censor.dest")}</span>
-        <select
-          data-censor-dest
-          value={c.dest}
-          onChange={(e) => c.tune({ dest: e.target.value })}
-          style={{ ...box, maxWidth: 220 }}
+        {/* ★★저장 자리는 **읽기만** 보여 준다 (사용자 지시 2026-09-06: *"저장 위치 정하는 게 도구 안으로 들어왔으니까
+            상단에 저장 폴더 정하는 UI 는 사라져야 함, 새 폴더 추가 단추도. 현재 저장되는 경로랑 폴더 열기 단추만"*).
+            정하는 창구는 오른쪽 기둥의 「저장 위치」(`DestPicker`) 하나다 — 같은 값을 두 곳에서 고치게 두지 않는다. */}
+        <span
+          data-censor-save-path
+          title={savePath ?? ""}
+          style={{ fontSize: "var(--text-2xs)", color: "var(--ink-faint)", maxWidth: 360, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
         >
-          <option value="">{t("censor.destBeside")}</option>
-          {/* ★들여쓰기가 아니라 **온 경로**를 적는다. option 은 앞 공백을 접어 버려
-              층이 안 보이고, 저장할 자리는 끝 이름만으로는 못 가린다 */}
-          {flatten(tree).map((path) => (
-            <option key={path} value={path}>
-              {path}
-            </option>
-          ))}
-        </select>
-        <button
-          data-censor-mkdir
-          data-tip={t("censor.newFolder")}
-          onClick={() => void newFolder(c.dest, t)}
-          style={{ ...box, display: "grid", placeItems: "center", padding: "3px var(--sp-2)" }}
-        >
-          {Icon.folderPlus}
-        </button>
+          {saveLabel}
+        </span>
         <button
           data-censor-open-folder
           data-tip={t("censor.openFolder")}
-          onClick={() => void useFiles.getState().reveal(c.dest)}
+          disabled={!openTarget && openTarget !== ""}
+          onClick={() => void openSaveDir()}
           style={{ ...box, display: "grid", placeItems: "center", padding: "3px var(--sp-2)" }}
         >
           {Icon.folderOpen}
@@ -313,6 +332,11 @@ export function Censor() {
         )}
         {c.tab === "before" && !!list.length && (
           <button data-censor-clear onClick={() => c.clearImages()} style={{ ...box, flexShrink: 0 }}>
+            {t("censor.clear")}
+          </button>
+        )}
+        {c.tab === "after" && !!list.length && (
+          <button data-censor-clear-after onClick={() => c.clearAfter()} style={{ ...box, flexShrink: 0 }}>
             {t("censor.clear")}
           </button>
         )}
@@ -482,21 +506,9 @@ export function Censor() {
               </span>
             )}
           </div>
-
-          <div style={{ display: "flex", alignItems: "center", gap: "var(--sp-3)", minHeight: 18 }}>
-            <span style={{ fontSize: "var(--text-2xs)", color: "var(--ink-dim)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-              {c.cur()?.name ?? t("censor.pickImage")}
-            </span>
-            <span style={{ flex: 1 }} />
-            {!!c.curBoxes().length && (
-              <span style={{ fontSize: "var(--text-2xs)", color: "var(--ink-faint)" }}>
-                {t("censor.found", { n: c.curBoxes().filter((b) => !b.off).length })}
-              </span>
-            )}
-            <span style={{ fontSize: "var(--text-2xs)", color: "var(--ink-faint)" }}>
-              {t(c.tab === "before" ? "censor.hintBefore" : "censor.hintEdit")}
-            </span>
-          </div>
+          {/* ★무대 아래 파일명·찾은 수·안내 줄은 걷었다 (사용자 지시 2026-09-05: "검열 페이지에서
+              하단의 파일명과 안내 라인 필요없음"). 그 글자를 끌어 고르면 선택 상태가 남아 붓이
+              한 틱 만에 끊기던 것도 함께 사라진다. */}
         </div>
 
         {/* ── 오른쪽: 무엇을 찾고 어떻게 가릴까 ── */}
@@ -537,22 +549,4 @@ function Arrow({ side, disabled, onClick }: { side: "left" | "right"; disabled: 
       {side === "left" ? Icon.chevL : Icon.chevR}
     </button>
   );
-}
-
-/** 폴더 트리를 한 줄짜리 목록으로 (드롭다운에 들여쓰기로 그린다) */
-function flatten(tree: FileNode[]): string[] {
-  return tree.flatMap((n) => [n.path, ...flatten(n.children)]);
-}
-
-async function newFolder(parent: string, t: (k: string, p?: Record<string, string | number>) => string) {
-  const name = window.prompt(t("files.newFolderPrompt"), "censored");
-  if (!name) return;
-  try {
-    await useFiles.getState().mkdir(parent, name);
-    const path = parent ? `${parent}/${name}` : name;
-    useCensor.getState().tune({ dest: path });
-    toast(t("censor.folderMade", { n: name }));
-  } catch (e) {
-    toast(String(e), "warn");
-  }
 }

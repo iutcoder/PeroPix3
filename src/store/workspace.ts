@@ -1,5 +1,7 @@
 import { create } from "zustand";
-import { api, type TrashEntry } from "../lib/backend";
+import { api, backendUrl, type TrashEntry } from "../lib/backend";
+import { imgUrl } from "../lib/imgUrl";
+import { useSceneFocus } from "./sceneFocus";
 import { usePrompt, defaultBase, defaultUc, type Char, type Thumb } from "./prompt";
 import { t } from "../i18n";
 import { toast, undoToast } from "./toast";
@@ -252,9 +254,13 @@ export type Spec = {
    *    경로로 베껴 적은 것이라 spec 이 덮어써지면 손으로 다시 채워야 했다 — 지금은 서버가 파일이
    *    없는 줄을 목록에서 빼고 준다 (`Store.live_records`). 옛 파일의 것은 `migrate` 가 뗀다. */
   selection: { starred?: string[] };
+  /** ★★**이 워크스페이스가 쓰는 NAI 계정** (사용자 결정 2026-09-02). 잔액·요금·큐 차선이 전부 이것을
+   *  따른다 (`store/accounts`). 없거나 지워진 계정이면 **첫 계정**이다 — 옛 워크스페이스는 값이 없다.
+   *  ★큐는 **넣을 때의 계정**을 들고 간다 — 여기를 바꿔도 이미 넣은 것은 안 옮겨진다 (1안). */
+  account?: string;
 };
 
-export type WsInfo = { name: string; id?: string | null; updatedAt?: string | null };
+export type WsInfo ={ name: string; id?: string | null; updatedAt?: string | null };
 
 type S = {
   list: WsInfo[];
@@ -322,6 +328,8 @@ type S = {
   /** ★지우기 = **휴지통으로 이동**. 파일이 실제로 자리에서 없어지고, `Ctrl+Z` 로 되돌아온다.
    *  비우는 것은 앱을 켤 때 (24시간 지난 것) — `backend/trash.py` 머리 주석. */
   deleteFiles: (files: string[], opts?: { undo?: boolean }) => Promise<void>;
+  /** 화면이 그림을 못 읽었다 — **정말 없으면** 그 장을 목록에서 뺀다 (`forgetMissing` 의 ★★주) */
+  forgetMissing: (file: string) => Promise<void>;
   activeSceneGroup: () => SceneGroup | undefined;
   setActiveSceneGroup: (id: string) => void;
   /** 그 탭(`chars`)의 생성 옵션을 담아 둔다 (`store/gen` 이 부른다) */
@@ -382,6 +390,8 @@ type S = {
   addTab: (name?: string) => void;
   renameTab: (id: string, name: string) => void;
   removeTab: (id: string) => void;
+  /** 이 워크스페이스가 쓸 NAI 계정 (`Spec.account`). ★이미 큐에 넣은 것은 안 따라온다 */
+  setAccount: (id: string) => void;
   /** ★★**줄에 늘어선 것은 끌어서 차례를 바꾼다** (사용자 지시 2026-08-24).
    *  셋 다 `to` 는 칸이 아니라 **틈 번호**다 (`lib/moveTo` 의 규약, `useReorder` 가 그렇게 준다).
    *  ★`moveSceneGroup` 의 `from`·`to` 는 **지금 탭에 보이는 세트**의 번호다 — 화면에 안 보이는
@@ -505,8 +515,11 @@ async function generating(groupIds: Set<string>): Promise<boolean> {
      (`runRenumber` 가 `gen.ts` 를 부르는 방식과 같다). */
   const { useQueue } = await import("./queue");
   const q = useQueue.getState();
-  const cur = q.progress.current_cell?.scene_group_id ?? null;
-  return q.pending.some((x) => !!x.groupId && groupIds.has(x.groupId)) || (!!cur && groupIds.has(cur));
+  // ★차선(계정)마다 「지금 만드는 씬」이 하나씩이다 (2026-09-02) — 전부 본다. 옛 백엔드면 하나뿐이다
+  const cur = q.progress.lanes
+    ? Object.values(q.progress.lanes).map((l) => l.current_cell?.scene_group_id ?? null)
+    : [q.progress.current_cell?.scene_group_id ?? null];
+  return q.pending.some((x) => !!x.groupId && groupIds.has(x.groupId)) || cur.some((c) => !!c && groupIds.has(c));
 }
 
 /** 씬 그룹 하나를 **다른 탭 밑으로** 옮긴 spec — **화면용 임시 상태**다 (`moveGroupToTab`).
@@ -810,6 +823,13 @@ async function flushSave(get: () => S) {
   await get().save();
 }
 
+/** 밀린 저장을 **버린다** — 저장할 대상이 없어졌을 때 (워크스페이스 삭제). `flushSave` 의 반대다. */
+function dropPendingSave() {
+  if (!saveTimer) return;
+  clearTimeout(saveTimer);
+  saveTimer = null;
+}
+
 /** 열어 둔 워크스페이스 이름들 — ★**이름만** 담는다. 내용은 활성 것 하나만 메모리에 있다. */
 const TABS_KEY = "peropix.openWs";
 const loadTabs = (): string[] => {
@@ -1035,8 +1055,14 @@ export const useWs = create<S>((set, get) => ({
       set({ openWs: tabs });
     }
     if (get().current !== name) return;
+    /* ★★**지운 이름으로 저장이 나가면 안 된다** (사용자 실측 2026-09-02: 지운 워크스페이스가 다시 켜면
+       되살아나 있었다). 옆 탭을 여는 길은 **밀린 편집을 먼저 쓰는데**(`open` 의 `flushSave`), 그 순간
+       `current` 가 아직 지운 이름이라 그 PUT 이 `workspace.json` 만 든 빈 폴더를 도로 만들었다 — 서버의
+       `Store.save` 는 폴더를 만드는 것이 정상이다 (새 워크스페이스도 같은 길로 태어난다). 옆 탭을
+       열기 **전에** 지운 것을 놓아 버린다 — 밀린 저장은 버리고, 현재를 비운다. */
+    dropPendingSave();
+    get().close();
     if (tabs.length) await get().open(tabs[tabs.length - 1]);
-    else get().close();
   },
 
   async save() {
@@ -1316,6 +1342,33 @@ export const useWs = create<S>((set, get) => ({
     return { file: r.file, cell: cell.id };
   },
 
+  /** 그림을 못 읽었을 때 **파일이 정말 없는지** 서버에 묻고, 없으면 그 장을 화면에서 뺀다.
+   *
+   *  ★★사용자 지적 2026-09-06: *"로컬 탐색기에서 내가 직접 파일을 지웠을 때, 앱이 해당 이미지를
+   *    그냥 x로 띄움. 파일이 없으면 이미지 슬롯 자체를 지우는게 나을거 같음"*.
+   *    서버는 열 때 **파일이 있는 줄만** 준다(`live_records`) — 파일의 존재가 정본이다. 다만 켜 둔
+   *    사이에 지운 것은 이 목록이 모르므로, 그림이 깨질 때 같은 규칙을 그 자리에서 한 번 더 적용한다.
+   *  ★깨졌다고 바로 빼지 않는다 — 서버가 잠깐 죽었거나 주소가 틀려도 `<img>` 는 똑같이 깨진다.
+   *    원본 주소에 HEAD 로 물어 **404 일 때만** 뺀다. 이름을 바꾸는 중이면 서버가 자취를 따라가
+   *    (`file_path`) 404 가 아니다.
+   *  ★색인은 안 건드린다 — 다음에 열 때 `live_records` 가 어차피 거른다. 휴지통에서 되돌리면
+   *    그대로 다시 보인다 (2026-08-28 결정). */
+  async forgetMissing(file) {
+    const ws = get().current;
+    if (!ws || !get().records.some((r) => r.file === file)) return;
+    let status = 0;
+    try {
+      status = (await fetch(imgUrl(await backendUrl(), ws, file), { method: "HEAD" })).status;
+    } catch {
+      return;
+    }
+    if (status !== 404) return;
+    set({ records: get().records.filter((r) => r.file !== file) });
+    const f = useSceneFocus.getState();
+    if (f.file === file) f.focus(f.cell, null);
+    if (f.picked.includes(file)) f.setPicked(f.picked.filter((x) => x !== file));
+  },
+
   async deleteFiles(files, opts = {}) {
     const { current, spec } = get();
     if (!current || !spec || !files.length) return;
@@ -1352,6 +1405,13 @@ export const useWs = create<S>((set, get) => ({
     const spec = get().spec;
     if (!spec?.tabs) return;
     set({ spec: { ...spec, tabs: spec.tabs.map((c) => (c.id === tabId ? { ...c, gen: params } : c)) } });
+    queueSave(get);
+  },
+
+  setAccount(id) {
+    const spec = get().spec;
+    if (!spec || spec.account === id) return;
+    set({ spec: { ...spec, account: id } });
     queueSave(get);
   },
 

@@ -59,7 +59,14 @@ export type Line =
 
 /** ★공급자는 **정확한 이름**으로 고른다 (사용자 지시 2026-08-08: "호환은 적을 필요 없음").
  *  목록·라벨·호출명 예시는 **백엔드가 정본**이다 — 규격을 아는 쪽이 거기라서. */
-export type ProviderInfo = { id: string; label: string; hint: string; hasKey: boolean };
+export type ProviderInfo = {
+  id: string;
+  label: string;
+  hint: string;
+  hasKey: boolean;
+  /** 키가 필요 없는 공급자(로컬 llama.cpp) — 키 칸 대신 주소 칸을 보인다 */
+  nokey?: boolean;
+};
 /** 공급자가 알려 준 모델 하나. `in` 은 백만 토큰당 입력 단가(오픈라우터만) */
 export type ModelInfo = {
   id: string;
@@ -82,6 +89,8 @@ export type LlmConfig = {
   /** 지금 공급자의 추론 강도. 빈 값이면 모델 기본값 */
   effort: string;
   hasKey: boolean;
+  /** 로컬 서버 주소 (공급자 `local` 만). 비면 백엔드 기본값(127.0.0.1:8899) */
+  localUrl?: string;
   providers: ProviderInfo[];
   /** 요청 창구(디스코드). ★백엔드가 정본이다 — 화면에 주소를 박지 않는다 */
   support: string;
@@ -281,7 +290,7 @@ type S = {
   loadModels: (provider?: string, force?: boolean) => Promise<void>;
 
   loadConfig: () => Promise<void>;
-  saveConfig: (c: Partial<LlmConfig> & { key?: string }) => Promise<void>;
+  saveConfig: (c: Partial<LlmConfig> & { key?: string; localUrl?: string }) => Promise<void>;
   /** 앱을 켤 때 — 마지막 대화를 되살린다 */
   restore: () => Promise<void>;
   refreshList: () => Promise<void>;
@@ -381,6 +390,8 @@ export const useLlm = create<S>((set, get) => ({
         ...(c.effort === undefined ? {} : { effort: c.effort }),
         // ★키는 **보낼 때만** 바뀐다 (undefined 면 그대로 둔다)
         ...(c.key === undefined ? {} : { key: c.key }),
+        // 로컬 서버 주소도 같다 — 빈 문자열은 「기본값으로」다
+        ...(c.localUrl === undefined ? {} : { localUrl: c.localUrl }),
       }),
     });
     set({ cfg: next });
@@ -400,7 +411,12 @@ export const useLlm = create<S>((set, get) => ({
     //   (실측 2026-08-08: 진짜 앱 테스트에서 지난 대화의 도구 줄이 통째로 되돌아왔다).
     const mine = get().id;
     await get().refreshList();
-    if (get().id !== mine || get().wire.length || get().sending) return;
+    /* ★★**승인 카드가 떠 있으면 되살리지 않는다** (사용자 지적 2026-08-31, MCP 실연동에서 밟았다).
+       바깥(MCP)에서 온 승인 요청은 대화가 없어도 카드를 띄우려고 **패널을 스스로 편다**
+       (`lib/approve` 의 `openAi()`). 그런데 패널이 그때 처음 열리면 `AiChat` 이 마운트되며
+       지난 대화를 되살리고(`open`), 그 길이 `confirm` 을 지워 **카드가 눈앞에서 사라졌다.**
+       도구는 600초를 기다리다 시간 초과로 끝나고, 사용자는 누를 것이 없다. */
+    if (get().id !== mine || get().wire.length || get().sending || get().confirm || get().ask) return;
     const last = get().list[0];
     if (last) await get().open(last.id);
   },
@@ -428,8 +444,11 @@ export const useLlm = create<S>((set, get) => ({
         wire: d.wire ?? [],
         lines: linesOf(d.wire ?? []),
         error: "",
-        ask: null,
-        confirm: null,
+        /* ★★**떠 있는 카드·물음은 지우지 않는다** (사용자 지적 2026-08-31). 그것은 대화의
+           내용이 아니라 **답을 기다리는 도구**다 — 바깥(MCP)에서 온 것은 대화와 아무 상관이
+           없고, 여기서 지우면 그 도구가 영영 답을 못 받는다. 답하면 그때 스스로 지워진다. */
+        ask: get().ask,
+        confirm: get().confirm,
         cliSession: d.session || null,
         cliSessionGone: false,
       });
@@ -460,7 +479,8 @@ export const useLlm = create<S>((set, get) => ({
     // ★턴이 도는 중에는 안 바꾼다 — 돌던 응답이 **새 대화에 붙는다** (2026-08-08 확인)
     if (get().sending) return;
     // ★CLI 세션도 함께 끊는다 — 안 그러면 새 대화인데 저쪽은 옛 맥락을 들고 있다
-    set({ id: newId(), title: "", wire: [], lines: [], error: "", ask: null, confirm: null, cliSession: null,
+    // ★떠 있는 카드·물음은 남긴다 (위 `open` 의 ★★주와 같은 까닭 — 도구가 기다리고 있다)
+    set({ id: newId(), title: "", wire: [], lines: [], error: "", cliSession: null,
           cliSessionGone: false, queued: [] });
   },
 
