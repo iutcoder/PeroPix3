@@ -40,6 +40,9 @@ jobs:
         working-directory: src-tauri
         run: cargo test --target aarch64-apple-darwin
 
+      - name: Prepare bundled Python runtime
+        run: bash scripts/prepare-macos-python.sh
+
       - name: Build macOS app bundle
         run: >-
           npx tauri build --bundles app
@@ -49,6 +52,9 @@ jobs:
         run: |
           APP=src-tauri/target/release/bundle/macos/PeroPix.app
           test -x "$APP/Contents/MacOS/peropix"
+          test -x "$APP/Contents/Resources/python/bin/python3"
+          "$APP/Contents/Resources/python/bin/python3" -c \
+            'import fastapi, PIL, pydantic, uvicorn, onnxruntime'
           test -f "$APP/Contents/Resources/backend/server.py"
           test -f "$APP/Contents/Resources/models/censor/ntd11_anime_nsfw_segm_v5-variant1.onnx"
           test -f "$APP/Contents/Resources/public/tags.json"
