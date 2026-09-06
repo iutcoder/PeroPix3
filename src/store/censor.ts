@@ -270,6 +270,7 @@ type S = Saved & {
   toggleRel: (rel: string, name: string) => void;
   removeImage: (i: number) => void;
   clearImages: () => void;
+  clearAfter: () => void;
   select: (i: number) => void;
   step: (d: number) => void;
 
@@ -582,6 +583,7 @@ export const useCensor = create<S>((set, get) => ({
     if (s.busy || !s.images.length) return;
     set({ busy: true, error: null, progress: { done: 0, total: s.images.length, what: "save" } });
     const made: CensorImage[] = [];
+    const saved = new Set<string>();
     for (let i = 0; i < s.images.length; i++) {
       const im = s.images[i];
       try {
@@ -596,6 +598,7 @@ export const useCensor = create<S>((set, get) => ({
           image: await blobToBase64(blob),
         });
         made.push(savedItem(r));
+        saved.add(im.id);
       } catch (e) {
         set({ error: String(e) });
       }
@@ -613,8 +616,22 @@ export const useCensor = create<S>((set, get) => ({
       delete kept[im.id];
       delete keptPaint[im.id];
     }
-    set({ after: made, afterIdx: -1, busy: false, progress: null, staged: false, boxes: kept, paint: keptPaint, undos: [] });
+    /* ★★**저장한 장은 검열 전 목록에서 뺀다** (사용자 지적 2026-09-06: *"검열중에서 전체저장을
+       하면 검열 완료에 이번에 검열한 것만 뜨게"*). 남겨 두면 다음에 몇 장을 더 담아 「검열 시작」을
+       누를 때 **지난번 것까지 다시 찾고 다시 저장한다** — 검열 후 탭에 옛 장이 또 뜨고, 폴더에는
+       `_censored_2` 가 쌓인다. 저장에 실패한 장만 남겨 다시 돌릴 수 있게 한다. */
+    const images = get().images.filter((im) => !saved.has(im.id));
+    set({ after: made, afterIdx: -1, images, idx: images.length ? 0 : -1, busy: false, progress: null, staged: false, boxes: kept, paint: keptPaint, undos: [] });
     get().setTab("after");
+  },
+
+  /** 검열 후 목록을 비운다 — 파일은 그대로다. 결과를 다 봤으면 다음 판을 깨끗한 화면에서 (사용자 지시 2026-09-06) */
+  clearAfter() {
+    const s = get();
+    const paint = { ...s.paint };
+    for (const im of s.after) delete paint[im.id];
+    set({ after: [], afterIdx: -1, paint, undos: [], error: null });
+    if (s.tab === "after") set({ src: null, renderer: null });
   },
 
   /** 검열 후 탭에서 한 장을 다시 저장한다 (v2 `saveAfterEdit`) */

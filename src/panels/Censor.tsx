@@ -335,6 +335,11 @@ export function Censor() {
             {t("censor.clear")}
           </button>
         )}
+        {c.tab === "after" && !!list.length && (
+          <button data-censor-clear-after onClick={() => c.clearAfter()} style={{ ...box, flexShrink: 0 }}>
+            {t("censor.clear")}
+          </button>
+        )}
       </div>
 
       <div style={{ flex: 1, minHeight: 0, display: "flex", gap: "var(--sp-4)" }}>

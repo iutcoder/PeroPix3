@@ -65,8 +65,8 @@ export function Shell({
     leftWidth: leftWidths,
     rightWidth: rightWidths,
     mode,
-    leftCollapsed,
-    rightCollapsed,
+    leftCollapsed: leftFolds,
+    rightCollapsed: rightFolds,
     setLeftWidth,
     setRightWidth,
     toggleLeft,
@@ -81,6 +81,9 @@ export function Shell({
      다른 것이 놓이므로 알맞은 폭도 다르다 — 갤러리의 폴더 트리와 생성의 옵션 패널. */
   const leftWidth = leftWidths[mode];
   const rightWidth = rightWidths[mode];
+  // ★접힘도 모드마다 따로다 (`PanelFolds` 의 ★★주) — 갤러리의 그림 정보와 생성의 카드덱
+  const leftCollapsed = leftFolds[mode];
+  const rightCollapsed = rightFolds[mode];
   const t = useI18n((s) => s.t);
   /** 접힌 레일의 점 — 도는 중인가 · 접어 둔 사이에 끝났는가 (`Rail` 의 `dot`) */
   const aiBusy = useLlm((s) => s.sending);

@@ -53,6 +53,12 @@ export function applyFont(id: FontId) {
  *    다른데 값을 하나로 두어, 한쪽에서 넓히면 다른 쪽도 따라 넓어졌다.
  *  ★AI 패널은 **모드와 무관하게 늘 같은 것**이라 하나로 둔다 (`aiWidth`). */
 export type PanelWidths = Record<ModeId, number>;
+/** 양옆 패널의 접힘 — 폭과 같은 이유로 **모드마다 따로**다.
+ *
+ *  ★★사용자 지적 2026-09-06: *"갤러리에서 그림정보 패널을 열면 생성의 덱패널이 같이
+ *    열고닫히는 문제가 있어"*. 폭은 2026-08-23 에 갈라 놓고 접힘은 불리언 하나로 남겨 두어,
+ *    갤러리에서 그림 정보를 접으면 생성의 카드덱까지 접혀 있었다. */
+export type PanelFolds = Record<ModeId, boolean>;
 
 type Persisted = {
   leftWidth: PanelWidths;
@@ -60,8 +66,8 @@ type Persisted = {
   aiWidth: number;
   aiCollapsed: boolean;
   rightWidth: PanelWidths;
-  leftCollapsed: boolean;
-  rightCollapsed: boolean;
+  leftCollapsed: PanelFolds;
+  rightCollapsed: PanelFolds;
   /** 무대에 한 줄로 몇 장을 놓나. ★**1이면 라이트박스**가 된다 — 한 장이 무대를 다 쓴다.
    *  크기 슬라이더를 따로 두지 않는다: 크기는 열 수에서 나온다 (하나의 정보에 하나의 창구). */
   cols: number;
@@ -181,14 +187,16 @@ type Persisted = {
 /** 모드마다 같은 값으로 시작한다. 넓히기 시작하면 그때부터 갈린다 */
 const widths = (n: number): PanelWidths =>
   Object.fromEntries(MODES.map((m) => [m.id, n])) as PanelWidths;
+const folds = (v: boolean): PanelFolds =>
+  Object.fromEntries(MODES.map((m) => [m.id, v])) as PanelFolds;
 
 const DEFAULTS: Persisted = {
   leftWidth: widths(380),
   aiWidth: 320,
   aiCollapsed: true,
   rightWidth: widths(260),
-  leftCollapsed: false,
-  rightCollapsed: false,
+  leftCollapsed: folds(false),
+  rightCollapsed: folds(false),
   cols: 4,
   laneSize: 96,
   laneHeadW: 286,
@@ -234,6 +242,10 @@ function load(): Persisted {
          화면이 갑자기 달라지지 않으면서 그때부터 따로 움직인다. */
       for (const k of ["leftWidth", "rightWidth"] as const) {
         if (typeof got[k] === "number") got[k] = widths(got[k]);
+      }
+      // ★접힘도 같은 길을 밟는다 — 불리언 하나였던 저장본을 모드마다 그 값으로 채운다
+      for (const k of ["leftCollapsed", "rightCollapsed"] as const) {
+        if (typeof got[k] === "boolean") got[k] = folds(got[k]);
       }
       return { ...DEFAULTS, ...got };
     }
@@ -298,6 +310,8 @@ type S = Persisted & {
   closeSettings: () => void;
   toggleLeft: () => void;
   toggleRight: () => void;
+  /** 지금 모드의 한쪽 패널을 접거나 편다 — **저장하지 않는다** (임시로 펴는 `deckPeek` 이 쓴다) */
+  setFold: (side: "left" | "right", v: boolean) => void;
   /** 방금 바뀐 자리들 — 키를 담아 두고 잠깐 뒤 스스로 지운다 */
   /** 씬 히스토리를 **별표만** 보여 주나 (2026-08-22 에 걷었다가 2026-08-25 에 되살렸다).
    *
@@ -466,21 +480,24 @@ export const useUi = create<S>((set, get) => ({
   openSettings: (tab) => set({ settingsTab: tab }),
   closeSettings: () => set({ settingsTab: null }),
   toggleLeft: () => {
-    set({ leftCollapsed: !get().leftCollapsed });
+    get().setFold("left", !get().leftCollapsed[get().mode]);
     get().commitLayout();
   },
   toggleRight: () => {
-    set({ rightCollapsed: !get().rightCollapsed });
+    get().setFold("right", !get().rightCollapsed[get().mode]);
     get().commitLayout();
+  },
+  setFold: (side, v) => {
+    const k = side === "left" ? "leftCollapsed" : "rightCollapsed";
+    set({ [k]: { ...get()[k], [get().mode]: v } } as Partial<S>);
   },
   laneStarOnly: false,
   setLaneStarOnly: (v) => set({ laneStarOnly: v }),
   flashes: [],
   flashScroll: [],
   reveal: (side, key, scroll = false) => {
-    const patch = side === "left" ? { leftCollapsed: false } : { rightCollapsed: false };
+    get().setFold(side, false);
     set({
-      ...patch,
       flashes: [...new Set([...get().flashes, key])],
       // ★★**그 자리로 데려갈지는 부르는 쪽이 정한다** (사용자 지시 2026-08-21).
       //   베이스 그림이 해상도를 바꾼 것처럼 **한 자리**가 바뀌면 데려가는 편이 낫지만,
