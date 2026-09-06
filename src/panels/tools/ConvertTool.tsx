@@ -175,7 +175,9 @@ export function ConvertTool() {
         setRows([...out]);
       }
       const ok = out.filter((r) => !r.error).length;
-      toast(t("tools.converted", { n: ok, f: out.length - ok }), ok === out.length ? "ok" : "warn");
+      // ★첫 실패의 까닭을 토스트에도 싣는다 (위 ★주) — 숫자만으로는 왜 실패했는지 모른다
+      const why = out.find((r) => r.error)?.error;
+      toast(t("tools.converted", { n: ok, f: out.length - ok }) + (why ? ` — ${why}` : ""), ok === out.length ? "ok" : "warn");
       if (ok) void useFiles.getState().reload();
     } finally {
       setBusy(false);
@@ -282,7 +284,11 @@ export function ConvertTool() {
                         화살표로 가리키고 글자를 밝게 둔다. */}
                     <span style={{ display: "flex", alignItems: "center", gap: 4, minWidth: 0 }}>
                       {row?.error ? (
-                        <span style={{ color: "var(--err-ink)" }}>{t("tools.rowFailed")}</span>
+                        /* ★까닭을 **보이게** 둔다 — 「실패」만 뜨면 무엇이 막혔는지 알 길이 없다 (사용자 제보 2026-09-06:
+                           덮어쓰기가 성공했는데 실패로 떴다 — 이 글자만으로는 원인을 못 좁혔다) */
+                        <span data-tip={row.error || undefined} style={{ color: "var(--err-ink)" }}>
+                          {t("tools.rowFailed")}{row.error ? ` — ${row.error}` : ""}
+                        </span>
                       ) : (
                         <>
                           <span style={{ color: "var(--ink-ghost)" }}>→</span>
