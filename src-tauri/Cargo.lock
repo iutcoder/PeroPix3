@@ -2355,12 +2355,12 @@ checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
 name = "peropix"
 version = "3.0.0"
 dependencies = [
+ "libc",
  "serde",
  "serde_json",
  "tauri",
  "tauri-build",
  "tauri-plugin-opener",
- "windows-sys 0.59.0",
 ]
 
 [[package]]

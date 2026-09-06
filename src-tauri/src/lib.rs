@@ -36,7 +36,9 @@ fn app_root() -> String {
     backend::root().to_string_lossy().to_string()
 }
 
-struct InstanceLock(std::sync::Mutex<Option<std::fs::File>>);
+struct InstanceLock {
+    _file: std::sync::Mutex<Option<std::fs::File>>,
+}
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -48,21 +50,14 @@ pub fn run() {
         eprintln!("[app] 이 폴더의 PeroPix 가 이미 실행 중입니다 — 창을 안 띄웁니다");
         return;
     };
-    /* ★자물쇠는 앱이 끝날 때까지 들고 있어야 한다 (핸들을 닫으면 풀린다).
-       ★★**놓을 수 있게 들고 있는다** (2026-08-27). 업데이트가 새 판을 띄울 때, 옛
-         프로세스가 이 자물쇠를 쥔 채로 띄우면 **새로 뜬 쪽이 곧바로 죽는다** — 같은 폴더를
-         두 번 여는 것으로 보이기 때문이다. `apply_update` 가 띄우기 직전에 여기서 놓는다. */
+    // 자물쇠는 앱이 끝날 때까지 들고 있어야 한다. 핸들을 닫으면 잠금이 풀린다.
     let lock = std::sync::Mutex::new(Some(lock));
-    // ★웹뷰가 만들어지기 전에 저장소 자리를 정한다 (아래 ★주)
-    // WKWebView 프로필은 macOS의 표준 앱 컨테이너를 사용한다.
-    // ★지난 업데이트가 남긴 옛 파일을 치운다 — 그때는 우리가 그 exe 위에서 돌고 있었다
 
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![backend_url, app_root, uptime_ms])
         .setup(move |app| {
-            // ★`apply_update` 가 새 판을 띄우기 전에 자물쇠를 놓을 수 있게 맡겨 둔다
-            app.manage(InstanceLock(lock));
+            app.manage(InstanceLock { _file: lock });
             /* ★★**웹뷰 바탕을 어둡게 깔아 둔다** (사용자 지적 2026-08-27: *"처음에 흰 화면이
                  한참 뜨다가"*). `index.html` 이 첫 페인트부터 스플래시를 그리지만, 그보다
                  **앞선 순간** — 창은 떴고 웹뷰가 아직 문서를 안 받은 때 — 에는 웹뷰의 기본

@@ -1,7 +1,9 @@
 node_modules/
+.venv/
 dist/
 logs/
 src-tauri/target/
+src-tauri/gen/schemas/macOS-schema.json
 # QA 인스턴스 전용 빌드 — 사용자 앱이 exe 를 물고 있어도 지을 수 있게 자리를 가른다
 src-tauri/target-qa/
 *.local
