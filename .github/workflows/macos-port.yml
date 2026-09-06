@@ -55,6 +55,9 @@ jobs:
           test -f "$APP/Contents/Resources/shared/terms.json"
           test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$APP/Contents/Info.plist")" = \
             "io.github.iutcoder.peropix3"
+          xattr -cr "$APP"
+          codesign --force --deep --sign - --timestamp=none "$APP"
+          codesign --verify --deep --strict --verbose=2 "$APP"
 
       - name: Setup Python
         uses: actions/setup-python@v5
