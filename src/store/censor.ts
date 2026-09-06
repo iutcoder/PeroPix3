@@ -219,6 +219,9 @@ let seq = 1;
 
 type S = Saved & {
   models: CensorModel[];
+  /** 모델 목록을 아직 받는 중 — 화면은 뜨고 「검열 시작」만 잠근다 (사용자 지시 2026-09-06: *"모델 로드중에도
+   *  UI를 띄우고 검열 버튼만 못누르게 하든가. 로드중 띄우고"*) */
+  modelsLoading: boolean;
   tab: Tab;
   /** 검열 전·중 탭이 다루는 목록 */
   images: CensorImage[];
@@ -308,6 +311,7 @@ let scanSeq = 0;
 export const useCensor = create<S>((set, get) => ({
   ...load(),
   models: [],
+  modelsLoading: false,
   tab: "before",
   images: [],
   after: [],
@@ -350,7 +354,14 @@ export const useCensor = create<S>((set, get) => ({
   },
 
   async loadModels() {
-    const r = await api<{ models: CensorModel[] }>("/api/censor/models");
+    set({ modelsLoading: true });
+    let r: { models: CensorModel[] };
+    try {
+      r = await api<{ models: CensorModel[] }>("/api/censor/models");
+    } catch (e) {
+      set({ modelsLoading: false, error: String(e) });
+      return;
+    }
     const first = r.models[0];
     const keep = r.models.some((m) => m.file === get().model);
     const model = keep ? get().model : (first?.file ?? null);
@@ -358,6 +369,7 @@ export const useCensor = create<S>((set, get) => ({
     const targets = get().targets.filter((t) => classes.includes(t));
     set({
       models: r.models,
+      modelsLoading: false,
       model,
       // ★처음엔 **전부** 대상이다. 켜는 것을 잊어 아무것도 안 찾는 일이 없게
       targets: targets.length ? targets : classes,

@@ -68,7 +68,9 @@ def models() -> list[dict]:
     out = []
     for p in sorted(MODEL_DIR.glob("*.onnx"), key=lambda f: f.stat().st_size):
         try:
-            _, names, size, _, _ = _load(p.name)
+            # ★세션 생성은 잠그고 한다 (`_RUN` 의 ★주) — 서버가 뜰 때 `warm()` 이 뒤에서 같은 모델을 열고 있을 수 있다
+            with _RUN:
+                _, names, size, _, _ = _load(p.name)
         except Exception:
             names, size = {}, (0, 0)
         out.append(
@@ -129,6 +131,26 @@ def _load(file: str):
     # ★YOLO26(XL)은 **NMS 를 모델이 이미 한다**(end2end). 출력 모양이 통째로 다르다
     e2e = str(meta.get("end2end", "")).lower() == "true"
     return sess, names, size, not fixed, e2e
+
+
+def warm() -> None:
+    """서버가 뜰 때 **뒤에서** 모델을 미리 올리고 한 번 돌려 둔다 (사용자 지시 2026-09-06: *"검열 모델은
+    앱 열때 미리 로드해놔야할듯"*).
+
+    ★★검열 모드에 처음 들어가면 화면이 한동안 안 켜졌다. 모델 목록 요청이 번들된 모델 **전부**의 세션을
+      만드는데(클래스 이름이 모델 안에 있다), 그 요청이 `async def` 라 이벤트 루프 위에서 돌아 파일 트리·
+      썸네일까지 **모든 요청이 그동안 멈췄다.** 목록 요청은 `def` 로 옮겼고(스레드풀), 여기서 미리 올려
+      두면 들어갈 때 기다릴 것이 없다.
+    ★첫 추론도 함께 돌린다 — DirectML 은 첫 `run` 에 셰이더를 굽느라 **1.4초**가 더 든다 (실측
+      2026-09-06: 첫 1.43s → 다음 0.14s). 작은 그림 한 장이면 된다 — 레터박스가 모델 크기로 늘린다.
+    ★실패해도 조용히 넘긴다 — `onnxruntime` 이 없는 얇은 파이썬에서도 서버는 떠야 한다. 필요할 때
+      실제 요청이 같은 오류를 다시 만나 화면에 알린다."""
+    dummy = Image.new("RGB", (64, 64), (128, 128, 128))
+    for p in sorted(MODEL_DIR.glob("*.onnx"), key=lambda f: f.stat().st_size):
+        try:
+            detect(dummy, p.name, None, {}, 0.25, False)
+        except Exception:
+            pass
 
 
 def default_model() -> str:

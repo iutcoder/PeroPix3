@@ -29,6 +29,12 @@ export function CensorSide() {
         {!editable && (
           <>
             <Sec label={t("censor.model")} help={t("censor.modelHint")}>
+              {c.modelsLoading ? (
+                /* ★목록을 받는 동안에도 화면은 뜬다 — 여기와 「검열 시작」만 기다린다 (`modelsLoading` 의 ★주) */
+                <div data-censor-models-loading style={{ ...box, width: "100%", color: "var(--ink-faint)" }}>
+                  {t("censor.modelLoading")}
+                </div>
+              ) : (
               <select
                 data-censor-model
                 value={c.model ?? ""}
@@ -41,6 +47,7 @@ export function CensorSide() {
                   </option>
                 ))}
               </select>
+              )}
             </Sec>
 
             <Sec label={t("censor.targets")} help={t("censor.confHint")}>
@@ -330,7 +337,7 @@ export function CensorSide() {
         )}
         {c.tab === "before" && (
           <>
-            <button data-censor-run onClick={() => void c.scanAll()} disabled={c.busy || !c.images.length} style={runBtn}>
+            <button data-censor-run onClick={() => void c.scanAll()} disabled={c.busy || !c.images.length || c.modelsLoading || !c.model} style={runBtn}>
               {Icon.search}
               {t("censor.runAll")}
             </button>

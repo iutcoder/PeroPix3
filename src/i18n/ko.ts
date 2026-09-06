@@ -776,6 +776,7 @@ export const ko: Dict = {
     tabAfter: "검열 후",
     model: "모델",
     modelHint: "큰 모델일수록 잘 찾고 느립니다.",
+    modelLoading: "모델 로드 중…",
     targets: "찾을 것",
     noClasses: "모델을 고르면 찾을 것이 뜹니다.",
     needTarget: "찾을 것을 하나 이상 고르세요.",

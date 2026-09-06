@@ -755,6 +755,7 @@ export const ja: Dict = {
     tabAfter: "検閲後",
     model: "モデル",
     modelHint: "大きいモデルほどよく見つかり、遅くなります。",
+    modelLoading: "モデルを読み込み中…",
     targets: "検出対象",
     noClasses: "モデルを選ぶと検出対象が表示されます。",
     needTarget: "検出対象を一つ以上選んでください。",

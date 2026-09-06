@@ -757,6 +757,7 @@ export const en = {
     tabAfter: "After",
     model: "Model",
     modelHint: "Bigger models find more and run slower.",
+    modelLoading: "Loading models…",
     targets: "Look for",
     noClasses: "Pick a model to see what it can find.",
     needTarget: "Pick at least one thing to find.",

@@ -14,6 +14,7 @@ import io
 import json
 import math
 import os
+import threading
 import time
 import traceback
 import uuid
@@ -2161,6 +2162,8 @@ async def _start_queue():
     #   워커가 그 길을 안 지나 **파일이 옛 주소로 남는다** — 실제로 시험 서버가 적어 둔 포트가
     #   그대로 남아 개발판에 못 붙었다. 서버가 뜨는 자리는 어느 모드든 반드시 지난다.
     write_mcp_endpoint()
+    # ★검열 모델을 뒤에서 미리 올린다 (`censor.warm` 의 ★★주). 데몬 스레드 — 끝나기 전에 서버가 내려가도 붙잡지 않는다
+    threading.Thread(target=censor.warm, name="censor-warm", daemon=True).start()
 
 
 @app.on_event("shutdown")
@@ -2911,7 +2914,9 @@ async def translate_text(body: TranslateReq):
 
 
 @app.get("/api/censor/models")
-async def censor_models():
+def censor_models():
+    """번들된 모델 목록. ★`def` 다 — 클래스 이름을 읽으려면 세션을 만들어야 해서(첫 호출 ~1초, 디스크가
+    차가우면 더), `async` 로 두면 그동안 서버 전체가 멈춘다 (`censor.warm` 의 ★★주)."""
     return {"models": censor.models()}
 
 
