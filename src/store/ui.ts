@@ -134,6 +134,9 @@ type Persisted = {
    *  열 때마다 3 으로 되돌아가면 같은 값을 매번 다시 맞춰야 한다. 배율은 여기 없다 —
    *  그것은 원본 크기가 정한다 (`lib/enhance.ts`). */
   enhanceLast: { mag: number; adv: boolean; strength: number; noise: number };
+  /** ★인페인트 마스크의 **붓 굵기** — 마지막에 쓴 값으로 연다 (사용자 지시 2026-09-06: *"인페인트 브러시
+   *  두께 마지막에 사용한거 유지. 지금 계속 초기화됨"*). 편집기 안의 임시 상태였다가 열 때마다 30 으로 돌아갔다. */
+  maskBrush: number;
   /** ★★**일괄 변환의 마지막 설정** (사용자 지시 2026-08-26). 열 때마다 기본값으로 되돌아가면
    *  같은 값을 매번 다시 맞춰야 한다 — 인핸스(`enhanceLast`)와 같은 사정이다.
    *  ★남기는 것은 **설정뿐**이다. 목록·진행·결과는 그 판에서 끝나는 값이라 안 남긴다.
@@ -220,6 +223,7 @@ const DEFAULTS: Persisted = {
   convertOpenFolder: true,
   // v2 `enhanceLast` 의 초기값 그대로 (magnitude 3 = strength 0.5 · noise 0)
   enhanceLast: { mag: 3, adv: false, strength: 0.5, noise: 0 },
+  maskBrush: 30,
   convertLast: { fmt: "png", strip: false, ren: false, prefix: "image", start: 1, pad: 3,
                  mode: "sub", dest: "" },
   // 기본은 각 방향의 기본 해상도 (`SIZE_PRESETS` 의 ✦ 표시)
@@ -288,6 +292,7 @@ type S = Persisted & {
   setFmView: (v: "grid" | "list") => void;
   setConvertOpenFolder: (v: boolean) => void;
   setEnhanceLast: (v: { mag: number; adv: boolean; strength: number; noise: number }) => void;
+  setMaskBrush: (v: number) => void;
   /** 일괄 변환의 마지막 설정을 얹는다 (한 칸씩 바뀐다) */
   setConvertLast: (v: Partial<Persisted["convertLast"]>) => void;
   setStreamPreview: (v: boolean) => void;
@@ -442,6 +447,10 @@ export const useUi = create<S>((set, get) => ({
     set({ enhanceLast: v });
     get().commitLayout();
   },
+  setMaskBrush: (v) => {
+    set({ maskBrush: v });
+    get().commitLayout();
+  },
   /** ★한 칸씩 바뀌므로 **덮어쓰지 않고 얹는다** */
   setStreamPreview: (v) => {
     set({ streamPreview: v });
@@ -522,7 +531,7 @@ export const useUi = create<S>((set, get) => ({
     const { leftWidth, rightWidth, leftCollapsed, rightCollapsed, cols, laneSize, laneHeadW,
       laneHeight, font, textScale, importPick, aiWidth, aiCollapsed,
       notifyDone, notifySound, notifyVolume, perSlot, curated, agentAuto, agentAskHard,
-      tagSuggest, artistPrefix, weightHl, fmView, streamPreview, focusNewPending, convertOpenFolder, enhanceLast, convertLast, sizeLast,
+      tagSuggest, artistPrefix, weightHl, fmView, streamPreview, focusNewPending, convertOpenFolder, enhanceLast, maskBrush, convertLast, sizeLast,
       laneSide, laneWidth, laneHeadH, view } = get();
     try {
       localStorage.setItem(
@@ -556,6 +565,7 @@ export const useUi = create<S>((set, get) => ({
           focusNewPending,
           convertOpenFolder,
           enhanceLast,
+          maskBrush,
           convertLast,
           sizeLast,
           laneSide,
