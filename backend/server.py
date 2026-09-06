@@ -2952,6 +2952,39 @@ def censor_image(body: CensorImage):
 
 
 @app.post("/api/censor/apply")
+def _censor_pack(rendered: bytes, src: Path | None) -> tuple[bytes, str, str]:
+    """화면이 구운 PNG 를 **저장할 형식으로 다시 압축한다** → (바이트, 형식, 확장자).
+
+    ★★사용자 지적 2026-09-06: *"검열 완료된 이미지의 용량이 너무 큰데"*. 캔버스 `toBlob` 의 PNG 는 **RGBA
+      4채널에 빠른 압축**이라 같은 그림을 RGB 로 다시 압축한 것보다 1.8배쯤 크다 (합성 832×1216 실측:
+      4.08MB → 2.33MB, 픽셀은 그대로). 덮개는 원본 위에 합성된 것이라 알파가 전부 255 다 — 떼어도 잃는 것이
+      없다. 알파가 하나라도 255 가 아니면(투명 원본) 그대로 둔다.
+    ★원본이 JPEG 면 JPEG 품질 95 로 (v2 `renderCensoredImageOnCanvas` 와 같다 — jpg 원본을 PNG 로 내면
+      용량이 몇 배로 분다). WebP 원본은 WebP(무손실, `meta.write` 규칙). 그 밖은 PNG."""
+    img = Image.open(io.BytesIO(rendered))
+    if img.mode == "RGBA" and img.getchannel("A").getextrema()[0] == 255:
+        img = img.convert("RGB")
+    elif img.mode not in ("RGB", "RGBA"):
+        img = img.convert("RGB")
+    ext = (src.suffix.lower() if src else "") or ".png"
+    if ext in (".jpg", ".jpeg"):
+        fmt, ext = "JPEG", ".jpg"
+        if img.mode == "RGBA":
+            img = img.convert("RGB")
+    elif ext == ".webp":
+        fmt = "WEBP"
+    else:
+        fmt, ext = "PNG", ".png"
+    out = io.BytesIO()
+    if fmt == "JPEG":
+        img.save(out, format="JPEG", quality=95)
+    elif fmt == "WEBP":
+        img.save(out, format="WEBP", lossless=True)
+    else:
+        img.save(out, format="PNG")
+    return out.getvalue(), fmt, ext
+
+
 def censor_apply(body: CensorApply):
     """가린 그림을 저장한다. 자리는 `mode` 가 정한다 (일괄변환과 같은 세 갈래).
 
@@ -2973,6 +3006,11 @@ def censor_apply(body: CensorApply):
         rendered = base64.b64decode(raw_img)
     except (binascii.Error, ValueError) as e:
         raise HTTPException(400, f"그림을 못 읽었습니다: {e}")
+    # ★알파를 떼고 원본 형식으로 다시 압축한다 — 아래 어느 갈래도 브라우저 PNG 를 그대로 쓰지 않는다
+    try:
+        packed, fmt, ext = _censor_pack(rendered, src)
+    except Exception as e:
+        raise HTTPException(400, f"그림을 못 읽었습니다: {e}")
 
     # 어디에 둘까. 폴더를 골랐으면 거기, 아니면 원본 옆
     stem = Path(body.name).stem if body.name else (src.stem if src else "censored")
@@ -2983,7 +3021,7 @@ def censor_apply(body: CensorApply):
     if body.mode == "overwrite":
         if src is None:
             raise HTTPException(400, "원본 자리를 모르는 그림은 덮어쓸 수 없습니다. 저장 폴더를 정해 주세요.")
-        dst = src.parent / f"{src.stem}.png"
+        dst = src.parent / f"{src.stem}{ext}"
         # ★생성 설정은 **물러나기 전에** 읽어 둔다 (휴지통으로 간 뒤에는 못 읽는다)
         try:
             old_bytes = src.read_bytes()
@@ -2999,9 +3037,9 @@ def censor_apply(body: CensorApply):
         try:
             if keep_meta is None:
                 raise ValueError("옮길 설정이 없다")
-            dst.write_bytes(meta.write(rendered, keep_meta[0], "PNG", 95, keep_meta[1]))
+            dst.write_bytes(meta.write(packed, keep_meta[0], fmt, 95, keep_meta[1]))
         except Exception:
-            dst.write_bytes(rendered)
+            dst.write_bytes(packed)
         root = WS_ROOT.resolve()
         rel = dst.relative_to(root) if str(dst).startswith(str(root)) else dst
         return {"file": str(rel).replace("\\", "/"), "name": dst.name}
@@ -3021,21 +3059,21 @@ def censor_apply(body: CensorApply):
         folder.mkdir(parents=True, exist_ok=True)
     if src is None and not body.name:
         # 갈 곳도 이름도 없다. 옛 계약대로 바이트로 돌려준다
-        return {"image": "data:image/png;base64," + base64.b64encode(rendered).decode()}
+        return {"image": "data:image/png;base64," + base64.b64encode(packed).decode()}
 
-    dst = folder / f"{stem}{body.suffix}.png"
+    dst = folder / f"{stem}{body.suffix}{ext}"
     n = 2
     while dst.exists():
-        dst = folder / f"{stem}{body.suffix}_{n}.png"
+        dst = folder / f"{stem}{body.suffix}_{n}{ext}"
         n += 1
     # ★생성 설정을 데려간다 — 검열본에서도 재생성할 수 있어야 한다
     try:
         if src is None:
             raise ValueError("원본 파일이 없다")
         raw = meta.read_raw(src.read_bytes())
-        dst.write_bytes(meta.write(rendered, raw, "PNG", 95, dict(Image.open(src).info)))
+        dst.write_bytes(meta.write(packed, raw, fmt, 95, dict(Image.open(src).info)))
     except Exception:
-        dst.write_bytes(rendered)
+        dst.write_bytes(packed)
     root = WS_ROOT.resolve()
     rel = dst.relative_to(root) if str(dst).startswith(str(root)) else dst
     return {"file": str(rel).replace("\\", "/"), "name": dst.name}
