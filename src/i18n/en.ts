@@ -699,6 +699,7 @@ export const en = {
     taggerDrop: "Drop an image here to extract tags. Files from outside work too",
     rename: "Batch convert",
     sendConvert: "Send to batch convert",
+    sendCensor: "Send to auto censor",
     files: "File manager",
     dropHint: "or click to choose",
     exifDrop: "Drop an image here. Files from outside work too",

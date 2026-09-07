@@ -114,7 +114,9 @@ export function GalleryFolders() {
         {rest.map((f) => (
           <Row
             key={f.path}
-            label={f.path}
+            /* ★줄에는 **그 폴더 이름만** 적는다 (사용자 지시 2026-09-07: "상위 폴더 이름 다 쓰지말고 해당
+               폴더명만") — 들여쓰기가 이미 어디에 속하는지 말한다. 열쇠·이동·삭제는 그대로 전체 경로다. */
+            label={f.path.split("/").pop() ?? f.path}
             depth={f.path.split("/").length}
             count={f.count}
             on={folder === f.path}

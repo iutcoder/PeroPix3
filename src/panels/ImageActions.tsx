@@ -50,6 +50,7 @@ export function ImageActions({
   multi,
   onKeep,
   onConvert,
+  onCensor,
   onClone,
   onLeave,
   extra,
@@ -91,6 +92,8 @@ export function ImageActions({
   onKeep?: () => void | Promise<void>;
   /** 「일괄 변환으로 보내기」 — 워크스페이스 파일에만 뜻이 있다 (캔버스가 준다) */
   onConvert?: () => void | Promise<void>;
+  /** 자동검열 목록에 담고 그 화면으로 (사용자 지시 2026-09-07: 「보내기」에 「자동검열로 보내기」) */
+  onCensor?: () => void | Promise<void>;
   /** 「새 탭으로 복제」 — **워크스페이스 파일에만** 뜻이 있다 (보관함에서는 안 넘어온다).
    *  ★미저장 그림에도 안 뜬다: 그때는 부르는 쪽이 이 줄 대신 다른 줄을 그린다 (`SceneActions`) */
   onClone?: () => void | Promise<void>;
@@ -476,6 +479,7 @@ export function ImageActions({
             onClone && { mark: "clone", label: t("act.clone"), run: runClone },
             onKeep && { mark: "keep", label: t("gallery.keep"), run: onKeep },
             onConvert && { mark: "convert", label: t("tools.sendConvert"), run: onConvert },
+            onCensor && { mark: "censor", label: t("tools.sendCensor"), run: onCensor },
           ].filter((x): x is SendItem => !!x)}
         />
         {extra}

@@ -582,6 +582,18 @@ function Big({
               useUi.getState().setMode("utility");
               useUi.getState().setView("tab", "tools", "convert" as never);
             }}
+            /* ★자동검열로 보내기 (사용자 지시 2026-09-07) — 보관함은 아웃풋 루트 밖이라 절대 경로(`path`)로 담는다 */
+            onCensor={async () => {
+              const r = await api<{ path: string }>("/api/keep/path", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ path: file }),
+              });
+              const { useCensor } = await import("../store/censor");
+              await useCensor.getState().addImages([{ name: file.split("/").pop() ?? file, path: r.path }]);
+              useCensor.getState().setTab("before");
+              useUi.getState().setMode("censor");
+            }}
             /* ★★**지우는 단추가 여기 있어야 한다** (사용자 지시 2026-08-25: *"갤러리 이미지
                  보는 곳에 삭제 버튼이 없음"*). 그리드에서는 골라서 지우지만, 크게 보다가
                  「이건 아니다」 하는 자리가 바로 여기다 — 닫고 다시 골라야 했다.

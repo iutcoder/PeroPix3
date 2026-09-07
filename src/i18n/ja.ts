@@ -697,6 +697,7 @@ export const ja: Dict = {
     taggerDrop: "画像をここにドロップするとタグを抽出します。外部の画像も使えます",
     rename: "一括変換",
     sendConvert: "一括変換に送る",
+    sendCensor: "自動検閲に送る",
     files: "ファイル管理",
     dropHint: "またはクリックして選択",
     exifDrop: "画像をここにドロップしてください。外部の画像も読めます",

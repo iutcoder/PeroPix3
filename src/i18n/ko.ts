@@ -718,6 +718,7 @@ export const ko: Dict = {
     taggerDrop: "그림을 여기에 놓으면 태그를 뽑습니다. 밖에서 가져온 것도 됩니다",
     rename: "일괄 변환",
     sendConvert: "일괄 변환으로 보내기",
+    sendCensor: "자동검열로 보내기",
     files: "파일 관리",
     dropHint: "또는 눌러서 고르기",
     exifDrop: "그림을 여기에 놓으면 읽습니다. 밖에서 가져온 것도 됩니다",
