@@ -2544,6 +2544,20 @@ async def keep_drop_folder(body: KeepName):
         raise HTTPException(400, str(e))
 
 
+@app.post("/api/keep/path")
+async def keep_abs_path(body: KeepPath):
+    """보관함 그림의 **절대 경로** — 갤러리의 「일괄 변환으로 보내기」가 쓴다 (사용자 지시 2026-09-07).
+    ★보관함은 아웃풋 루트 밖이라 변환 도구의 `rel` 로는 못 가리킨다. 절대 경로(`path`)로 싣는다 —
+      밖에서 끌어다 놓은 그림과 같은 길이다 (`tools._read`)."""
+    try:
+        p = keep.safe_folder(KEEP_DIR, body.path)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    if not p.is_file():
+        raise HTTPException(404, "그림을 찾지 못했습니다")
+    return {"path": str(p)}
+
+
 @app.post("/api/keep/reveal")
 async def keep_reveal(body: KeepPath):
     """탐색기에서 연다 — ★파일이면 고른 채로 (files.reveal 을 보관함 뿌리로 쓴다)."""

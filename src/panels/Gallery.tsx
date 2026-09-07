@@ -10,6 +10,8 @@ import { useDragSource, dragSourceStyle } from "../cards/dragStore";
 import { keepThumb, keepUrl } from "../lib/imgUrl";
 import { api } from "../lib/backend";
 import { ImageActions, iconBtn } from "./ImageActions";
+import { useConvertQueue } from "./tools/ConvertTool";
+import { useUi } from "../store/ui";
 import { cloneMetaToNewTab } from "./GalleryMeta";
 import { VibeCache } from "./VibeCache";
 import { hasMeta } from "../lib/metaApply";
@@ -565,6 +567,21 @@ function Big({
                   }
                 : undefined
             }
+            /* ★★「보내기」에 **일괄 변환**도 둔다 (사용자 지시 2026-09-07: *"갤러리쪽 보내기도 복제, 일괄변환
+                 선택하는거 띄워"*). 갈 곳이 하나(복제)뿐이면 메뉴가 안 열려 고를 수가 없었다.
+               ★보관함은 아웃풋 루트 밖이라 `rel` 로 못 싣는다 — 서버에 절대 경로를 물어 `path` 로 싣는다
+                 (`/api/keep/path`). 캔버스의 같은 단추와 같은 규칙: 목록에 더하고, 같은 파일은 안 겹친다. */
+            onConvert={async () => {
+              const r = await api<{ path: string }>("/api/keep/path", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ path: file }),
+              });
+              const had = new Set(useConvertQueue.getState().items.map((i) => i.rel ?? i.path ?? i.name));
+              if (!had.has(r.path)) useConvertQueue.getState().add([{ name: file.split("/").pop() ?? file, path: r.path }]);
+              useUi.getState().setMode("utility");
+              useUi.getState().setView("tab", "tools", "convert" as never);
+            }}
             /* ★★**지우는 단추가 여기 있어야 한다** (사용자 지시 2026-08-25: *"갤러리 이미지
                  보는 곳에 삭제 버튼이 없음"*). 그리드에서는 골라서 지우지만, 크게 보다가
                  「이건 아니다」 하는 자리가 바로 여기다 — 닫고 다시 골라야 했다.
