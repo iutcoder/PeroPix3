@@ -26,7 +26,16 @@ type Q = { items: Dropped[]; add: (x: Dropped[]) => void; clear: () => void };
 /** 파일 관리에서 고른 것을 여기로 보내는 통로 — 창구를 둘로 만들지 않으려는 것 */
 export const useConvertQueue = create<Q>((set, get) => ({
   items: [],
-  add: (x) => set({ items: [...get().items, ...x] }),
+  /* ★★**파일명 차례로 세운다** (사용자 지시 2026-09-07: *"일괄변환 화면에서 파일명 순으로 정렬시켜.
+       옛날에 생성한게 더 위로 오게. 지금은 다 섞임"*). 보내는 쪽은 고른 차례·응답 차례로 넘겨서
+       목록이 섞였다. 생성물 이름에는 번호가 있으므로 숫자를 아는 비교로 세우면 옛것이 위다.
+     ★더할 때만 세운다 — 그 뒤 사람이 ↑↓·드래그로 바꾼 차례는 그대로다 (번호가 차례를 따른다). */
+  add: (x) =>
+    set({
+      items: [...get().items, ...x].sort((a, b) =>
+        a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: "base" }),
+      ),
+    }),
   clear: () => set({ items: [] }),
 }));
 

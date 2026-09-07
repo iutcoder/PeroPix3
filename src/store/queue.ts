@@ -10,7 +10,6 @@ import { useSub } from "./sub";
 import { useAnlasMeter } from "./anlasMeter";
 import { localTs } from "../lib/takes";
 import type { Block } from "../lib/blocks";
-import { err, nearBy } from "../lib/actions";
 import { useSceneFocus } from "./sceneFocus";
 import { usePreviews } from "./previews";
 import { allCells, useWs } from "./workspace";
@@ -337,14 +336,8 @@ function queueErrorText(raw: string): string {
 
 type Setter = (p: Partial<S> | ((s: S) => Partial<S>)) => void;
 
-/** ★★조수가 고친 자리는 **사람의 `Ctrl+Z` 에서 뺀다** (사용자 결정 2026-08-24:
- *    *"LLM 이 수정한 걸 Ctrl+Z 로 되돌리면 혼란스러울 것 같다. Ctrl+Z 는 유저 본인이
- *    수정한 것만."*). 담아 둔 되돌리기는 통째 복원이라, 그대로 두면 한 번에 조수의 편집까지
- *    지운다. 조수가 한 일은 조수에게 말해서 되돌린다 (`undo_change`). */
-async function dropHumanUndo(zone: string): Promise<void> {
-  const { dropUndoZone } = await import("../lib/undo");
-  dropUndoZone(zone);
-}
+/* ★조수가 고친 자리는 **사람의 `Ctrl+Z` 에서 뺀다** (사용자 결정 2026-08-24) — 그 일은 이제
+   편집 액션이 직접 한다 (`lib/appActions` 의 `dropUndoZone`). */
 
 /** **고친 것을 디스크에 밀어 넣고 답한다** (사용자 승인 2026-08-25).
  *
@@ -372,6 +365,23 @@ async function flushSpec(out: Record<string, unknown>) {
  *  ★등록되지 않은 이름은 아래 옛 분기로 내려간다 — 프롬프트 편집처럼 아직 옮기지 않은 것들이다.
  */
 async function runAction(action: string, args: Record<string, any>, ask = true): Promise<Record<string, unknown>> {
+  /* ★★**보낸 시점의 화면이 「지금 자리」다** (사용자 지시 2026-09-07). 사용자가 말을 건 뒤 탭을
+     옮겨도 조수의 편집·생성은 말을 건 그 자리에 간다 — 실행 직전에 화면을 그 주소로 맞춘다
+     (`lib/promptEdit.alignToTurn`). 워크스페이스가 다르면 거절이다.
+     ★자리를 옮기는 액션(`switch_tab`·`create_tab`…)이 성공하면 이 턴의 주소도 따라간다 —
+       조수가 일부러 옮긴 것이라 그 뒤의 호출은 새 자리가 기준이다. */
+  const { alignToTurn, MOVERS, screenAddr } = await import("../lib/promptEdit");
+  const mis = alignToTurn(action);
+  if (mis) return mis as unknown as Record<string, unknown>;
+  const out = await runActionAt(action, args, ask);
+  if (MOVERS.has(action) && out && out.ok === true) {
+    const { useLlm } = await import("./llm");
+    if (useLlm.getState().sending) useLlm.setState({ turnAddr: screenAddr() });
+  }
+  return out;
+}
+
+async function runActionAt(action: string, args: Record<string, any>, ask = true): Promise<Record<string, unknown>> {
   const [{ getAction }, { askApprove, needsAsk }] = await Promise.all([
     import("../lib/actions"),
     import("../lib/approve"),
@@ -441,7 +451,10 @@ async function legacyAction(action: string, args: Record<string, any>): Promise<
          여기서 `args.tab` 만 읽고 있어서, 조수가 스키마대로 `set` 을 보내면 **조용히 버려지고**
          활성 세트에 생성됐다 — 오류도 안 나고 Anlas 는 엉뚱한 곳에 나간다 (적대 검토 2026-08-24).
          ★옛 이름 `tab` 도 받아 준다: 입력은 너그럽게, 내보내는 이름은 하나로 (`docs/terms.md`). */
-      const wantSet = String(args.set ?? args.tab ?? "").trim();
+      /* ★★도구가 받는 이름은 **`sceneGroup`** 이다 (낱말표) — `set` 만 읽고 있어 조수가 명세대로
+         `sceneGroup` 을 보내면 **조용히 버려지고** 활성 씬 그룹에 생성됐다 (2026-09-07 발견, 같은 사고의
+         재발). 옛 이름 둘도 받아 준다: 입력은 너그럽게, 내보내는 이름은 하나로. */
+      const wantSet = String(args.sceneGroup ?? args.set ?? args.tab ?? "").trim();
       if ((target && target !== ws.current) || wantSet) {
         const { queueToWorkspace } = await import("./genRemote");
         return (await queueToWorkspace(target || ws.current, count, wantSet || undefined)) as Record<
@@ -491,236 +504,17 @@ async function legacyAction(action: string, args: Record<string, any>): Promise<
       });
     }
 
-    /* ★★**보고 있는 것을 고친다** — 덱의 카드가 아니라 지금 화면의 프롬프트다.
-         사용자 지시 2026-08-24: *"「키키 의상을 바꿔 줘」는 보통 카드가 아니라 지금 씬에
-         올려둔 캐릭터를 바꿔 달라는 것이다. 저장은 본인이 따로 한다."*
-       ★고친 자리(`at`)와 **고치기 전 값**(`before`)을 함께 돌려준다 — 채팅 줄이 그 자리를
-         열고(`lib/agentAt`), 조수가 되돌릴 수 있다(`backend/agentlog.py`). */
-    if (action === "edit_current_prompt") {
-      const { usePrompt } = await import("./prompt");
-      const { makeBlock, parseSegs } = await import("../lib/blocks");
-      /* ★★**고칠 자리는 주소로 받는다** (사용자 지적 2026-08-25: *"애초에 풀 경로를 주고
-           그걸 고치게 해야 되는 거 아니야? 세트 이름으로만 찾는 게 문제인 것 같은데"*).
-         주소는 셋이다: **워크스페이스 → 탭 → 세트.** 조수는 이 셋을 이미 다 받고 있다
-         (`get_workspace` 가 세트마다 `id`·`tab` 을, 그 위에 `tabs`·`activeTab` 을 준다).
-         ★예전에는 `set` 하나를 **이름으로** 훑어 처음 걸리는 것을 집었다. 「새 세트」 같은
-           기본 이름은 탭마다 있으므로 **엉뚱한 탭을 고치고 성공이라 답했다.**
-         ★비우면 지금 보고 있는 자리다 — 「지금 이거 고쳐 줘」가 대부분이라 그 길은 남긴다.
-         ★대상 세트를 **먼저 연다** — 편집기는 열린 세트의 사본이라 몰래 고칠 길이 없고,
-           여는 편이 옳기도 하다 (사용자가 바뀐 자리를 그 자리에서 본다). */
-      const wantWs = String(args.workspace ?? "").trim();
-      if (wantWs && wantWs !== useWs.getState().current)
-        /* ★★**다른 워크스페이스는 고치지 않는다.** 말없이 지금 것을 고치면 조수가 읽은
-             자리와 어긋난다. 옮기는 것은 사용자의 일이다 (작업이 통째로 바뀐다). */
-        return err(
-          "blocked",
-          `지금 열린 워크스페이스는 「${useWs.getState().current}」 입니다. ` +
-            `「${wantWs}」 를 고치려면 사용자가 그 워크스페이스를 열어야 합니다.`,
-          { retry: "never" },
-        );
-
-      const wantTab = String(args.tab ?? "").trim();
-      const want = String(args.set ?? "").trim();
-      if (wantTab || want) {
-        const spec0 = useWs.getState().spec;
-        const tabs = spec0?.tabs ?? [];
-        const all = spec0?.sceneGroups ?? [];
-        /* ★탭도 **id 가 먼저**다 — 이름은 사용자가 계속 고치는 값이라 열쇠로 못 쓴다 */
-        let tabId = "";
-        if (wantTab) {
-          const t = tabs.find((c) => c.id === wantTab) ?? tabs.find((c) => c.name === wantTab);
-          if (!t)
-            return err("not_found", `그런 탭이 없습니다: ${wantTab}`, {
-              candidates: nearBy(wantTab, tabs.map((c) => c.name)),
-            });
-          tabId = t.id;
-        }
-        const inTab = (x: { tabId?: string }) => !tabId || x.tabId === tabId;
-        const byId = all.find((x) => x.id === want);
-        const named = all.filter((x) => x.name === want && inTab(x as { tabId?: string }));
-        /* ★탭만 주고 세트를 안 주면 **그 탭의 세트**로 본다 (하나뿐일 때만 — 여럿이면 되묻는다) */
-        const ofTab = all.filter((x) => x.kind === "sceneGroup" && inTab(x as { tabId?: string }));
-        const hit =
-          byId ?? (named.length === 1 ? named[0] : !want && ofTab.length === 1 ? ofTab[0] : null);
-        if (!hit && (named.length > 1 || (!want && ofTab.length > 1))) {
-          /* ★★**고르지 않고 되묻는다.** 어느 것인지는 사용자와 조수만 안다 — 코드가 하나를
-               집으면 틀렸을 때 **조용히** 틀린다 (그것이 이번 일이었다). */
-          const pool = named.length > 1 ? named : ofTab;
-          const where = pool.map(
-            (x) =>
-              `${tabs.find((c) => c.id === (x as { tabId?: string }).tabId)?.name ?? "?"}/${x.name}#${x.id}`,
-          );
-          return err("ambiguous", `어느 세트인지 하나로 좁혀지지 않습니다. 세트 id 로 골라 주세요.`, {
-            candidates: where,
-          });
-        }
-        if (!hit)
-          return err("not_found", `그런 세트가 없습니다: ${want || wantTab}`, {
-            candidates: nearBy(want, ofTab.map((x) => x.name)),
-          });
-        /* ★세트는 **탭에 속한다**(`tabId`). 다른 탭의 세트를 열면서 탭을 안 옮기면
-           화면의 윗줄과 아랫줄이 어긋난 채로 남는다 (`workspace.switchTab` 참조). */
-        const owner = (hit as { tabId?: string }).tabId;
-        if (owner && owner !== useWs.getState().spec?.activeTab) useWs.getState().switchTab(owner);
-        useWs.getState().setActiveSceneGroup(hit.id);
-      }
-      const ws = useWs.getState();
-      const spec = ws.spec;
-      const set = spec?.sceneGroups.find((x) => x.id === spec?.activeSceneGroup);
-      if (!set) return { error: "열려 있는 세트가 없습니다." };
-
-      /* ★★**어느 탭인지 함께 말한다** (사용자 지적 2026-08-25: *"메인 프롬프트를 변경했다고
-           했는데 실제론 변경되지 않음"*). 세트 이름만 적으면 **다른 탭의 같은 이름**을 고쳐도
-           같은 문장이 나와, 사용자는 어긋난 것을 알아챌 수가 없다. 탭 이름을 앞에 붙이면
-           보고 있는 탭과 다른 순간 바로 보인다. */
-      const tabName =
-        (spec?.tabs ?? []).find((c) => c.id === ((set as { tabId?: string }).tabId ?? spec?.activeTab))
-          ?.name ?? "";
-      const where = tabName ? `「${tabName}」 탭의 「${set.name}」 세트` : `「${set.name}」 세트`;
-
-      const area = String(args.area ?? "base");
-      const label = String(args.label ?? "블록");
-      const tags = parseSegs(String(args.tags ?? ""));
-      /* ★**씬 칸**은 프롬프트 편집기가 아니라 세트 안에 산다 (`sceneGroups[].cards[].cells`).
-         칸 하나에 블록도 하나뿐이라 (`slotBlocksOf`), 이름표 없이 태그만 갈아 끼운다. */
-      const wantScene = String(args.scene ?? "").trim();
-      if (wantScene) {
-        const { slotBlocksOf, makeBlock: mk } = await import("../lib/blocks");
-        const cards = (set as { cards?: { id: string; cells: { id: string; name: string; blocks?: Block[] }[] }[] }).cards ?? [];
-        let found: { id: string; name: string; blocks?: Block[] } | null = null;
-        const next = cards.map((k) => ({
-          ...k,
-          cells: k.cells.map((c) => {
-            if (c.id !== wantScene && c.name !== wantScene) return c;
-            found = c;
-            const cur = c.blocks?.[0] ?? mk("", [], { open: true, tags: [] });
-            return { ...c, blocks: slotBlocksOf({ ...cur, tags }) };
-          }),
-        }));
-        if (!found) return { error: `그런 씬이 없습니다: ${wantScene}` };
-        useWs.getState().patchSceneGroup(set.id, { cards: next } as never);
-        dropHumanUndo(`scene-${(found as { id: string }).id}`);
-        const did = `${where}의 씬 「${(found as { name: string }).name}」을 고침`;
-        return {
-          ok: true, scene: (found as { name: string }).name, did,
-          at: { kind: "prompt" as const, workspace: ws.current ?? undefined,
-                tab: spec?.activeTab, sceneGroup: set.id, area: "scene",
-                scene: (found as { id: string }).id, label: (found as { name: string }).name },
-          before: { sceneGroup: set.id, scene: (found as { id: string }).id, blocks: (found as { blocks?: Block[] }).blocks ?? [] },
-          after: { sceneGroup: set.id, scene: (found as { id: string }).id },
-        };
-      }
-      const mode = String(args.mode ?? "add");
-      const replace = mode === "replace";
-      /** ★★**지우는 길** (사용자 지시 2026-08-26: *"사용자 블록을 안 지우고 우회하는 행동을
-       *  계속 함"*). 그럴 수밖에 없었다 — 지우는 창구가 **아예 없었다.** 그래서 조수는
-       *  UC 에 반대말을 넣거나 블록을 새로 붙여 **에두르는 수**밖에 못 냈다.
-       *  ★되돌릴 수 있다 (`before` 에 원래 블록이 담긴다 → `undo_change`). */
-      const drop = mode === "remove";
-      /** 지목한 블록 하나 — `get_workspace` 가 블록마다 주는 `id` 다 (`_view`) */
-      const wantBlock = String(args.block ?? "").trim();
-      /* ★★**이름으로는 못 고른다** (사용자 정정 2026-08-26: *"보통 다 같은 이름임. 블록에
-           이름 잘 지정 안 해서"*). 기본 이름이 「새 블록」이라 **거의 모든 블록이 같은 이름**
-           이다 — 이름으로 갈아 끼우거나 걷으면 **남의 블록까지 함께 간다.**
-         ★한때 「같은 이름은 합친다」로 두었는데, 그 규칙은 이 자리에서 통째로 뭉개는 짓이다.
-           걷어냈다. 여럿이면 **고르지 않고 되묻는다** — 후보에 id 와 앞 태그를 실어 주므로
-           조수가 그것으로 지목하면 된다 (`block`).
-         ★고칠 자리가 둘이면 **두 번 부르면 된다** — 하나는 갈아 끼우고 하나는 걷어낸다. */
-      const pickOne = (cur: Block[]): { at: number } | { many: Block[] } | null => {
-        if (wantBlock) {
-          const at = cur.findIndex((b) => b.id === wantBlock);
-          return at >= 0 ? { at } : null;
-        }
-        const hits = cur.filter((b) => b.label === label);
-        if (hits.length > 1) return { many: hits };
-        return hits.length === 1 ? { at: cur.indexOf(hits[0]) } : null;
-      };
-      /** 고른 자리에 새 태그를 넣거나(갈아 끼움) 그 블록을 걷는다. 못 고르면 뒤에 붙인다 */
-      const apply = (cur: Block[]): Block[] => {
-        const pick = pickOne(cur);
-        if (pick && "at" in pick)
-          return drop
-            ? cur.filter((_, i) => i !== pick.at)
-            : cur.map((b, i) => (i === pick.at ? { ...b, tags } : b));
-        if (drop) return cur;                       // 걷을 것이 없다 — 그대로 둔다
-        return [...cur, makeBlock(label, [], { open: true, tags })];
-      };
-      /** 하나로 안 좁혀지면 **고르지 않고 되묻는다** — 후보에 id 와 앞 태그를 실어 준다 */
-      const tooMany = (cur: Block[]) => {
-        const pick = pickOne(cur);
-        if (!pick || !("many" in pick)) return null;
-        return err(
-          "ambiguous",
-          `「${label}」 이름의 블록이 ${pick.many.length}개입니다. block 에 블록 id 를 주세요.`,
-          {
-            what: "block",
-            given: label,
-            candidates: pick.many.map(
-              (b) => `${b.id}: ${b.tags.map((x) => x.t).slice(0, 4).join(", ")}`,
-            ),
-          },
-        );
-      };
-      const at = {
-        kind: "prompt" as const,
-        workspace: ws.current ?? undefined,
-        tab: spec?.activeTab,
-        sceneGroup: set.id,
-        area,
-        label,
-      };
-      const verb = drop ? "걷어냄" : replace ? "갈아 끼움" : "더함";
-
-      if (area === "base" || area === "baseUc") {
-        const before = usePrompt.getState()[area];
-        const many = tooMany(before);
-        if (many) return many;
-        usePrompt.getState().update(area, apply);
-        dropHumanUndo(area === "base" ? "base-p" : "base-uc");
-        const what = area === "base" ? "베이스 프롬프트" : "베이스 UC";
-        return {
-          ok: true, area, label, at,
-          did: `${where}의 ${what}에 「${label}」을 ${verb}`,
-          before: { sceneGroup: set.id, area, blocks: before },
-          after: { sceneGroup: set.id, area, blocks: usePrompt.getState()[area] },
-        };
-      }
-
-      const [name, part] = area.split(":");
-      const field = part === "uc" ? ("uc" as const) : ("prompt" as const);
-      let ch = usePrompt.getState().chars.find((c) => c.id === name || c.name === name);
-      /* ★**없으면 만든다** (사용자 지시 2026-08-24). 예전에는 「그런 자리가 없습니다」로
-         끝나서, 조수가 인물을 더하려면 사람이 먼저 빈 칸을 만들어 줘야 했다.
-         ★만든 것은 `created` 로 남긴다 — 되돌릴 때는 블록이 아니라 **그 칸을 지운다.** */
-      let created = "";
-      if (!ch) {
-        created = usePrompt.getState().addChar({ name });
-        ch = usePrompt.getState().chars.find((c) => c.id === created);
-        if (!ch) return { error: `자리를 만들지 못했습니다: ${area}` };
-      }
-      const before = ch[field];
-      const many = tooMany(before);
-      if (many) return many;
-      usePrompt.getState().updateChar(ch.id, field, apply);
-      dropHumanUndo(`${ch.id}-${field === "uc" ? "uc" : "p"}`);
-      const now = usePrompt.getState().chars.find((c) => c.id === ch!.id);
-      const what = field === "uc" ? `${ch.name} UC` : ch.name;
-      return {
-        ok: true, area: ch.name, label, at: { ...at, area: ch.name },
-        did: created
-          ? `${where}에 캐릭터 「${ch.name}」을 만들고 「${label}」을 ${verb}`
-          : `${where}의 ${what}에 「${label}」을 ${verb}`,
-        before: { sceneGroup: set.id, area: ch.id, part: field, blocks: before, created },
-        after: { sceneGroup: set.id, area: ch.id, part: field, blocks: now?.[field] ?? [] },
-      };
-    }
+    /* ★프롬프트 편집은 **여기 없다** (2026-09-07). `edit_current_prompt` 하나가 스타일 카드·캐릭터·씬을
+       `area` 문자열로 가르던 것을 `edit_style_card`·`edit_character`·`edit_scene` 으로 갈랐다 —
+       `src/lib/appActions.ts` (레지스트리)와 `src/lib/promptEdit.ts` (공용 규칙). 되돌리기(`restore_prompt`)만
+       아래에 남는다. */
 
     /* ★★**탭·세트·씬 만들기는 앱이 한다** (사용자 지시 2026-08-24: *"앱을 켠 상태로도
          쓸 수 있어야 할 것 같은데"*).
 
        워크스페이스 설정(`workspace.json`)의 주인은 **화면**이다 — 앱이 통째로 들고 있다가
        통째로 저장하므로, 백엔드가 파일에 끼어들어 쓰면 다음 저장에 덮인다. 그래서
-       `edit_current_prompt` 와 같은 길을 쓴다: 조수가 시키고, **앱이 자기 창구로** 만든다.
+       `edit_style_card` 와 같은 길을 쓴다: 조수가 시키고, **앱이 자기 창구로** 만든다.
        그러면 화면도 그 자리에서 따라온다.
        ★새 창구를 만들지 않는다 — 사람이 `+` 를 눌렀을 때와 **같은 함수**를 부른다
          (`addTab`·`addSceneGroup`·`addSlot`). 두 벌이 되면 이름 겹침 처리·번호 발급이 갈린다. */
@@ -768,7 +562,8 @@ async function legacyAction(action: string, args: Record<string, any>): Promise<
     if (action === "create_scene") {
       const ws2 = useWs.getState();
       const spec = ws2.spec;
-      const want = String(args.set ?? "").trim();
+      // ★도구 명세의 이름은 `sceneGroup` 이다 — `set` 만 읽어 지목이 버려졌다 (2026-09-07)
+      const want = String(args.sceneGroup ?? args.set ?? "").trim();
       const set = want
         ? spec?.sceneGroups.find((x) => x.id === want || x.name === want)
         : spec?.sceneGroups.find((x) => x.id === spec?.activeSceneGroup);
@@ -795,12 +590,28 @@ async function legacyAction(action: string, args: Record<string, any>): Promise<
          `undo_change` 가 이력의 `before` 를 그대로 실어 부른다. */
     if (action === "restore_prompt") {
       const { usePrompt } = await import("./prompt");
-      const groupId = String(args.set ?? "");
+      /* ★★이력의 `before` 는 `sceneGroup` 을 담는데 여기는 `set` 을 읽어 **모든 되돌리기가
+         「그 세트가 이미 없습니다」로 끝났다** (2026-09-07 발견). 옛 이력도 같은 열쇠다. */
+      const groupId = String(args.sceneGroup ?? args.set ?? "");
       const hit = useWs.getState().spec?.sceneGroups.find((x) => x.id === groupId);
-      if (!hit) return { error: "그 세트가 이미 없습니다." };
+      if (!hit) return { error: "그 씬 그룹이 이미 없습니다." };
       useWs.getState().setActiveSceneGroup(hit.id);
       const area = String(args.area ?? "base");
       const blocks = (args.blocks ?? []) as Block[];
+      /* ★스타일 카드를 **세운 것**을 되돌린다 — 카드를 뺀다 (`add_style_card`·없어서 만든 `edit_style_card`) */
+      if (args.styleOff) {
+        usePrompt.getState().setStyleOn(false);
+        return { ok: true };
+      }
+      /* ★스타일 카드를 **뺀 것**을 되돌린다 — 이름·그림·블록까지 그대로 (`remove_style_card`) */
+      if (args.styleCard && typeof args.styleCard === "object") {
+        const sc = args.styleCard as { name: string; ref: string | null; thumb?: unknown; base?: Block[]; baseUc?: Block[] };
+        usePrompt.getState().setStyle({
+          ref: sc.ref ?? null, name: sc.name, color: usePrompt.getState().style.color,
+          base: sc.base ?? [], uc: sc.baseUc ?? [], thumb: (sc.thumb ?? null) as never,
+        });
+        return { ok: true };
+      }
       if (args.scene) {
         const cards = (hit as { cards?: { cells: { id: string }[] }[] }).cards ?? [];
         useWs.getState().patchSceneGroup(hit.id, {

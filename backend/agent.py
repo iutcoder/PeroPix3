@@ -648,7 +648,7 @@ class Tools:
             (
                 "create_tab",
                 "★**탭을 새로 만든다** (윗줄). 만들고 **그리로 옮겨 간다** — 이어서 "
-                "edit_current_prompt·generate 를 부르면 이 탭에 걸린다. 앱이 켜져 있어야 한다.",
+                "edit_style_card·edit_character·generate 를 부르면 이 탭에 걸린다. 앱이 켜져 있어야 한다.",
                 obj({"name": s("탭 이름 (비우면 기본 이름)")}),
                 None,  # 앱에 시킨다 (아래 ★★주)
             ),
@@ -726,44 +726,9 @@ class Tools:
                 ),
                 None,  # 앱에 시킨다
             ),
-            (
-                "edit_current_prompt",
-                "★**보고 있는 것을 고친다** (덱의 카드에는 안 닿는다). "
-                "\"지금 그림체를 더 플랫하게\"·\"키키 의상 바꿔 줘\" 같은 요청은 이것으로 한다. "
-                "mode=\"add\" 는 블록을 새로 붙이고, \"replace\" 는 같은 이름의 블록을 갈아 끼운다 "
-                "(없으면 새로 붙는다). "
-                "★★**고칠 자리는 주소로 준다**: `workspace` → `tab` → `sceneGroup`. 셋 다 "
-                "`get_workspace` 가 이미 준 값이다 (씬 그룹마다 `id`·`tab`, 그 위에 `tabs`·`activeTab`). "
-                "비우면 지금 보고 있는 자리다. "
-                "★★**씬 그룹은 id 로 줘라.** 「새 씬 그룹」 같은 이름은 탭마다 있어서, 이름만 주면 "
-                "엉뚱한 탭을 고치고 성공이라 답하던 자리다. 하나로 안 좁혀지면 **되묻는다**. "
-                "★`workspace` 가 지금 열린 것과 다르면 **고치지 않고 알린다** — 편집기는 열린 "
-                "워크스페이스 하나뿐이라 몰래 고칠 길이 없다. "
-                "★답에는 **어느 탭의 어느 씬 그룹**를 고쳤는지가 적혀 있다 — 사용자가 보고 있는 "
-                "탭과 다르면 성공이라고 말하지 말고 그 사실을 알려라. "
-                "★`area` 에 없는 캐릭터 이름을 주면 **그 자리를 새로 만든다.** "
-                "앱이 켜져 있어야 한다.",
-                obj(
-                    {
-                        "area": s('어디를 — "base"(베이스 프롬프트) · "baseUc"(베이스 UC) · '
-                                  '캐릭터는 그 이름 · 캐릭터 UC 는 "<이름>:uc"'),
-                        "label": s("블록 이름 (예: 그림체)"),
-                        "tags": s("태그들 — 쉼표로 구분"),
-                        "mode": s('"add"(기본, 뒤에 붙임) · "replace"(같은 이름을 갈아 끼움) · '
-                                  '"remove"(그 블록을 걷어냄 — 되돌릴 수 있다)'),
-                        "block": s("어느 블록을 — **블록 id** (`get_workspace` 가 블록마다 준다). "
-                                   "★블록 이름은 대개 다 같으므로(기본 이름) **id 가 정본**이다. "
-                                   "이름이 여럿에 걸리면 고르지 않고 되묻는다"),
-                        "workspace": s("어느 워크스페이스 — 비우면 지금 열린 것 (다르면 거절한다)"),
-                        "tab": s("어느 탭 — id 가 정확하다 (이름도 받는다). 비우면 지금 탭"),
-                        "sceneGroup": s("어느 씬 그룹 — **id 로** 줘라 (이름은 탭마다 겹친다). 비우면 지금 씬 그룹"),
-                        "scene": s("씬 칸 하나를 고칠 때 그 씬의 이름이나 id "
-                                   "(주면 area·label 은 쓰지 않는다 — 칸에는 블록이 하나뿐이다)"),
-                    },
-                    ["area", "label", "tags"],
-                ),
-                None,  # 앱에 시킨다
-            ),
+            # ★프롬프트 편집(`edit_current_prompt`)은 **표에 없다** (2026-09-07) — 스타일 카드·캐릭터 카드·씬으로
+            #   갈라 앱 액션이 됐다 (`src/lib/appActions.ts` → `actions.json`). 한 도구가 `area` 문자열로
+            #   셋을 가르면서 없는 카드에 써도 성공이 났던 자리다.
             (
                 "list_changes",
                 "★**내가 이 앱에서 바꾼 것들** — 최근 것부터. 사용자가 «되돌려» 라고 하면 "
@@ -860,10 +825,16 @@ class Tools:
                 ]
             p = _scene_group_prompt(spec, t)
             if p:
+                # ★★**스타일 카드가 없으면 없다고 보인다** (2026-09-07). 새 탭은 `styleOn: false` 로 시작하는데
+                #   예전에는 `style` 이름·`base` 만 실어서 「카드가 없음」과 「카드가 비었음」이 같은 모양이었다 —
+                #   조수가 없는 카드의 `base` 에 쓰고 성공이라 답했다 (블록은 저장되지만 화면·생성에 안 나온다).
+                #   ★값이 없으면 켜진 것이다 (옛 워크스페이스, `store/prompt` 의 `styleOn`).
+                on = p.get("styleOn", True) is not False
+                st = p.get("style") or {}
                 row["prompt"] = {
-                    "style": (p.get("style") or {}).get("name"),
-                    "base": _view(p.get("base")),
-                    "baseUc": _view(p.get("baseUc")),
+                    "styleCard": ({"name": st.get("name"), "ref": st.get("ref")} if on else None),
+                    "base": _view(p.get("base")) if on else [],
+                    "baseUc": _view(p.get("baseUc")) if on else [],
                     # ★「캐릭터 프롬프트」다 — 덱의 **캐릭터 카드**와 다른 것이다 (낱말표)
                     #  ★★`id`·`on`·`center`·`stack` 을 함께 준다 (선결 조건 3-6): 꺼진 캐릭터를
                     #    켜거나 자리를 옮기려면 조수가 그 값을 **먼저 볼 수 있어야** 한다.
@@ -1292,9 +1263,9 @@ def terms_block(lang: str = "") -> str:
         also = (" — user may say: " + " / ".join(alias)) if alias else ""
         out.append(f"- `{t['tool']}` : {what}{also}")
     out += [
-        "★A **character prompt** (`characters`) is a person inside the image being drawn;",
-        "  a **character card** (`characterCard`) is saved material in the deck. Editing the card",
-        "  does not change what is on screen. The same split holds for a **style card** and `base`.",
+        "★On screen: the **style card** (`styleCard`, holds `base` / `baseUc`) and **character cards**",
+        "  (`characters[]`, one person each). In the **deck**: saved copies (`characterCard` / `sceneCard` /",
+        "  deck styles). Editing a deck card does not change the screen; `save_card` copies screen → deck.",
         "★`tabs` contain `sceneGroups`, and a scene group contains `scenes`. Say which one you mean.",
     ]
     return "\n".join(out)
@@ -1337,6 +1308,27 @@ The user makes art with NovelAI (NAI); a prompt is **Danbooru tags** joined by c
 ★What you touch is **data**, not the screen. Your working material is the user's cards
   (characters, styles, scene cards) and their output folders. You can **read** what the user
   is working on right now with get_workspace.
+★★**Every user message ends with a hidden `[screen] workspace=… tab=… sceneGroup=…` line.**
+  That is where the user was looking when they sent it. Work there. If they move around the
+  app while you work, keep working at the address in the message - the app itself pins your
+  actions to it. Never quote that line back.
+
+★★**Cards on screen, and what each action does to them.** The screen holds three kinds of
+  card: the **style card** (one per tab; it holds the base prompt and base UC - background,
+  mood, lighting, composition, art style), **character cards** (`characters[]`, one per
+  person), and **scenes** (inside the scene group). The **deck** stores copies of those for
+  reuse (styles / characters / posesets). Actions, in the order you should reach for them:
+  1. **Edit what is on screen** - `edit_style_card` / `edit_character` / `edit_scene`
+     (the default; "change X" means this). `edit_style_card` creates the style card when there
+     is none; `edit_character` creates the card when the name is new.
+  2. **Add an empty card on screen** - `add_style_card` / `add_character` / `create_scene`.
+  3. **Put a saved deck card on screen** - `apply_card`, `stack_character`.
+  4. **Remove from screen** - `remove_style_card` / `remove_character` / `delete_scene`.
+  5. **Save to the deck** - `save_card` (what is on screen) - only when they say "save" or "deck".
+  6. **Make or overwrite a deck card from scratch** - `create_card` / `update_card` - last resort,
+     only when they ask for a deck card in words.
+  `get_workspace` shows `prompt.styleCard` - `null` means there is no style card on that tab
+  yet, and then `base` is empty because there is nowhere for it to live.
 
 Principles:
 - When you need to know what the user is doing, call **get_workspace** first.
@@ -1394,8 +1386,8 @@ Principles:
   meant to delete leaves it in the picture and makes the prompt harder to read next time.
   ★Weights already in the user's prompt are **their tuning** - keep them as they are.
 - ★**Three places a request can land, and they show up in different places:**
-  (1) what they are looking at now - **edit_current_prompt** (on screen; they save it later),
-  (2) the deck - **create_card** / **update_card** (kept for later; the screen does not change),
+  (1) what they are looking at now - **edit_style_card / edit_character / edit_scene** (on screen; they save it later),
+  (2) the deck - **save_card** (from the screen) or **create_card** / **update_card** (kept for later; the screen does not change),
   (3) just your reply (nothing is touched).
   **(1) is the default** - a request about prompts means what they are looking at. Ask only
   when the wording genuinely points at the deck too ("make a card or just change this?");
@@ -1421,8 +1413,8 @@ Principles:
   is worse than either. Remove or replace the tag where it is written.
   **When it is genuinely ambiguous which place they meant, ask** (`ask_user`) - one short
   question costs less than rewriting their prompt the wrong way.
-- ★★**Check the result of your own edit before you report it.** `edit_current_prompt`
-  answers with **which tab and scene group** it touched; if that is not the tab the user is looking
+- ★★**Check the result of your own edit before you report it.** The edit actions
+  answer with **which tab and scene group** they touched; if that is not the tab the user is looking
   at, say so instead of reporting success. When the user says the change is not there,
   **call get_workspace again and compare** - do not restate what you believe you did.
 - ★★**A `characters` entry holds only that person** - body, hair, eyes, outfit, expression,
@@ -1465,10 +1457,10 @@ Principles:
   than one answer can be true at once, pass `multi=true`; a single-pick list forces them
   to answer a question you did not ask.
 - ★★**Work on the screen first. Saving to the deck is the user's call.**
-  A request about prompts means **what they are looking at** - use edit_current_prompt (or
-  apply_card to put a saved card onto the screen). Do **not** create a card unless they
-  said so in words ("save it as a card", "put it in the deck"). Cards are storage, and
-  filling their deck uninvited is not helpful.
+  A request about prompts means **what they are looking at** - use edit_style_card /
+  edit_character / edit_scene (or apply_card to put a saved card onto the screen). Do **not**
+  save or create a deck card unless they said so in words ("save it as a card", "put it in
+  the deck"). Cards are storage, and filling their deck uninvited is not helpful.
 - ★When a request could land in more than one place **and the wording really is split**
   (screen / new card / an existing card), ask which. Not when (1) is the obvious reading -
   see the default above.
@@ -1491,12 +1483,11 @@ Principles:
   create_scene). The workspace file belongs to the screen - the app holds it and writes it
   whole - so these need the app running, and the change shows up there immediately.
   create_tab also **moves to** the new tab, so calls after it land in it.
-- edit_current_prompt works on the scene group that is open. Pass `sceneGroup` to work on another one - the
-  app opens it, so the user watches the change land. Naming a character who is not there
-  **creates that slot**, so "add a maid standing behind them" is one call, not a request for
-  the user to set something up first.
-  Pass `scene` to change one scene cell instead (a cell holds a single block, so `tags` is
-  all it takes).
+- The edit actions work on the scene group in the message's `[screen]` line. Pass `sceneGroup`
+  to work on another one - the app opens it, so the user watches the change land.
+  `edit_character` with a name that is not there **creates that card**, so "add a maid
+  standing behind them" is one call, not a request for the user to set something up first.
+  `edit_scene` changes one scene cell (a cell holds a single block, so `tags` is all it takes).
 - ★**Undoing your own edits.** The user's Ctrl+Z covers only what **they** did; your edits
   are undone through you. When they say "undo that" or "put it back", call **list_changes**
   and then **undo_change** with the id. Some things cannot be undone - a queued generation
