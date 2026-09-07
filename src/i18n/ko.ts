@@ -1039,6 +1039,8 @@ export const ko: Dict = {
     renamed: "이름을 바꿨습니다",
     newFolder: "새 폴더",
     newFolderHint: "폴더 이름을 적고 Enter",
+    folderMoved: "폴더를 옮겼습니다",
+    folderIntoSelf: "폴더를 자기 안으로 옮길 수 없습니다",
     folderDelete: "폴더 지우기",
     folderDelConfirm: "'{name}' 폴더를 지웁니다",
     folderNotEmpty: "그림이 든 폴더는 지울 수 없습니다. 먼저 옮기거나 지우세요.",

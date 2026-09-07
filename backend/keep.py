@@ -152,6 +152,40 @@ def make_folder(root: Path, name: str) -> dict:
     return {"path": d.relative_to(root.resolve()).as_posix()}
 
 
+def move_folder(root: Path, name: str, dest: str) -> dict:
+    """폴더를 **다른 폴더 아래로** 옮긴다 (사용자 지시 2026-09-06: *"폴더도 드래그해서 옮기면 속한 위치
+    바꿀 수 있게"*). `dest` 가 비면 뿌리로. 이름은 그대로고 부모만 바뀐다.
+
+    ★자기 자신이나 자기 하위로는 못 옮긴다 (폴더가 제 안으로 사라진다).
+    ★★안에 든 그림의 별표·출처는 **새 경로로 따라 보낸다** — 그림을 옮길 때(`move`)와 같은 규칙.
+      안 따라가면 별표가 없는 파일을 가리키고, 「새 탭으로 복제」가 출처를 잃는다."""
+    rel = (name or "").strip().strip("/")
+    if not rel:
+        raise ValueError("보관함 자체는 옮길 수 없습니다")
+    src = safe_folder(root, rel)
+    if not src.is_dir():
+        raise ValueError("없는 폴더입니다")
+    d = safe_folder(root, dest)
+    if d == src or src in d.parents:
+        raise ValueError("폴더를 자기 안으로 옮길 수 없습니다")
+    if d == src.parent:
+        return {"path": rel}
+    d.mkdir(parents=True, exist_ok=True)
+    tgt = d / src.name
+    if tgt.exists():
+        raise ValueError("그 자리에 같은 이름의 폴더가 있습니다")
+    shutil.move(str(src), str(tgt))
+    old_rel = src.relative_to(root.resolve()).as_posix()
+    new_rel = tgt.relative_to(root.resolve()).as_posix()
+    st = _state(root)
+    head = old_rel + "/"
+    inside = {f for f in st["starred"] if f.startswith(head)} | {v for v in st["sources"].values() if v.startswith(head)}
+    if inside:
+        _remap(st, {f: new_rel + "/" + f[len(head):] for f in inside})
+        _put_state(root, st)
+    return {"path": new_rel}
+
+
 def drop_folder(root: Path, name: str) -> dict:
     """폴더를 지운다. ★**빈 폴더만** (v2 와 같다) — 안에 그림이 있으면 거절한다.
     그림째 지우는 창구를 따로 두지 않는다: 생성물은 Anlas 가 든 원본이다."""

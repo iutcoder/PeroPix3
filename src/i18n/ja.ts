@@ -1005,6 +1005,8 @@ export const ja: Dict = {
     renamed: "名前を変えました",
     newFolder: "新しいフォルダ",
     newFolderHint: "フォルダ名を入力して Enter",
+    folderMoved: "フォルダを移動しました",
+    folderIntoSelf: "フォルダを自分の中には移動できません",
     folderDelete: "フォルダを削除",
     folderDelConfirm: "'{name}' フォルダを削除します",
     folderNotEmpty: "画像が入っているフォルダは削除できません。先に移動するか削除してください。",

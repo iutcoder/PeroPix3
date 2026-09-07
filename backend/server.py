@@ -2461,6 +2461,13 @@ class KeepName(BaseModel):
     name: str = ""
 
 
+class KeepFolderMove(BaseModel):
+    """폴더 옮기기 — 어느 폴더(`name`)를 어느 폴더 아래(`dest`, 비면 뿌리)로"""
+
+    name: str = ""
+    dest: str = ""
+
+
 class KeepRename(BaseModel):
     file: str
     name: str
@@ -2515,6 +2522,15 @@ async def keep_folders():
 async def keep_make_folder(body: KeepName):
     try:
         return keep.make_folder(KEEP_DIR, body.name)
+    except (ValueError, OSError) as e:
+        raise HTTPException(400, str(e))
+
+
+@app.post("/api/keep/folder/move")
+async def keep_move_folder(body: KeepFolderMove):
+    """폴더를 다른 폴더 아래로 (`keep.move_folder` 주석)."""
+    try:
+        return keep.move_folder(KEEP_DIR, body.name, body.dest)
     except (ValueError, OSError) as e:
         raise HTTPException(400, str(e))
 

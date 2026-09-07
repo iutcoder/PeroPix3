@@ -1006,6 +1006,8 @@ export const en = {
     renamed: "Renamed",
     newFolder: "New folder",
     newFolderHint: "Type a folder name and press Enter",
+    folderMoved: "Folder moved",
+    folderIntoSelf: "A folder cannot be moved into itself",
     folderDelete: "Delete folder",
     folderDelConfirm: "Delete the folder '{name}'",
     folderNotEmpty: "This folder still has images. Move or delete them first.",
