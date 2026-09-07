@@ -10,6 +10,7 @@ import { toast } from "../../store/toast";
 import { Icon } from "../../components/Icon";
 import { Help } from "../../components/Tip";
 import { DragGhost } from "../../cards/DragGhost";
+import { FolderOpenButton } from "../../components/FolderOpenButton";
 
 /** 이름 변환 — **형식과 이름을 한 번에** 바꾼다 (v2 `보조 도구 › 이미지 변환`).
  *
@@ -491,15 +492,11 @@ export function ConvertTool() {
               >
                 {saveDir}
               </span>
-              <button
+              <FolderOpenButton
                 data-convert-open-dir
+                tip={t("tools.openFolder")}
                 onClick={() => void useFiles.getState().openDir(saveDir).catch((e) => toast(String(e), "warn"))}
-                data-tip={t("tools.openFolder")}
-                style={{ ...box, display: "flex", alignItems: "center", gap: 4, flexShrink: 0 }}
-              >
-                {Icon.folderOpen}
-                {t("tools.openFolder")}
-              </button>
+              />
             </div>
           )}
         </Section>

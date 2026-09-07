@@ -12,6 +12,7 @@ import { useWs, type SceneGroup } from "../store/workspace";
 import { ask } from "../store/ask";
 import { useGen } from "../store/gen";
 import { Icon } from "../components/Icon";
+import { FolderOpenButton } from "../components/FolderOpenButton";
 
 /** 캔버스 탭 — **두 층이고, 두 층의 생김새가 다르다** (페로픽스파이 규칙 이식 2026-08-04).
  *
@@ -494,9 +495,9 @@ function SaveHint() {
       {cell ? <span style={{ color: "var(--ink-faint)" }}>/{cell}_*.png</span> : ""}
       {/* ★그 자리를 **여는 단추** (사용자 지시 2026-08-19) — 경로만 적혀 있으면
           탐색기에서 손으로 찾아 들어가야 했다 */}
-      <button
+      <FolderOpenButton
         data-open-out
-        data-tip={tr("files.reveal")}
+        tip={tr("files.reveal")}
         onClick={() =>
           void api("/api/files/reveal", {
             method: "POST",
@@ -504,10 +505,7 @@ function SaveHint() {
             body: JSON.stringify({ path: `${current}/${rel}` }),
           }).catch((e) => toast(String(e), "warn"))
         }
-        style={{ display: "grid", color: "var(--ink-faint)", padding: 1 }}
-      >
-        {Icon.folderOpen}
-      </button>
+      />
     </span>
   );
 }

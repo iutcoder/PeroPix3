@@ -7,6 +7,7 @@ import { dragSourceStyle, useDrag, useDragSource, useDropZone } from "../cards/d
 import { ask } from "../store/ask";
 import { toast } from "../store/toast";
 import { Icon } from "../components/Icon";
+import { FolderOpenButton } from "../components/FolderOpenButton";
 
 /** 갤러리의 폴더 목록 — 좌 패널.
  *
@@ -232,14 +233,11 @@ export function GalleryFolders() {
           {folder === ALL ? t("gallery.all") : folder} · {t("gallery.countImages", { n: items.length })}
         </span>
         {/* 보관함은 앱 밖에서도 들여다보는 폴더다 — 지금 보고 있는 폴더를 그대로 연다 */}
-        <button
+        <FolderOpenButton
           data-keep-openfolder
-          data-tip={t("files.reveal")}
+          tip={t("files.reveal")}
           onClick={() => void reveal(folder).catch((e) => toast(String(e), "warn"))}
-          style={{ display: "grid", placeItems: "center", padding: 2, color: "var(--ink-dim)" }}
-        >
-          {Icon.folderOpen}
-        </button>
+        />
       </div>
     </div>
   );

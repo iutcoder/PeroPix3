@@ -23,6 +23,7 @@ import { currentAccountId } from "../store/accounts";
 import { useWs, type Rec } from "../store/workspace";
 import type { ImageMeta } from "../store/gallery";
 import { sendToTagger } from "./tools/TaggerTool";
+import { FolderOpenButton } from "../components/FolderOpenButton";
 
 /** 크게 본 그림 **아래에 붙는 한 줄** — "이 장으로 무엇을 할까" (페로픽스파이 `result-meta` 이식).
  *
@@ -447,7 +448,7 @@ export function ImageActions({
         <span data-act-sep style={{ width: 1, alignSelf: "stretch", background: "var(--line)" }} />
 
         {revealPath && !isMulti && (
-          <button
+          <FolderOpenButton
             data-act-reveal
             onClick={() =>
               void (async () => {
@@ -463,11 +464,8 @@ export function ImageActions({
                 }).catch((e) => toast(String(e), "warn"));
               })()
             }
-            data-tip={t("files.reveal")}
-            style={iconBtn}
-          >
-            {Icon.folderOpen}
-          </button>
+            tip={t("files.reveal")}
+          />
         )}
         {/* ★★**「어디로 보낼까」는 한 단추로 묶는다** (사용자 지시 2026-09-04).
             탭·갤러리·일괄변환은 전부 *이 그림을 다른 자리로 보내는* 같은 몸짓이라, 아이콘
