@@ -10,6 +10,7 @@ import { Icon } from "../../components/Icon";
 import { TreeRoot } from "../../components/TreeRoot";
 import { useConvertQueue } from "./ConvertTool";
 import { onNearBottom } from "../../lib/nearBottom";
+import { FolderOpenButton } from "../../components/FolderOpenButton";
 
 /** 파일 관리 — **아웃풋 폴더를 그대로** 연다 (v2 `보조 도구 › 파일 관리`).
  *
@@ -378,9 +379,7 @@ export function FileManager({ onConvert }: { onConvert: () => void }) {
           <button data-fm-all onClick={pickAll} style={box}>
             {picked.size === items.length && items.length ? t("tools.none") : t("tools.all")}
           </button>
-          <button data-fm-reveal onClick={() => void useFiles.getState().reveal(folder)} style={box}>
-            {t("files.reveal")}
-          </button>
+          <FolderOpenButton data-fm-reveal tip={t("files.reveal")} onClick={() => void useFiles.getState().reveal(folder)} />
         </div>
 
         {view === "grid" ? (

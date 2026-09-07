@@ -29,6 +29,14 @@ fn backend_url() -> String {
     if key.is_empty() { base } else { format!("{base}/k/{key}") }
 }
 
+/// 원본의 Windows 전용 원자적 창 복원 명령과 프론트엔드 호출 규약을 맞춘다.
+/// macOS에서는 오류를 돌려 프론트엔드가 기존 Tauri 창 이동 경로를 사용하게 한다.
+#[tauri::command]
+fn drag_restore(window: tauri::WebviewWindow, ratio_x: f64, offset_y: f64) -> Result<(), String> {
+    let _ = (window, ratio_x, offset_y);
+    Err("Windows 전용 창 복원 명령입니다".into())
+}
+
 /// 이 앱이 서 있는 자리. ★화면이 **「지금 붙은 백엔드가 내 것인가」**를 묻는 데 쓴다 —
 /// 백엔드도 같은 값을 알려 주므로(`/api/health` 의 `root`), 둘이 다르면 남의 것에 붙은 것이다.
 #[tauri::command]
@@ -55,7 +63,7 @@ pub fn run() {
 
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
-        .invoke_handler(tauri::generate_handler![backend_url, app_root, uptime_ms])
+        .invoke_handler(tauri::generate_handler![backend_url, app_root, uptime_ms, drag_restore])
         .setup(move |app| {
             app.manage(InstanceLock { _file: lock });
             /* ★★**웹뷰 바탕을 어둡게 깔아 둔다** (사용자 지적 2026-08-27: *"처음에 흰 화면이

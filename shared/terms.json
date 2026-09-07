@@ -177,11 +177,11 @@
     {
       "key": "styleCard",
       "tool": "styleCard",
-      "code": "cards.styles",
+      "code": "prompt.style · prompt.styleOn",
       "what": {
-        "ko": "덱의 스타일 카드",
-        "en": "a style card in the deck",
-        "ja": "デッキの画風カード"
+        "ko": "화면의 스타일 카드 — 베이스 프롬프트·UC 를 담는 그릇 (탭당 하나). 덱의 저장본은 deck 의 styles",
+        "en": "the style card on screen — it holds the base prompt and UC (one per tab). Its saved copy lives in the deck (styles)",
+        "ja": "画面のスタイルカード — ベースプロンプトと UC を入れる器(タブごとに1つ)。保存した複製はデッキ(styles)"
       },
       "alias": {
         "ko": [
@@ -195,6 +195,21 @@
         "ja": [
           "スタイルカード"
         ]
+      }
+    },
+    {
+      "key": "deck",
+      "tool": "deck",
+      "code": "cards.styles · cards.characters · cards.posesets",
+      "what": {
+        "ko": "덱 — 화면 카드의 저장본 (styles·characters·posesets). 화면과 따로 산다",
+        "en": "the deck — saved copies of screen cards (styles / characters / posesets), separate from the screen",
+        "ja": "デッキ — 画面カードの保存複製(styles・characters・posesets)。画面とは別"
+      },
+      "alias": {
+        "ko": ["덱", "저장해 둔 카드", "카드 보관함"],
+        "en": ["deck", "saved cards"],
+        "ja": ["デッキ", "保存したカード"]
       }
     },
     {

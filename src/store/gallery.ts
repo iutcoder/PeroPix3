@@ -111,6 +111,8 @@ type S = {
   newFolder: (ws: string, name: string) => Promise<void>;
   /** ★빈 폴더만 지운다 — 그림째 지우는 창구는 두지 않는다 */
   dropFolder: (ws: string, name: string) => Promise<void>;
+  /** 폴더를 다른 폴더 아래로 (`dest` 가 빈 문자열이면 뿌리). 보고 있던 폴더가 함께 옮겨지면 따라간다 */
+  moveFolder: (ws: string, name: string, dest: string) => Promise<string>;
   rename: (ws: string, file: string, name: string) => Promise<string>;
   /** 탐색기에서 연다. 비우면 보관함 뿌리 */
   reveal: (path?: string) => Promise<void>;
@@ -234,6 +236,19 @@ export const useGallery = create<S>((set, get) => ({
       body: JSON.stringify({ name }),
     });
     await get().load(ws);
+  },
+
+  async moveFolder(ws, name, dest) {
+    const r = await api<{ path: string }>(`/api/keep/folder/move`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name, dest }),
+    });
+    // ★보고 있던 폴더가 옮겨졌으면 새 자리를 따라간다 — 안 그러면 없는 폴더를 계속 부른다
+    const cur = get().folder;
+    if (cur === name || cur.startsWith(name + "/")) set({ folder: r.path + cur.slice(name.length) });
+    await get().load(ws);
+    return r.path;
   },
 
   async dropFolder(ws, name) {

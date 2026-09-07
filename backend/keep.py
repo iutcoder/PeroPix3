@@ -128,10 +128,11 @@ def adopt_stars(root: Path, files: list[str]) -> list[str]:
 def folders(root: Path) -> list[dict]:
     """보관함의 폴더들.
 
-    ★첫 줄(`""`)은 **전체**다 — 루트에 놓인 것만이 아니라 보관함에 든 전부를 센다.
-      폴더에 넣어 둔 그림이 "전체"에서 안 보이면 넣는 순간 사라진 것처럼 보인다
-      (실측 2026-08-05: 폴더에 3장을 넣었는데 전체가 0장)."""
-    out = [{"path": "", "count": sum(1 for _ in _imgs(root, root, True))}]
+    ★★첫 줄(`""`)은 **뿌리 폴더 그 자체**다 — 뿌리에 놓인 것만 센다 (사용자 지시 2026-09-06:
+      *"최상위 gallery 선택하면 하위 폴더의 이미지는 안 보이게"*). 예전에는 「전체」라 하위까지
+      셌는데(2026-08-05), 화면의 첫 줄이 「전체」가 아니라 `gallery` 폴더가 된 뒤로(2026-08-23)
+      다른 폴더와 같은 규칙이어야 맞다. 숫자도 `images()` 가 보여 주는 것과 같아야 한다."""
+    out = [{"path": "", "count": sum(1 for _ in _imgs(root, root, False))}]
     for d in sorted(p for p in root.rglob("*") if p.is_dir() and _visible(root, p)):
         out.append({"path": d.relative_to(root).as_posix(), "count": sum(1 for _ in _imgs(root, d, False))})
     return out
@@ -151,6 +152,40 @@ def make_folder(root: Path, name: str) -> dict:
     return {"path": d.relative_to(root.resolve()).as_posix()}
 
 
+def move_folder(root: Path, name: str, dest: str) -> dict:
+    """폴더를 **다른 폴더 아래로** 옮긴다 (사용자 지시 2026-09-06: *"폴더도 드래그해서 옮기면 속한 위치
+    바꿀 수 있게"*). `dest` 가 비면 뿌리로. 이름은 그대로고 부모만 바뀐다.
+
+    ★자기 자신이나 자기 하위로는 못 옮긴다 (폴더가 제 안으로 사라진다).
+    ★★안에 든 그림의 별표·출처는 **새 경로로 따라 보낸다** — 그림을 옮길 때(`move`)와 같은 규칙.
+      안 따라가면 별표가 없는 파일을 가리키고, 「새 탭으로 복제」가 출처를 잃는다."""
+    rel = (name or "").strip().strip("/")
+    if not rel:
+        raise ValueError("보관함 자체는 옮길 수 없습니다")
+    src = safe_folder(root, rel)
+    if not src.is_dir():
+        raise ValueError("없는 폴더입니다")
+    d = safe_folder(root, dest)
+    if d == src or src in d.parents:
+        raise ValueError("폴더를 자기 안으로 옮길 수 없습니다")
+    if d == src.parent:
+        return {"path": rel}
+    d.mkdir(parents=True, exist_ok=True)
+    tgt = d / src.name
+    if tgt.exists():
+        raise ValueError("그 자리에 같은 이름의 폴더가 있습니다")
+    shutil.move(str(src), str(tgt))
+    old_rel = src.relative_to(root.resolve()).as_posix()
+    new_rel = tgt.relative_to(root.resolve()).as_posix()
+    st = _state(root)
+    head = old_rel + "/"
+    inside = {f for f in st["starred"] if f.startswith(head)} | {v for v in st["sources"].values() if v.startswith(head)}
+    if inside:
+        _remap(st, {f: new_rel + "/" + f[len(head):] for f in inside})
+        _put_state(root, st)
+    return {"path": new_rel}
+
+
 def drop_folder(root: Path, name: str) -> dict:
     """폴더를 지운다. ★**빈 폴더만** (v2 와 같다) — 안에 그림이 있으면 거절한다.
     그림째 지우는 창구를 따로 두지 않는다: 생성물은 Anlas 가 든 원본이다."""
@@ -167,7 +202,8 @@ def drop_folder(root: Path, name: str) -> dict:
 
 
 def images(root: Path, folder: str = "", page: int = 1, limit: int = 0) -> dict:
-    """그림 목록. ★`folder` 가 비면 **전체**(하위 폴더까지), 주면 그 폴더만.
+    """그림 목록. ★`folder` 가 비면 **뿌리 폴더**, 주면 그 폴더 — 어느 쪽이든 **그 폴더에 놓인 것만**
+    (하위 폴더는 안 훑는다. 사용자 지시 2026-09-06, `folders()` 의 ★★주).
 
     ★**쪽으로 끊어 준다** (v2 `/api/outputs-list` 와 같은 방식, 사용자 결정 2026-08-05).
       수백 장을 한 번에 내려 주면 화면이 그만큼의 DOM 을 만들어야 한다. `limit=0` 이면 전량.
@@ -182,7 +218,7 @@ def images(root: Path, folder: str = "", page: int = 1, limit: int = 0) -> dict:
     #   다음 쪽에 같은 그림이 또 온다 (아래 주석과 같은 이유). 파일 이름만으로는 모자란다:
     #   폴더가 다르면 같은 이름이 둘 있을 수 있고, 그러면 순서를 파일시스템이 정하게 된다.
     files = sorted(
-        _imgs(root, d, not folder),
+        _imgs(root, d, False),
         key=lambda x: (x.stat().st_mtime, x.relative_to(root).as_posix()),
         reverse=True,
     )

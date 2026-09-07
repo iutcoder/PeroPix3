@@ -3,10 +3,11 @@ import { useRef, useState } from "react";
 import { useI18n } from "../i18n";
 import { useWs } from "../store/workspace";
 import { ALL, useGallery } from "../store/gallery";
-import { useDrag, useDropZone } from "../cards/dragStore";
+import { dragSourceStyle, useDrag, useDragSource, useDropZone } from "../cards/dragStore";
 import { ask } from "../store/ask";
 import { toast } from "../store/toast";
 import { Icon } from "../components/Icon";
+import { FolderOpenButton } from "../components/FolderOpenButton";
 
 /** 갤러리의 폴더 목록 — 좌 패널.
  *
@@ -19,7 +20,7 @@ export function GalleryFolders() {
   const ws = useWs((s) => s.current);
   // ★목록을 불러오는 것은 **중앙(Gallery)** 이다 — 이 패널은 접으면 언마운트되므로
   //   (Shell 이 접힌 쪽을 렌더하지 않는다) 여기서 불러오면 접었을 때 갤러리가 빈다.
-  const { folders, folder, items, setFolder, newFolder, dropFolder, reveal, moveTo, vibeMode, setVibeMode } =
+  const { folders, folder, items, setFolder, newFolder, dropFolder, moveFolder, reveal, moveTo, vibeMode, setVibeMode } =
     useGallery();
   /** 그림을 끌어다 놓으면 그 폴더로 옮긴다 (사용자 지시 2026-08-19) */
   const moveFiles = async (files: string[], dest: string) => {
@@ -38,13 +39,26 @@ export function GalleryFolders() {
   /** 갤러리 그림을 끌고 있나 — 그동안 이 영역이 어둠 위로 올라온다 */
   const lift = useDrag((d) => d.drag?.kind === "keep");
 
+  /** ★폴더를 끌어다 다른 폴더 줄에 놓으면 **그 아래로** 들어간다 (사용자 지시 2026-09-06) */
+  const moveFolderTo = async (src: string, dest: string) => {
+    if (dest === src || dest.startsWith(src + "/")) return toast(t("gallery.folderIntoSelf"), "warn");
+    try {
+      await moveFolder(ws, src, dest === ALL ? "" : dest);
+      toast(t("gallery.folderMoved"));
+    } catch (e) {
+      toast(String(e), "warn");
+    }
+  };
+
   const addFolder = async () => {
     const name = draft.current.trim();
     draft.current = "";
     setAdding(null);
     if (!name) return;
     try {
-      await newFolder(ws, name);
+      // ★★**고른 폴더 아래에** 만든다 (사용자 지시 2026-09-06: *"하위폴더 선택한채로 '새폴더' 누르면
+      //   하위-하위-하위… 이런식으로도 만들 수 있게"*). 뿌리를 보고 있으면 뿌리에.
+      await newFolder(ws, folder === ALL ? name : `${folder}/${name}`);
     } catch (e) {
       toast(String(e), "warn");
     }
@@ -95,16 +109,23 @@ export function GalleryFolders() {
           on={folder === ALL}
           onClick={() => void setFolder(ws, ALL)}
           onDropFiles={(files) => void moveFiles(files, ALL)}
+          onDropFolder={(src) => void moveFolderTo(src, ALL)}
         />
+        {/* ★나머지는 뿌리의 **하위**다 — 깊이만큼 들여쓴다 (사용자 지시 2026-09-06) */}
         {rest.map((f) => (
           <Row
             key={f.path}
-            label={f.path}
+            /* ★줄에는 **그 폴더 이름만** 적는다 (사용자 지시 2026-09-07: "상위 폴더 이름 다 쓰지말고 해당
+               폴더명만") — 들여쓰기가 이미 어디에 속하는지 말한다. 열쇠·이동·삭제는 그대로 전체 경로다. */
+            label={f.path.split("/").pop() ?? f.path}
+            depth={f.path.split("/").length}
             count={f.count}
             on={folder === f.path}
             onClick={() => void setFolder(ws, f.path)}
             onDelete={() => void removeFolder(f.path, f.count)}
             onDropFiles={(files) => void moveFiles(files, f.path)}
+            onDropFolder={(src) => void moveFolderTo(src, f.path)}
+            dragPath={f.path}
           />
         ))}
 
@@ -212,14 +233,11 @@ export function GalleryFolders() {
           {folder === ALL ? t("gallery.all") : folder} · {t("gallery.countImages", { n: items.length })}
         </span>
         {/* 보관함은 앱 밖에서도 들여다보는 폴더다 — 지금 보고 있는 폴더를 그대로 연다 */}
-        <button
+        <FolderOpenButton
           data-keep-openfolder
-          data-tip={t("files.reveal")}
+          tip={t("files.reveal")}
           onClick={() => void reveal(folder).catch((e) => toast(String(e), "warn"))}
-          style={{ display: "grid", placeItems: "center", padding: 2, color: "var(--ink-dim)" }}
-        >
-          {Icon.folderOpen}
-        </button>
+        />
       </div>
     </div>
   );
@@ -227,13 +245,18 @@ export function GalleryFolders() {
 
 function Row({
   label,
+  depth = 0,
   count,
   on,
   onClick,
   onDelete,
   onDropFiles,
+  onDropFolder,
+  dragPath,
 }: {
   label: string;
+  /** 트리 깊이 — 뿌리 0, 그 아래 폴더 1, `a/b` 는 2. 들여쓰기만 정한다 */
+  depth?: number;
   count: number;
   on: boolean;
   onClick: () => void;
@@ -243,14 +266,22 @@ function Row({
    *  없으면 받지 않는다 (「전체」는 폴더가 아니라 보기라 받을 자리가 없다 — 뿌리로 옮기는
    *  것은 「전체」가 아니라 뿌리 폴더 줄이 받아야 뜻이 분명하다). */
   onDropFiles?: (files: string[]) => void;
+  /** 폴더를 끌어다 놓으면 **이 폴더 아래로** 옮긴다 (사용자 지시 2026-09-06) */
+  onDropFolder?: (src: string) => void;
+  /** 있으면 이 줄을 **끌 수 있다** (뿌리 줄은 없다 — 뿌리는 옮길 데가 없다) */
+  dragPath?: string;
 }) {
   const t = useI18n((s) => s.t);
+  const startDrag = useDragSource();
   /** ★앱의 포인터 끌기를 받는다 — HTML5 드롭은 Tauri 가 가로채 안 온다 (`cards/dragStore`) */
   const zone = useDropZone({
     id: `keep-folder-${label}`,
     kind: "keep",
     prio: 10,
-    onDrop: (d) => d.files?.length && onDropFiles?.(d.files),
+    onDrop: (d) => {
+      if (d.folder !== undefined) onDropFolder?.(d.folder);
+      else if (d.files?.length) onDropFiles?.(d.files);
+    },
   });
   // 폴더는 `work/유나/포즈1` 처럼 계층이라, 마지막 조각을 굵게 두고 앞은 흐리게 둔다
   const parts = label.split("/");
@@ -271,14 +302,20 @@ function Row({
       }}
     >
     <button
-      onClick={onClick}
+      /* ★끌 수 있는 줄은 **포인터 판**으로 시작한다 (`useDragSource`). pointerdown 의 preventDefault 가
+         click 을 삼키므로 누르기는 onTap 으로 받는다 — 뿌리 줄은 끌지 않으니 onClick 그대로. */
+      onClick={dragPath === undefined ? onClick : undefined}
+      onPointerDown={dragPath === undefined ? undefined
+        : (e) => startDrag(e, { dir: "apply", kind: "keep", folder: dragPath }, undefined, onClick)}
       data-tip={label}
       style={{
+        ...(dragPath === undefined ? {} : dragSourceStyle),
         display: "flex",
         alignItems: "baseline",
         gap: "var(--sp-2)",
         width: "100%",
         padding: "5px var(--sp-3)",
+        paddingLeft: `calc(var(--sp-3) + ${depth * 14}px)`,
         borderRadius: "var(--r-2)",
         background: on ? "var(--surface2)" : "transparent",
         color: on ? "var(--ink)" : "var(--ink-dim)",

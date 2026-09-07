@@ -80,7 +80,11 @@ def _app_dir() -> Path:
       두 단계면 된다 — 폴더 이름으로 가른다.
     ★껍데기도 같은 규칙을 쓴다 (`src-tauri/src/backend.rs` 의 `inner`). 두 곳이 어긋나면
       앱과 백엔드가 서로 다른 창고를 본다."""
-    here = Path(__file__).resolve().parent.parent
+    # ★★`resolve()` 를 쓰지 않는다 (2026-09-07). QA 뿌리(`PeroPix3-qaroot`)는 `backend/` 가 개발 트리를
+    #   가리키는 **정션**이라 resolve 가 그것을 따라가 뿌리를 개발 트리로 잡았다 — 껍데기가 아는 자리와
+    #   달라져 화면의 「내 백엔드인가」 대조(`lib/sameApp`)가 실패하고 QA 인스턴스가 「백엔드 실패」로 죽었다.
+    #   `abspath` 는 `..` 만 접고 링크는 안 따라간다 — 껍데기가 준 자리 그대로다.
+    here = Path(os.path.abspath(__file__)).parent.parent
     return here.parent if here.name == "app" else here
 
 
@@ -2395,6 +2399,13 @@ class KeepName(BaseModel):
     name: str = ""
 
 
+class KeepFolderMove(BaseModel):
+    """폴더 옮기기 — 어느 폴더(`name`)를 어느 폴더 아래(`dest`, 비면 뿌리)로"""
+
+    name: str = ""
+    dest: str = ""
+
+
 class KeepRename(BaseModel):
     file: str
     name: str
@@ -2453,6 +2464,15 @@ async def keep_make_folder(body: KeepName):
         raise HTTPException(400, str(e))
 
 
+@app.post("/api/keep/folder/move")
+async def keep_move_folder(body: KeepFolderMove):
+    """폴더를 다른 폴더 아래로 (`keep.move_folder` 주석)."""
+    try:
+        return keep.move_folder(KEEP_DIR, body.name, body.dest)
+    except (ValueError, OSError) as e:
+        raise HTTPException(400, str(e))
+
+
 @app.post("/api/keep/folder/delete")
 async def keep_drop_folder(body: KeepName):
     """★빈 폴더만 지운다 (keep.drop_folder 주석)."""
@@ -2460,6 +2480,20 @@ async def keep_drop_folder(body: KeepName):
         return keep.drop_folder(KEEP_DIR, body.name)
     except (ValueError, OSError) as e:
         raise HTTPException(400, str(e))
+
+
+@app.post("/api/keep/path")
+async def keep_abs_path(body: KeepPath):
+    """보관함 그림의 **절대 경로** — 갤러리의 「일괄 변환으로 보내기」가 쓴다 (사용자 지시 2026-09-07).
+    ★보관함은 아웃풋 루트 밖이라 변환 도구의 `rel` 로는 못 가리킨다. 절대 경로(`path`)로 싣는다 —
+      밖에서 끌어다 놓은 그림과 같은 길이다 (`tools._read`)."""
+    try:
+        p = keep.safe_folder(KEEP_DIR, body.path)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    if not p.is_file():
+        raise HTTPException(404, "그림을 찾지 못했습니다")
+    return {"path": str(p)}
 
 
 @app.post("/api/keep/reveal")
@@ -2663,6 +2697,20 @@ async def tools_convert(body: ToolConvert):
         )
     except ValueError as e:
         raise HTTPException(400, str(e))
+
+
+class ToolDest(BaseModel):
+    items: list[ToolItem] = []
+    mode: str = "sub"
+    dest: str = ""
+
+
+@app.post("/api/tools/convert-dest")
+async def tools_convert_dest(body: ToolDest):
+    """지금 옵션으로 결과가 쓰일 폴더 — 화면의 「저장될 위치」 (사용자 지시 2026-09-07).
+    ★변환과 **같은 함수**(`tools.dest_dir`)라 보여 준 자리와 실제 자리가 같다. 만들지는 않는다."""
+    d = tools_mod.dest_dir(WS_ROOT, [i.model_dump() for i in body.items], body.mode, body.dest)
+    return {"dir": str(d) if d is not None else None}
 
 
 class ToolProbe(BaseModel):

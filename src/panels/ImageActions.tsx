@@ -23,6 +23,7 @@ import { currentAccountId } from "../store/accounts";
 import { useWs, type Rec } from "../store/workspace";
 import type { ImageMeta } from "../store/gallery";
 import { sendToTagger } from "./tools/TaggerTool";
+import { FolderOpenButton } from "../components/FolderOpenButton";
 
 /** 크게 본 그림 **아래에 붙는 한 줄** — "이 장으로 무엇을 할까" (페로픽스파이 `result-meta` 이식).
  *
@@ -50,6 +51,7 @@ export function ImageActions({
   multi,
   onKeep,
   onConvert,
+  onCensor,
   onClone,
   onLeave,
   extra,
@@ -91,6 +93,8 @@ export function ImageActions({
   onKeep?: () => void | Promise<void>;
   /** 「일괄 변환으로 보내기」 — 워크스페이스 파일에만 뜻이 있다 (캔버스가 준다) */
   onConvert?: () => void | Promise<void>;
+  /** 자동검열 목록에 담고 그 화면으로 (사용자 지시 2026-09-07: 「보내기」에 「자동검열로 보내기」) */
+  onCensor?: () => void | Promise<void>;
   /** 「새 탭으로 복제」 — **워크스페이스 파일에만** 뜻이 있다 (보관함에서는 안 넘어온다).
    *  ★미저장 그림에도 안 뜬다: 그때는 부르는 쪽이 이 줄 대신 다른 줄을 그린다 (`SceneActions`) */
   onClone?: () => void | Promise<void>;
@@ -444,7 +448,7 @@ export function ImageActions({
         <span data-act-sep style={{ width: 1, alignSelf: "stretch", background: "var(--line)" }} />
 
         {revealPath && !isMulti && (
-          <button
+          <FolderOpenButton
             data-act-reveal
             onClick={() =>
               void (async () => {
@@ -460,11 +464,8 @@ export function ImageActions({
                 }).catch((e) => toast(String(e), "warn"));
               })()
             }
-            data-tip={t("files.reveal")}
-            style={iconBtn}
-          >
-            {Icon.folderOpen}
-          </button>
+            tip={t("files.reveal")}
+          />
         )}
         {/* ★★**「어디로 보낼까」는 한 단추로 묶는다** (사용자 지시 2026-09-04).
             탭·갤러리·일괄변환은 전부 *이 그림을 다른 자리로 보내는* 같은 몸짓이라, 아이콘
@@ -476,6 +477,7 @@ export function ImageActions({
             onClone && { mark: "clone", label: t("act.clone"), run: runClone },
             onKeep && { mark: "keep", label: t("gallery.keep"), run: onKeep },
             onConvert && { mark: "convert", label: t("tools.sendConvert"), run: onConvert },
+            onCensor && { mark: "censor", label: t("tools.sendCensor"), run: onCensor },
           ].filter((x): x is SendItem => !!x)}
         />
         {extra}
@@ -739,7 +741,9 @@ type SendItem = { mark: string; label: string; run: () => void | Promise<void> }
  *
  *  ★목록은 `document.body` 에 띄운다 (portal). 이 줄은 그림 위에 겹쳐 있고 `overflow` 가
  *    걸린 조상이 있어서, 안에서 펼치면 잘린다.
- *  ★갈 곳이 하나뿐이면 **메뉴를 안 연다** — 한 줄짜리 목록은 누르는 수만 늘린다.
+ *  ★★갈 곳이 하나뿐이어도 **메뉴를 연다** (사용자 지시 2026-09-07: *"선택지가 하나라고 바로 실행하면
+ *    아이콘이 동일한데 동작이 달라서 헷갈림"*). 예전에는 한 줄짜리 목록이 누르는 수만 늘린다고 바로
+ *    실행했는데, 같은 아이콘이 자리마다 다른 일을 하게 되어 무엇이 일어날지 알 수 없었다.
  */
 function SendMenu({ busy, items }: { busy: boolean; items: SendItem[] }) {
   const t = useI18n((s) => s.t);
@@ -788,7 +792,7 @@ function SendMenu({ busy, items }: { busy: boolean; items: SendItem[] }) {
         disabled={busy}
         data-tip={t("act.send")}
         onClick={() => {
-          if (items.length === 1) return fire(items[0]);
+          // ★하나뿐이어도 연다 (위 ★★주)
           const r = ref.current?.getBoundingClientRect();
           if (r) setAt({ x: r.left, y: r.top });
           setOpen((v) => !v);

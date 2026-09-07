@@ -8,6 +8,7 @@ import { useCli } from "./cli";
 import { codexWire } from "../lib/codexStream";
 import { noteCliRun } from "../lib/cliCursor";
 import type { AgentAt } from "../lib/agentAt";
+import type { Addr } from "../lib/promptEdit";
 
 /** LLM 채팅 — **반복 작업을 대신 시키는 창구** (3.0 의 목표 중 하나, ui-guide 7절).
  *
@@ -22,7 +23,9 @@ import type { AgentAt } from "../lib/agentAt";
 
 /** 공급자에 보내는 정본 모양 (앤트로픽 기준 — backend/llm.py 머리 주석) */
 type Part =
-  | { type: "text"; text: string }
+  /** ★`hidden` 은 **화면에 안 그리는 글** — 말을 건 때의 화면 주소다 (`send`). 공급자에게는
+   *  본문으로 나가고(`forProvider` 가 표식만 벗긴다) 대화 파일에도 남는다 — 뒤 바퀴에서도 같은 주소가 간다. */
+  | { type: "text"; text: string; hidden?: boolean }
   /** ★★**오류 조각** — 화면·저장에만 있고 **공급자에게는 안 나간다** (`forProvider` 가 거른다).
    *  사용자 지시 2026-08-30: 오류가 앱을 다시 켜면 사라져 확인할 수 없었다 — 대화에 남긴다. */
   | { type: "error"; text: string }
@@ -165,10 +168,37 @@ function noteError(text: string) {
 }
 
 /** 공급자에게 보낼 대화 — 오류 조각을 뺀다 (그것만 든 메시지는 통째로) */
+/** 첫 턴의 「이름부터 지어라」를 **마지막 사용자 말**에 얹는다 — 보내는 사본에만, 대화 기록에는 안 남긴다.
+ *  시스템 지침을 건드리지 않아야 프롬프트 캐시가 산다 (`NAME_FIRST` 의 ★★주). */
+export function withNameFirst(msgs: Wire[], on: boolean): Wire[] {
+  if (!on) return msgs;
+  let at = -1;
+  for (let i = msgs.length - 1; i >= 0; i--) if (msgs[i].role === "user") { at = i; break; }
+  if (at < 0) return msgs;
+  return msgs.map((m, i) => (i === at ? { ...m, content: [...m.content, { type: "text", text: NAME_FIRST }] } : m));
+}
+
 export function forProvider(wire: Wire[]): Wire[] {
   return wire
-    .map((m) => ({ ...m, content: m.content.filter((b) => b.type !== "error") }))
+    .map((m) => ({
+      ...m,
+      /* ★`hidden` 표식은 벗긴다 — 앤트로픽은 모르는 필드를 400 으로 돌려준다 (`backend/llm.py` 가 그대로 넘긴다) */
+      content: m.content
+        .filter((b) => b.type !== "error")
+        .map((b) => (b.type === "text" ? { type: "text" as const, text: b.text } : b)),
+    }))
     .filter((m) => m.content.length > 0);
+}
+
+/** 마지막 사용자 말에 실린 화면 주소 — 없으면 "" (옛 대화·주소 없는 줄) */
+export function lastUserAddr(wire: Wire[]): string {
+  for (let i = wire.length - 1; i >= 0; i--) {
+    const m = wire[i];
+    if (m.role !== "user" || !m.content.some((b) => b.type === "text" && !b.hidden)) continue;
+    const h = m.content.find((b) => b.type === "text" && b.hidden);
+    return h && h.type === "text" ? h.text : "";
+  }
+  return "";
 }
 
 export function linesOf(wire: Wire[]): Line[] {
@@ -179,7 +209,8 @@ export function linesOf(wire: Wire[]): Line[] {
       // ★빈 글은 안 그린다 — 조수의 말은 **시작할 때 자리만 잡고** 내용은 나중에 채운다
       //   (`codexStream.ts` 의 `slot`). 그 사이의 빈 줄이 화면에 보이면 안 된다.
       if (b.type === "text") {
-        if (b.text.trim()) out.push({ kind: m.role === "user" ? "user" : "ai", text: b.text });
+        // ★숨은 글(화면 주소)은 안 그린다 — 사용자가 보고 있는 자리라 되풀이할 것이 없다
+        if (b.text.trim() && !b.hidden) out.push({ kind: m.role === "user" ? "user" : "ai", text: b.text });
       }
       else if (b.type === "error") out.push({ kind: "error", text: b.text });
       else if (b.type === "tool_use") names.set(b.id, b.name);
@@ -239,8 +270,12 @@ const titleOf = (wire: Wire[]) => {
  *  ★**이름이 없을 때만** 붙인다 — 매 턴 붙이면 지침이 턴마다 달라져 프롬프트 캐시가 깨진다.
  *    CLI 는 애초에 첫 턴에만 지침을 받는다 (`cliagent.argv` 의 `--append-system-prompt`).
  *  ★안 불러도 대화는 그대로 돈다 — 그때는 목록 이름이 첫 발화로 남는다 (`titleOf`). */
+/** ★★**시스템 지침에 붙이지 않는다** — 마지막 사용자 말에 얹는다 (`withNameFirst`).
+ *  실측 2026-09-07 (로컬 llama-server, 지침 ≈11,300 토큰): 이 문장을 시스템 뒤에 붙였더니 `name_chat` 이
+ *  이름을 붙인 **다음 바퀴부터 시스템이 달라져** 프롬프트 캐시가 39% 에서 끊겼고, 11,305 토큰을 다시 처리하느라
+ *  이름 짓기에 28초·답까지 48초가 걸렸다. 지침·도구 명세가 앞에서 그대로면 그 뒤만 다시 읽는다 (0.7초). */
 const NAME_FIRST =
-  "\n\n[first turn] This chat has no name yet. Before anything else, call `name_chat` " +
+  "[first turn] This chat has no name yet. Before anything else, call `name_chat` " +
   "with a short title (about 20 characters) saying what the chat is about, " +
   "in the user's language. Then do the work.";
 
@@ -278,6 +313,10 @@ type S = {
    *  다시 세어 **막 시작한 것처럼** 보인다 (사용자 지적 2026-08-26: 접었다 폈더니
    *  일하는 중 표시가 사라졌다). 시각은 턴의 것이므로 턴을 아는 곳이 든다. */
   turnAt: number;
+  /** ★★**말을 건 때의 화면 주소** (사용자 지시 2026-09-07). 턴이 도는 동안 앱 액션의 「지금 자리」다 —
+   *  사용자가 중간에 탭을 옮겨도 조수는 이 자리를 기준으로 판단한다 (`lib/promptEdit.alignToTurn`).
+   *  자리를 옮기는 액션이 성공하면 따라간다 (`store/queue.runAction`). */
+  turnAddr: Addr | null;
 
   /** 지금 공급자가 주는 모델 목록. ★설정 화면과 채팅 칩이 **같은 것**을 본다 —
    *  두 곳에서 따로 받아 오면 한쪽만 갱신돼 서로 다른 목록을 보여 준다 */
@@ -332,6 +371,7 @@ export const useLlm = create<S>((set, get) => ({
   unread: false,
   setUnread: (v) => set({ unread: v }),
   turnAt: 0,
+  turnAddr: null,
 
   async loadConfig() {
     try {
@@ -507,7 +547,13 @@ export const useLlm = create<S>((set, get) => ({
       const wire = [...get().wire, m];
       set({ wire, lines: linesOf(wire) });
     };
-    push({ role: "user", content: [{ type: "text", text }] });
+    /* ★★**말을 건 때의 화면 주소를 함께 싣는다** (사용자 지시 2026-09-07: *"유저가 채팅 보내는 시점에
+       해당 메시지에 현재 보고 있던 화면 경로를 같이 보내. 중간에 전환해도 llm 은 보낸 시점의 화면
+       기준으로 판단하게"*). 숨은 글 조각이라 화면에는 안 보이고, 공급자에게는 본문으로 간다.
+       ★대화에 남긴다 — 도구 루프의 뒤 바퀴와 다음 턴에도 같은 주소가 실려야 한다. */
+    const { screenAddrText } = await import("../lib/promptEdit");
+    const addr = screenAddrText();
+    push({ role: "user", content: [{ type: "text", text }, { type: "text", text: addr, hidden: true }] });
     /* ★이름은 조수가 첫 턴에 `name_chat` 으로 붙인다 (`NAME_FIRST`) */
     // ★★**도는 중에도 말을 걸 수 있다** (사용자 지시 2026-08-15).
     //   CLI 는 **그 턴 안으로 곧바로 들어간다**(`mode: "steer"`). 못 받는 경우에만 줄을
@@ -515,7 +561,7 @@ export const useLlm = create<S>((set, get) => ({
     if (get().sending) {
       void save(get());
       if (useCli.getState().engine === "cli") {
-        const r = await cliPost(text, get()).catch(() => null);
+        const r = await cliPost(text, get(), addr).catch(() => null);
         if (r?.mode === "steer") return; // 도는 턴에 들어갔다 — 줄 세울 것 없다
       }
       set({ queued: [...get().queued, text] });
@@ -532,7 +578,11 @@ export const useLlm = create<S>((set, get) => ({
       set({ wire, lines: linesOf(wire) });
       saveSoon(); // ★턴 도중의 줄도 파일에 남는다 (`saveSoon` 머리 주석)
     };
-    set({ sending: true, error: "", turnAt: Date.now() });
+    /* ★이 턴의 주소는 **마지막 사용자 말에 실린 것**이다 — `send` 가 붙였고, 줄을 세웠다가 오는
+       말(`drain`)도 그 줄에 제 주소를 이미 달고 있다. 화면을 지금 다시 읽지 않는다. */
+    const { parseAddrText } = await import("../lib/promptEdit");
+    const addrLine = lastUserAddr(get().wire);
+    set({ sending: true, error: "", turnAt: Date.now(), turnAddr: addrLine ? parseAddrText(addrLine) : null });
     // ★★**말을 건 그 자리에서 저장한다** (사용자 지적 2026-08-15). 예전에는 턴이 끝나야
     //   저장해서, 도는 중에 앱을 다시 켜면 그 대화가 **목록에 아예 없었다.** 그러면
     //   「마지막 대화 복구」가 엉뚱한 옛 대화를 열고, 오늘 한 일이 사흘 전 대화에 붙는다.
@@ -541,7 +591,7 @@ export const useLlm = create<S>((set, get) => ({
     // ★로컬 CLI 로 도는 턴 — 도구 루프를 **저쪽이** 돈다. 우리는 흘러오는 것을 옮겨 적을 뿐이다
     if (useCli.getState().engine === "cli") {
       try {
-        const r = await cliPost(text, get());
+        const r = await cliPost(text, get(), addrLine);
         // ★이 턴의 번호를 받아 적어 둔다 — 소켓이 **한 줄도 못 받고** 끊겨도, 붙을 때
         //   "그 턴의 놓친 줄"을 되받을 수 있다 (`lib/cliCursor.ts`)
         if (r?.run) noteCliRun(r.run);
@@ -553,6 +603,8 @@ export const useLlm = create<S>((set, get) => ({
       return; // 끝은 `turn_end` 가 알린다 (cliEvent)
     }
 
+    // ★이 턴 동안은 한 값으로 간다 — 첫 바퀴에서 이름이 붙어도 다음 바퀴의 앞부분이 같아야 캐시가 산다 (`NAME_FIRST` 의 ★★주)
+    const nameFirst = !get().title;
     try {
       for (let round = 0; round < MAX_ROUNDS; round++) {
         if (abort) break;
@@ -566,8 +618,8 @@ export const useLlm = create<S>((set, get) => ({
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            system: SYSTEM + (get().title ? "" : NAME_FIRST),
-            messages: forProvider(get().wire),
+            system: SYSTEM,
+            messages: withNameFirst(forProvider(get().wire), nameFirst),
             tools: specs.map((t) => ({ name: t.name, description: t.description, schema: t.inputSchema })),
           }),
         });
@@ -791,12 +843,13 @@ export function cliEvent(ev: Record<string, any>, agent = "claude-code") {
 /** CLI 에 말을 거는 자리 — **여기 하나뿐이다** (새 턴이든 도는 턴에 끼워 넣기든 같은 창구).
  *  백엔드가 `mode` 로 무엇이 됐는지 알려 준다: `start` 새 턴 · `steer` 도는 턴에 들어감 ·
  *  `busy` 못 끼워 넣음(부른 쪽이 줄을 세운다). */
-function cliPost(text: string, s: S) {
+function cliPost(text: string, s: S, addr = "") {
   return api<{ run?: string; mode?: string; session?: string }>("/api/cli/run", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
-      prompt: text,
+      // ★CLI 는 글 한 덩이를 받는다 — 화면 주소를 앞줄에 붙인다 (API 경로의 숨은 조각과 같은 것)
+      prompt: addr ? `${addr}\n\n${text}` : text,
       system: SYSTEM + (s.title ? "" : NAME_FIRST),
       exe: useCli.getState().exe ?? "",
       // ★어느 CLI 인지 실어 보낸다 — 실행 깃발도 흘러오는 모양도 서로 다르다

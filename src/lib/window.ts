@@ -56,6 +56,61 @@ export const appWindow = {
   async startResize(dir: ResizeDir) {
     (await win())?.startResizeDragging(dir as never);
   },
+  /** ★★**최대화 상태에서 제목줄을 끌면 복원하고 그대로 끌린다** (사용자 제보 2026-09-07).
+   *
+   *  왜 안 됐나: `decorations: false` 라 tao 가 창에서 캡션 스타일(WS_CAPTION)을 떼어 낸다. 윈도우가
+   *  「최대화된 창의 제목줄을 끌면 복원」을 해 주는 것은 **진짜 캡션이 있는 창**뿐이고, Tauri 의
+   *  `startDragging` 은 `WM_NCLBUTTONDOWN(HTCAPTION)` 을 흉내 내는 가짜 메시지라 최대화된 창에서는
+   *  아무 일도 안 한다 (tao `drag_window`). Electron 은 캡션 스타일을 남겨 두어 공짜로 되던 동작이다.
+   *  ★그래서 우리가 한다: 커서가 제목줄에서 차지하던 **가로 비율**을 기억 → 복원 → 복원된 창 너비에
+   *    그 비율을 곱한 만큼 커서 왼쪽에 오도록 창을 옮김 → 드래그 시작. 커서 아래 그 자리를 잡은 채로
+   *    끌리므로 윈도우 기본 동작과 같아 보인다.
+   *  ★좌표는 **논리 픽셀**로 맞춘다 — 브라우저의 `screenX` 도 논리 좌표라 배율을 따로 곱지 않는다.
+   *  ★권한: unmaximize · set-position · start-dragging (`capabilities/default.json`, 이미 있다). */
+  async dragFromMaximized(cursor: { screenX: number; screenY: number; ratioX: number; offsetY: number }) {
+    try {
+      const w = await win();
+      if (!w) return;
+      const { LogicalPosition, PhysicalPosition, PhysicalSize } = await import("@tauri-apps/api/dpi");
+      const scale = await w.scaleFactor();
+      if (await w.isMaximized()) {
+        /* ★★**껍데기가 한 번에 한다** (사용자 지적 2026-09-07: *"커서랑 헤더가 잠깐 불일치했다가 돌아와서
+           튀듯이 움직임"*). `unmaximize → setPosition → startDragging` 은 IPC 세 번 사이에 창이 옛 자리에
+           복원된 채 보였다. `drag_restore` 는 복원 사각형을 커서 아래로 잡아 복원과 끌기 시작을 한 호출로
+           한다 (`src-tauri/src/window_edge.rs`). 그쪽이 실패하면 예전 길로. */
+        try {
+          const { invoke } = await import("@tauri-apps/api/core");
+          await invoke("drag_restore", { ratioX: cursor.ratioX, offsetY: cursor.offsetY });
+          return;
+        } catch (e) {
+          logLine("warn", "창", `drag_restore 실패 — 화면 쪽으로 되돌림: ${String(e)}`);
+        }
+        await w.unmaximize();
+        const size = await w.outerSize();
+        const width = size.width / scale;
+        await w.setPosition(new LogicalPosition(cursor.screenX - cursor.ratioX * width, cursor.screenY - cursor.offsetY));
+      } else if (vFitted && vFitBack) {
+        /* ★★**세로 최대화**(위·아래 테두리 더블클릭, `fitVertical`)도 같은 몸짓으로 되돌린다 (실측 2026-09-07:
+           사용자가 「더블클릭 확장」이라 부른 것이 이쪽이었다 — 로그의 창 크기가 1440×1400, 너비는 그대로).
+           윈도우도 세로 최대화 창의 제목줄을 끌면 원래 높이로 되돌린다. 너비는 안 바뀌므로 x 는 그대로 두고,
+           제목줄이 커서 아래에 남도록 y 만 맞춘다. 되돌릴 높이는 `fitVertical` 이 적어 둔 것이다. */
+        const pos = await w.outerPosition();
+        const size = await w.outerSize();
+        const back = vFitBack;
+        vFitted = false;
+        await w.setSize(new PhysicalSize(size.width, back.h));
+        await w.setPosition(new PhysicalPosition(pos.x, Math.round((cursor.screenY - cursor.offsetY) * scale)));
+      }
+      await w.startDragging();
+    } catch (e) {
+      console.error("[window] 끌어 복원하지 못했습니다:", e);
+      logLine("error", "창", `dragFromMaximized 실패: ${String(e)}`);
+    }
+  },
+  /** 세로로 늘려 둔 상태인가 — 제목줄의 동기 판정에 쓴다 (`fitVertical` 이 적는 값) */
+  isVFitted(): boolean {
+    return vFitted;
+  },
   /** ★★**위·아래 테두리 더블클릭 = 세로로만 화면 끝까지** (사용자 지적 2026-08-28:
    *  *"윈도우 앱들은 다 기본으로 되는데 우린 안 된다"*).
    *

@@ -213,6 +213,12 @@ export function AiSettings() {
   const [effort, setEffort] = useState("");
   /** 지금 고른 모델의 추론 명세. 목록에 없으면(직접 입력) 단계 칸도 안 뜬다 */
   const picked = list.find((m) => m.id === model);
+  /** ★★**로컬 서버에 없는 모델**을 고른 채다 (사용자 지시 2026-09-07: *"존재하지 않는 모델을 선택창에
+   *  걸어놓으면 헷갈림. 모델이 없다고 띄우던가. 로컬 모델은 존재 여부를 확실히 알 수 있으니까"*).
+   *  원격 공급자의 목록은 추천만 추린 것이라(오픈라우터) 목록 밖 = 없는 모델이 아니지만, 로컬은
+   *  서버가 실제로 올린 모델 전부를 주므로 목록 밖이면 **정말 없는 것**이다. 서버가 죽어 목록을
+   *  못 받았을 때(`listErr`)는 그 사유가 따로 뜨므로 여기서 겹쳐 말하지 않는다. */
+  const gone = cfg?.provider === "local" && !!model && !loading && !listErr && !picked;
   const efforts = picked?.efforts ?? [];
 
   const runVerify = async () => {
@@ -414,8 +420,11 @@ export function AiSettings() {
               }}
               style={{ ...field, flex: 1, opacity: list.length ? 1 : 0.6 }}
             >
-              {/* ★쓰던 모델이 목록에 없어도 사라지지 않게 맨 위에 남긴다 (설정을 말없이 바꾸지 않는다) */}
-              {model && !list.some((m) => m.id === model) && <option value={model}>{model}</option>}
+              {/* ★쓰던 모델이 목록에 없어도 사라지지 않게 맨 위에 남긴다 (설정을 말없이 바꾸지 않는다).
+                  ★로컬에서 정말 없는 모델이면 그 사실을 이름 옆에 적는다 (`gone` 의 ★★주) */}
+              {model && !list.some((m) => m.id === model) && (
+                <option value={model}>{model}{gone ? `  ·  ${t("settings.modelGone")}` : ""}</option>
+              )}
               {!model && (
                 <option value="">
                   {/* ★힌트 모델 이름을 여기 적지 않는다 — 고른 것처럼 보이는데 빈 값이었다 (2026-08-30) */}
@@ -438,6 +447,11 @@ export function AiSettings() {
           {listErr && (
             <span data-llm-models-err style={{ fontSize: "var(--text-2xs)", color: "var(--ink-faint)" }}>
               {listErr}
+            </span>
+          )}
+          {gone && (
+            <span data-llm-model-gone style={{ fontSize: "var(--text-2xs)", color: "var(--err-ink)" }}>
+              {t("settings.modelGoneHint")}
             </span>
           )}
           <AskForModel url={cfg?.support ?? ""} />

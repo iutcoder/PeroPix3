@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { useI18n } from "../i18n";
 import { Icon } from "./Icon";
 import { useImageInput } from "../store/imageInput";
+import { useUi } from "../store/ui";
 import {
   MIN_RECT,
   SAFE_MARGIN,
@@ -52,7 +53,9 @@ export function MaskEditor() {
   /** 붓이 닿을 자리를 미리 보여 주는 판 (사용자 지시 2026-08-19) */
   const cursorRef = useRef<HTMLCanvasElement>(null);
   const [size, setSize] = useState({ w: 0, h: 0 });
-  const [brush, setBrush] = useState(30);
+  // ★붓 굵기는 ui 스토어에 저장된다 — 열 때마다 되돌아가지 않게 (`store/ui` 의 `maskBrush` ★주)
+  const brush = useUi((s) => s.maskBrush);
+  const setBrush = useUi((s) => s.setMaskBrush);
   const [erase, setErase] = useState(false);
   /** 이미 칠한 칸 — 다시 칠하지 않는다 (v2 `paintedCells`) */
   const painted = useRef(new Set<string>());

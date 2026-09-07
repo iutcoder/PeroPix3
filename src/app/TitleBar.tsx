@@ -1,5 +1,5 @@
 import { useI18n } from "../i18n";
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type MouseEvent as ReactMouseEvent, type ReactNode } from "react";
 import { Icon } from "../components/Icon";
 import { appWindow } from "../lib/window";
 import { useWs } from "../store/workspace";
@@ -9,6 +9,10 @@ import { useHealth } from "../store/health";
  *
  *  - 빈 영역 드래그 = 창 이동          (`data-tauri-drag-region`)
  *  - 빈 영역 더블클릭 = 최대화 토글    (드래그 영역이 자동 처리)
+ *  - ★최대화 상태에서 끌면 복원 + 이어서 이동 — 이것만은 우리가 한다 (`appWindow.dragFromMaximized`,
+ *    사용자 제보 2026-09-07: 캡션 스타일이 없는 창이라 윈도우가 안 해 준다). 최대화 상태에서는
+ *    `mousedown` 을 여기서 받아 Tauri 의 드래그 스크립트에 넘기지 않고, 실제로 몇 px 끌었을 때만
+ *    복원한다 — 누르자마자 복원하면 더블클릭(복원 토글)이 「복원 → 다시 최대화」로 어긋난다.
  *  - 최소화 / 최대화·복원 / 닫기 버튼
  *  - 최대화 상태에 따라 아이콘이 바뀐다
  *
@@ -20,16 +24,67 @@ export function TitleBar({ left, right }: { left?: ReactNode; right?: ReactNode 
 
   useEffect(() => {
     let un: (() => void) | undefined;
+    let timer: ReturnType<typeof setTimeout> | undefined;
     (async () => {
       setMaxed(await appWindow.isMaximized());
-      un = await appWindow.onResized(async () => setMaxed(await appWindow.isMaximized()));
+      /* ★★크기 변경 사건이 올 때 `isMaximized()` 가 **아직 false** 인 때가 있다 (실측 2026-09-07: 더블클릭
+         최대화 뒤 제목줄을 눌렀는데 `maxed=false` 로 찍혔다). 그 뒤로 사건이 다시 안 오므로 잠깐 뒤 한 번
+         더 묻는다. 누르는 순간의 판정은 아래 `isMaximizedNow` 가 창 크기로도 본다. */
+      un = await appWindow.onResized(async () => {
+        setMaxed(await appWindow.isMaximized());
+        clearTimeout(timer);
+        timer = setTimeout(async () => setMaxed(await appWindow.isMaximized()), 250);
+      });
     })();
-    return () => un?.();
+    return () => {
+      un?.();
+      clearTimeout(timer);
+    };
   }, []);
+  const maxedRef = useRef(false);
+  maxedRef.current = maxed;
+  /** 누르는 순간의 동기 판정 — 스토어 값이 늦어도 창 크기로 본다. **세로만 늘린 창**(위·아래 테두리
+   *  더블클릭)도 끌면 되돌릴 대상이다 (실측 2026-09-07) — 높이가 작업 영역을 꽉 채웠으면 그렇다. */
+  const isMaximizedNow = () =>
+    maxedRef.current ||
+    appWindow.isVFitted() ||
+    (window.innerWidth >= window.screen.availWidth - 1 && window.innerHeight >= window.screen.availHeight - 1) ||
+    window.innerHeight >= window.screen.availHeight - 1;
+
+  /** 최대화 상태의 제목줄 누름 — 드래그 영역이 아닌 곳(단추·글)은 그대로 둔다 */
+  const onDragDown = (e: ReactMouseEvent<HTMLElement>) => {
+    if (e.button !== 0 || !isMaximizedNow()) return;
+    const el = e.target as HTMLElement | null;
+    if (!el?.hasAttribute?.("data-tauri-drag-region")) return;
+    /* ★Tauri 가 주입한 스크립트(document 의 mousedown)는 이 창에서 죽은 드래그를 시작하므로 막는다 */
+    e.stopPropagation();
+    e.preventDefault();
+    if (e.detail === 2) {
+      void appWindow.toggleMaximize();
+      return;
+    }
+    const header = e.currentTarget.getBoundingClientRect();
+    const ratioX = header.width ? e.clientX / header.width : 0.5;
+    const offsetY = e.clientY - header.top;
+    const x0 = e.clientX;
+    const y0 = e.clientY;
+    const move = (m: MouseEvent) => {
+      if (Math.abs(m.clientX - x0) < 4 && Math.abs(m.clientY - y0) < 4) return;
+      stop();
+      void appWindow.dragFromMaximized({ screenX: m.screenX, screenY: m.screenY, ratioX, offsetY });
+    };
+    const stop = () => {
+      window.removeEventListener("mousemove", move, true);
+      window.removeEventListener("mouseup", stop, true);
+    };
+    window.addEventListener("mousemove", move, true);
+    window.addEventListener("mouseup", stop, true);
+  };
 
   return (
     <header
       data-tauri-drag-region
+      onMouseDown={onDragDown}
       style={{
         height: 34,
         flexShrink: 0,

@@ -194,6 +194,23 @@ def _retire(root: Path, paths: list[Path]) -> None:
             raise ValueError("옛 파일을 휴지통으로 못 보내 덮어쓰지 않았습니다")
 
 
+def dest_dir(root: Path, items: list[Item], mode: str, dest: str = "") -> Path | None:
+    """이 설정으로 돌리면 결과가 **어느 폴더**에 쓰이나 — 만들지는 않는다.
+
+    ★★변환(`convert`)과 화면의 「저장될 위치」 표시가 **같은 함수**를 본다 (사용자 지시 2026-09-07:
+      「자동 폴더 열기」 대신 지금 옵션으로 저장될 위치와 폴더 열기 단추). 따로 셈하면 보여 준 자리와
+      실제로 쓴 자리가 갈린다. 모르면 None (자리를 모르는 그림뿐인데 폴더도 안 골랐을 때)."""
+    if mode == "folder":
+        if not dest:
+            return None
+        p = Path(dest)
+        return p if p.is_absolute() else files_mod.under(root, dest)
+    first = next((_src_of(root, it) for it in items if _src_of(root, it)), None)
+    if first is None:
+        return None
+    return first.parent / SUB_DIR if mode == "sub" else first.parent
+
+
 def convert(
     root: Path,
     items: list[Item],
@@ -231,20 +248,14 @@ def convert(
     if fmt not in ("png", "webp"):
         raise ValueError("지원하지 않는 형식입니다")
 
+    # ★자리는 `dest_dir` 이 정한다 (화면의 「저장될 위치」와 같은 함수).
+    #   `folder`: 고른 경로가 **절대 경로**면 그대로 — 윈도우 폴더 찾기로 고른 것이라 아웃풋 루트 밖일 수
+    #   있다 (`files.pick_dir` 의 ★주). `sub`: **첫 그림이 있는 폴더 아래에 하나만** (사용자 지시 2026-08-23) —
+    #   예전에는 그림마다 자기 폴더 밑에 `output/` 을 만들어 결과가 폴더마다 흩어졌다.
     out_dir: Path | None = None
-    if mode == "folder":
-        # ★★고른 경로가 **절대 경로**면 그대로 쓴다 — 윈도우 폴더 찾기로 고른 것이라
-        #   아웃풋 루트 밖일 수 있다 (`files.pick_dir` 의 ★주). 상대 경로는 예전대로 루트 아래.
-        p = Path(dest)
-        out_dir = p if p.is_absolute() else files_mod.under(root, dest)
-        out_dir.mkdir(parents=True, exist_ok=True)
-    elif mode == "sub":
-        # ★★**첫 그림이 있는 폴더 아래에 하나만** 만든다 (사용자 지시 2026-08-23).
-        #   예전에는 그림마다 자기 폴더 밑에 `output/` 을 만들어서, 여러 폴더에서 고른 것을
-        #   한 번에 바꾸면 결과가 폴더마다 흩어졌다.
-        first = next((_src_of(root, it) for it in items if _src_of(root, it)), None)
-        if first is not None:
-            out_dir = first.parent / SUB_DIR
+    if mode in ("folder", "sub"):
+        out_dir = dest_dir(root, items, mode, dest)
+        if out_dir is not None:
             out_dir.mkdir(parents=True, exist_ok=True)
 
     results = []

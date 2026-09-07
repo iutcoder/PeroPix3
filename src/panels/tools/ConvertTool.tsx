@@ -10,6 +10,8 @@ import { toast } from "../../store/toast";
 import { Icon } from "../../components/Icon";
 import { Help } from "../../components/Tip";
 import { DragGhost } from "../../cards/DragGhost";
+import { FolderOpenButton } from "../../components/FolderOpenButton";
+import { ClearButton } from "../../components/ClearButton";
 
 /** 이름 변환 — **형식과 이름을 한 번에** 바꾼다 (v2 `보조 도구 › 이미지 변환`).
  *
@@ -26,7 +28,16 @@ type Q = { items: Dropped[]; add: (x: Dropped[]) => void; clear: () => void };
 /** 파일 관리에서 고른 것을 여기로 보내는 통로 — 창구를 둘로 만들지 않으려는 것 */
 export const useConvertQueue = create<Q>((set, get) => ({
   items: [],
-  add: (x) => set({ items: [...get().items, ...x] }),
+  /* ★★**파일명 차례로 세운다** (사용자 지시 2026-09-07: *"일괄변환 화면에서 파일명 순으로 정렬시켜.
+       옛날에 생성한게 더 위로 오게. 지금은 다 섞임"*). 보내는 쪽은 고른 차례·응답 차례로 넘겨서
+       목록이 섞였다. 생성물 이름에는 번호가 있으므로 숫자를 아는 비교로 세우면 옛것이 위다.
+     ★더할 때만 세운다 — 그 뒤 사람이 ↑↓·드래그로 바꾼 차례는 그대로다 (번호가 차례를 따른다). */
+  add: (x) =>
+    set({
+      items: [...get().items, ...x].sort((a, b) =>
+        a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: "base" }),
+      ),
+    }),
   clear: () => set({ items: [] }),
 }));
 
@@ -60,13 +71,37 @@ export function ConvertTool() {
   const [done, setDone] = useState(0);
   const [rows, setRows] = useState<Row[]>([]);
   const [probes, setProbes] = useState<Probe[]>([]);
-  const openAfter = useUi((s) => s.convertOpenFolder);
-  const setOpenAfter = useUi((s) => s.setConvertOpenFolder);
+  /* ★★「끝나면 폴더 열기」는 걷었다 (사용자 지시 2026-09-07). 그 자리에 **지금 옵션으로 저장될 위치**와
+     「폴더 열기」 단추를 둔다 — 자리는 서버가 변환과 같은 함수로 정해 준다 (`/api/tools/convert-dest`).
+     ★열기는 `files.openDir` — 아직 없는 폴더(`output/`)면 서버가 있는 상위로 올라가 연다. */
+  const [saveDir, setSaveDir] = useState<string | null>(null);
   const { zone, over, pick } = useImageDrop(add);
 
   /** ★경로를 모르는 그림(브라우저 드롭)은 원본 자리를 알 수 없다 — 폴더를 골라야 한다 */
   const noHome = items.some((i) => !i.path && !i.rel);
   const needDest = mode === "folder" || noHome;
+  useEffect(() => {
+    let alive = true;
+    if (!items.length) {
+      setSaveDir(null);
+      return;
+    }
+    const effMode = noHome ? "folder" : mode;
+    void api<{ dir: string | null }>("/api/tools/convert-dest", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        items: items.map((it) => ({ name: it.name, rel: it.rel, path: it.path })),
+        mode: effMode,
+        dest: noHome || mode === "folder" ? dest : "",
+      }),
+    })
+      .then((r) => alive && setSaveDir(r.dir))
+      .catch(() => alive && setSaveDir(null));
+    return () => {
+      alive = false;
+    };
+  }, [items, mode, dest, noHome]);
 
   /** 썸네일·크기는 **목록이 바뀔 때 한 번** 물어본다. 순서만 바꾼 것은 화면에서 같이 옮긴다 */
   useEffect(() => {
@@ -141,8 +176,6 @@ export function ConvertTool() {
     const out: Row[] = [];
     try {
       for (let i = 0; i < items.length; i++) {
-        // ★마지막 장에서만 폴더를 연다 — 장마다 열면 창이 쌓인다
-        const last = i === items.length - 1;
         try {
           const r = await api<{ results: { saved?: string; error?: string; ok: boolean }[]; ok: number }>(
             "/api/tools/convert",
@@ -160,7 +193,7 @@ export function ConvertTool() {
                 // ★`dest` 는 「저장 폴더 지정」에서만 뜻이 있다 — 다른 갈래에서 실어 보내면
                 //   서버가 거절한다 (`backend/tools.convert`)
                 dest: noHome || mode === "folder" ? dest : "",
-                open_folder: openAfter && last,
+                open_folder: false,
                 // ★자리를 모르는 그림이 섞여 있으면 폴더로 몰아 준다 (위 `noHome`)
                 mode: noHome ? "folder" : mode,
               }),
@@ -175,7 +208,9 @@ export function ConvertTool() {
         setRows([...out]);
       }
       const ok = out.filter((r) => !r.error).length;
-      toast(t("tools.converted", { n: ok, f: out.length - ok }), ok === out.length ? "ok" : "warn");
+      // ★첫 실패의 까닭을 토스트에도 싣는다 (위 ★주) — 숫자만으로는 왜 실패했는지 모른다
+      const why = out.find((r) => r.error)?.error;
+      toast(t("tools.converted", { n: ok, f: out.length - ok }) + (why ? ` — ${why}` : ""), ok === out.length ? "ok" : "warn");
       if (ok) void useFiles.getState().reload();
     } finally {
       setBusy(false);
@@ -192,6 +227,19 @@ export function ConvertTool() {
         {/* ★★**목록 판 자체가 드롭존**이다 (사용자 지시 2026-08-23: 따로 두지 말고 화면
             전체에서 받기). 위에 점선 상자를 따로 두면 목록이 길 때 그 상자가 화면 밖으로
             밀려 나가, 넓은 아래쪽에 떨궈도 아무 일이 안 일어났다 (EXIF 리더와 같은 자국). */}
+        {/* ★목록 머리 — 오른쪽 끝에 「비우기」 (사용자 지시 2026-09-07). 예전에는 실행 단추 아래에
+            「목록 비우기」가 있었는데 목록과 떨어져 있어 눈에 안 띄었다 — 그 단추는 걷었다 (창구는 하나). */}
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", minHeight: 22 }}>
+          <span style={{ fontSize: "var(--text-2xs)", color: "var(--ink-faint)" }}>
+            {items.length ? t("tools.listCount", { n: items.length }) : ""}
+          </span>
+          <ClearButton
+            data-convert-clear
+            tip={t("tools.clearList")}
+            onClick={() => setItems([], [])}
+            disabled={busy || !items.length}
+          />
+        </div>
         <div
           {...zone}
           data-convert-drop
@@ -282,7 +330,11 @@ export function ConvertTool() {
                         화살표로 가리키고 글자를 밝게 둔다. */}
                     <span style={{ display: "flex", alignItems: "center", gap: 4, minWidth: 0 }}>
                       {row?.error ? (
-                        <span style={{ color: "var(--err-ink)" }}>{t("tools.rowFailed")}</span>
+                        /* ★까닭을 **보이게** 둔다 — 「실패」만 뜨면 무엇이 막혔는지 알 길이 없다 (사용자 제보 2026-09-06:
+                           덮어쓰기가 성공했는데 실패로 떴다 — 이 글자만으로는 원인을 못 좁혔다) */
+                        <span data-tip={row.error || undefined} style={{ color: "var(--err-ink)" }}>
+                          {t("tools.rowFailed")}{row.error ? ` — ${row.error}` : ""}
+                        </span>
                       ) : (
                         <>
                           <span style={{ color: "var(--ink-ghost)" }}>→</span>
@@ -426,16 +478,24 @@ export function ConvertTool() {
           )}
           {/* ★남는 것은 **지금 막힌 이유**뿐이다 — 무엇을 하는 자리인지는 라벨 옆 `?` 에 있다 */}
           {needDest && !dest && <Hint>{t("tools.needDest")}</Hint>}
-          {/* ★여는 것은 **방금 우리가 쓴 자리**뿐이다 (backend/files.py `open_dir` 주석) */}
-          <label style={lbl}>
-            <input
-              type="checkbox"
-              data-open-after
-              checked={openAfter}
-              onChange={(e) => setOpenAfter(e.target.checked)}
-            />
-            {t("tools.openAfter")}
-          </label>
+          {/* ★지금 옵션으로 **저장될 위치** + 「폴더 열기」 (사용자 지시 2026-09-07). 그림이 없거나
+              자리를 모르면 비운다 — 틀린 자리를 보여 주는 것보다 낫다. */}
+          {saveDir && (
+            <div data-convert-save-dir style={{ display: "flex", alignItems: "center", gap: "var(--sp-2)", minWidth: 0 }}>
+              <span
+                title={saveDir}
+                style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+                         fontSize: "var(--text-2xs)", color: "var(--ink-soft)", direction: "rtl", textAlign: "left" }}
+              >
+                {saveDir}
+              </span>
+              <FolderOpenButton
+                data-convert-open-dir
+                tip={t("tools.openFolder")}
+                onClick={() => void useFiles.getState().openDir(saveDir).catch((e) => toast(String(e), "warn"))}
+              />
+            </div>
+          )}
         </Section>
 
         {/* 진행바 — 돌 때만. 눌렀다는 신호이자 어디까지 갔는지다 (v2 `convertProgress`) */}
@@ -467,9 +527,6 @@ export function ConvertTool() {
         <button data-convert-run onClick={() => void run()} disabled={busy || !items.length} style={runBtn}>
           {Icon.refresh}
           {t("tools.runConvert", { n: items.length })}
-        </button>
-        <button data-convert-clear onClick={() => setItems([], [])} disabled={busy || !items.length} style={box}>
-          {t("tools.clearList")}
         </button>
       </div>
 

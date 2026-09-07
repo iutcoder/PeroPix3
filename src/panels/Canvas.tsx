@@ -386,7 +386,9 @@ function SceneActions() {
           try {
             const files = multiFiles.length > 1 ? multiFiles : [await ensureSaved()].filter((x): x is string => !!x);
             if (!files.length) return;
-            for (const f of files) await useGallery.getState().keep(ws, f);
+            // ★갤러리에서 고른 폴더로 (`BottomNav` 의 ★★주와 같은 규칙)
+            const folder = useGallery.getState().folder;
+            for (const f of files) await useGallery.getState().keep(ws, f, folder);
             toast(tr("gallery.kept"));
             useUi.getState().setMode("gallery");
           } catch (e) {
@@ -410,6 +412,17 @@ function SceneActions() {
           if (add.length) useConvertQueue.getState().add(add);
           useUi.getState().setMode("utility");
           useUi.getState().setView("tab", "tools", "convert" as never);
+        }}
+        /* ★자동검열로 보내기 (사용자 지시 2026-09-07). 검열의 `rel` 은 **아웃풋 루트** 기준이라
+           워크스페이스 이름을 앞에 붙인다 (`appActions` 의 censor_add 와 같은 규칙). 같은 장은
+           `addImages` 가 걸러 준다. 담은 뒤 검열 화면의 「검열 전」 탭으로 데려간다. */
+        onCensor={async () => {
+          const files = multiFiles.length > 1 ? multiFiles : [await ensureSaved()].filter((x): x is string => !!x);
+          if (!files.length) return;
+          const { useCensor } = await import("../store/censor");
+          await useCensor.getState().addImages(files.map((f) => ({ name: f.split("/").pop() ?? f, rel: `${ws}/${f}` })));
+          useCensor.getState().setTab("before");
+          useUi.getState().setMode("censor");
         }}
         extra={
           <>

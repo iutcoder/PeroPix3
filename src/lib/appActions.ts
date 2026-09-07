@@ -568,7 +568,7 @@ defineAction({
   desc: "★**덱의 캐릭터 카드를 어느 캐릭터 칸의 스택(순차 생성 대기줄)에 얹는다.** "
     + "화면에서 카드를 칸 위에 끌어다 놓는 것과 같다 — 생성 한 장이 끝날 때마다 다음 카드로 "
     + "돌아간다. «키키 다음에 미나도 번갈아» 가 이것이다. "
-    + "★새 칸을 만드는 것이 아니다 — 새 칸은 `apply_card` 다.",
+    + "★새 칸을 만드는 것이 아니다 — 새 칸은 `apply_card`(덱에서) 또는 `add_character`(빈 카드) 다.",
   args: {
     character: { type: "string", desc: "얹을 캐릭터 칸 — **id** (`get_workspace` 의 `characters[].id`)", required: true },
     card: { type: "string", desc: "덱의 캐릭터 카드 — 이름 또는 id (`list_cards`)", required: true },
@@ -676,7 +676,7 @@ defineAction({
      그대로 저장하던 문제를 여기서 막는다.
    ★★블록·프롬프트 편집은 **여기 없다** (설계 2-3). 블록에는 "사용자가 직접 친 글을 그대로
      NAI 에 보낸다"는 규칙이 있어서(`lib/blocks.ts` 의 `src`), 일반 편집으로 태그만 갈아
-     끼우면 **같은 시드에서 다른 그림이 나온다.** `edit_current_prompt` 가 그 규칙을 지킨다. */
+     끼우면 **같은 시드에서 다른 그림이 나온다.** `edit_style_card`·`edit_character` 가 그 규칙을 지킨다. */
 
 /** 무엇에 · 어떤 값을 걸 수 있나. ★여기 없는 이름은 **거절한다** (조용히 버리지 않는다) */
 const APPLY: Record<string, { fields: Record<string, "string" | "boolean">; label: string }> = {
@@ -702,7 +702,7 @@ defineAction({
   desc: "★**이름·잠금 같은 단순한 값을 고친다.** «씬 그룹 이름을 표정으로»·«미소 씬 잠가줘» 가 "
     + "이것이다. `what` 은 tab·sceneGroup·scene·sceneCard 중 하나이고, `patch` 에 고칠 값을 준다. "
     + "고칠 수 있는 값 — tab·sceneGroup: name / scene: name·locked / sceneCard: name·locked·folded. "
-    + "★프롬프트·블록은 여기가 아니라 `edit_current_prompt` 로 고친다.",
+    + "★프롬프트·블록은 여기가 아니라 `edit_style_card`·`edit_character`·`edit_scene` 으로 고친다.",
   args: {
     what: { type: "string", desc: '"tab" | "sceneGroup" | "scene" | "sceneCard"', required: true },
     id: { type: "string", desc: "그것의 이름 또는 id", required: true },
@@ -744,14 +744,16 @@ defineAction({
         before: undoApply("tab", hit.id, wasTab) };
     }
 
-    if (what === "set") {
+    /* ★`what` 은 낱말표의 `sceneGroup` 이다 — 옛 이름 `set` 으로 비교하고 있어 씬 그룹 이름
+       바꾸기가 씬 갈래로 떨어져 「그런 씬이 없습니다」가 났다 (2026-09-07 발견). */
+    if (what === "sceneGroup") {
       const { hit, miss } = findSet(key, String(a.tab ?? ""));
       if (!hit) return miss!;
       const wasSet = { name: hit.name };
       ws.renameSceneGroup(hit.id, String(patch.name));
       return { ok: true, did: `씬 그룹 「${hit.name}」 → ${done}`,
         at: { kind: "prompt", workspace: ws.current ?? undefined, sceneGroup: hit.id },
-        before: undoApply("set", hit.id, wasSet) };
+        before: undoApply("sceneGroup", hit.id, wasSet) };
     }
 
     /* 씬·씬카드 — ★둘 다 **씬 그룹 안**에 산다 (`sceneGroups[].cards[].cells`). 지금 보고 있는
@@ -799,6 +801,334 @@ defineAction({
       did: `씬 「${cell.name}」 → ${done}` + (patch.name ? " (파일 이름도 함께 갱신)" : ""),
       at: { kind: "prompt", workspace: ws.current ?? undefined, sceneGroup: cur.id, scene: cell.id },
       before: undoApply("scene", cell.id, wasCell),
+    };
+  },
+});
+
+/* ── 화면 카드 — 스타일 카드·캐릭터 카드·씬, 종류마다 따로 (사용자 지시 2026-09-07) ─────────
+   ★★*"카드 생성·수정·덱에 저장 모든 액션은 개별로 만들어. 카드라는 시스템으로 묶어놨는데
+     그걸 구조적으로 활용을 못하고 있는 듯."* 한 도구(`edit_current_prompt`)가 `area` 문자열로
+     셋을 갈랐고, **없는 카드에 써도 성공**이 났다 — 새 탭은 스타일 카드 없이 시작하는데
+     (`workspace.freshPrompt` 의 `styleOn: false`) 그 상태에서 `base` 에 쓰면 블록은 저장되고
+     화면에도 생성에도 안 나왔다 (`prompt.compiled` 가 `styleOn` 을 본다). 조수는 `ok` 를 받고
+     「추가했습니다」라 답했다. 빈 카드를 세우는 창구는 아예 없었다.
+   ★화면 카드는 셋이다 — 스타일 카드(베이스 프롬프트·UC 를 담는 그릇, 탭당 하나) ·
+     캐릭터 카드(N) · 씬(씬 그룹 안). 덱은 그 저장본이라 `apply_card`·`save_card` 는 `kind` 로 받는다.
+   ★★**스타일 카드가 없으면 만들고 쓴다** (사용자 결정 2026-09-07, 1안) — 캐릭터의
+     「없는 이름은 칸을 만든다」와 같은 모양이다. 결과 문장에 만든 사실을 적는다.
+   ★규칙(주소·블록 지목·보낸 시점의 화면)은 `lib/promptEdit` 하나다. */
+
+const promptAt = (set: { id: string }, area: string, label?: string) => ({
+  kind: "prompt" as const,
+  workspace: useWs.getState().current ?? undefined,
+  tab: useWs.getState().spec?.activeTab,
+  sceneGroup: set.id,
+  area,
+  ...(label ? { label } : {}),
+});
+
+/* ★인자는 **리터럴로만** 적는다 — `scripts/gen-actions.mjs` 가 소스를 읽어 뜨므로 스프레드는 안 보인다.
+   주소 셋(workspace·tab·sceneGroup)과 블록 넷(label·tags·mode·block)이 액션마다 되풀이되는 까닭이다. */
+
+defineAction({
+  id: "add_style_card",
+  title: "스타일 카드를 만듭니다",
+  desc: "★**빈 스타일 카드를 화면에 세운다** — 베이스 프롬프트·UC 를 담는 그릇이다 (탭당 하나). "
+    + "«스타일 카드 추가해»·«베이스 프롬프트 카드 만들어» 가 이것이다. 이미 있으면 거절한다 "
+    + "(내용은 `edit_style_card` 로 고친다). 덱에는 아무것도 안 남는다.",
+  args: {
+    name: { type: "string", desc: "카드 이름 (비우면 기본 이름)" },
+    workspace: { type: "string", desc: "어느 워크스페이스 — 비우면 지금 열린 것 (다르면 거절한다)" },
+    tab: { type: "string", desc: "어느 탭 — id 가 정확하다 (이름도 받는다). 비우면 말을 건 때의 탭" },
+    sceneGroup: { type: "string", desc: "어느 씬 그룹 — **id 로** 줘라 (이름은 탭마다 겹친다). 비우면 말을 건 때의 씬 그룹" },
+  },
+  confirm: "none",
+  run: async (a) => {
+    const { openAddress } = await import("./promptEdit.ts");
+    const o = openAddress(a);
+    if ("error" in o) return o;
+    const p = usePrompt.getState();
+    if (p.styleOn)
+      return err("blocked", `이미 스타일 카드 「${p.style.name}」 가 있습니다. 내용은 edit_style_card 로 고칩니다.`, { retry: "never" });
+    p.setStyleOn(true);
+    const name = String(a.name ?? "").trim();
+    if (name) {
+      const s = usePrompt.getState().style;
+      usePrompt.getState().setStyle({ ref: null, name, color: s.color });
+    }
+    const made = usePrompt.getState().style.name;
+    return {
+      ok: true, did: `${o.where}에 스타일 카드 「${made}」 를 만듦`, at: promptAt(o.set, "base"),
+      before: { sceneGroup: o.set.id, styleOff: true },
+    };
+  },
+});
+
+defineAction({
+  id: "remove_style_card",
+  title: "스타일 카드를 뺍니다",
+  desc: "★**스타일 카드를 화면에서 뺀다** — 베이스 프롬프트·UC 가 함께 빠져 생성에 안 나간다. "
+    + "블록 하나를 지우는 것은 `edit_style_card` 의 mode=\"remove\" 다. 되돌릴 수 있다.",
+  args: {
+    workspace: { type: "string", desc: "어느 워크스페이스 — 비우면 지금 열린 것 (다르면 거절한다)" },
+    tab: { type: "string", desc: "어느 탭 — id 가 정확하다 (이름도 받는다). 비우면 말을 건 때의 탭" },
+    sceneGroup: { type: "string", desc: "어느 씬 그룹 — **id 로** 줘라 (이름은 탭마다 겹친다). 비우면 말을 건 때의 씬 그룹" },
+  },
+  confirm: "ask",
+  preview: () => `스타일 카드 「${usePrompt.getState().style.name}」 와 그 안의 베이스 프롬프트·UC 가 화면에서 빠집니다 (되돌릴 수 있습니다).`,
+  run: async (a) => {
+    const { openAddress } = await import("./promptEdit.ts");
+    const o = openAddress(a);
+    if ("error" in o) return o;
+    const p = usePrompt.getState();
+    if (!p.styleOn) return err("not_found", "스타일 카드가 없습니다.", { retry: "never" });
+    const was = { name: p.style.name, ref: p.style.ref, thumb: p.style.thumb, base: p.base, baseUc: p.baseUc };
+    p.setStyleOn(false);
+    return {
+      ok: true, did: `${o.where}의 스타일 카드 「${was.name}」 를 뺌`, at: promptAt(o.set, "base"),
+      before: { sceneGroup: o.set.id, styleCard: was },
+    };
+  },
+});
+
+defineAction({
+  id: "edit_style_card",
+  title: "스타일 카드를 고칩니다",
+  desc: "★**스타일 카드(베이스 프롬프트·UC)의 블록을 고친다** — 그림체·배경·분위기·구도처럼 "
+    + "그림 전체에 걸리는 것. «그림체를 더 플랫하게»·«배경을 밤으로» 가 이것이다. "
+    + "★스타일 카드가 없으면 **만들고 쓴다** — 답에 그렇게 적힌다. 덱의 카드에는 안 닿는다. "
+    + "★답에는 어느 탭의 어느 씬 그룹을 고쳤는지가 적혀 있다 — 사용자가 보는 자리와 다르면 성공이라 말하지 말고 알려라.",
+  args: {
+    part: { type: "string", desc: '"prompt"(기본, 베이스 프롬프트) · "uc"(베이스 UC)' },
+    label: { type: "string", desc: "블록 이름 (예: 그림체). 새 블록을 붙일 때 그 이름이 된다", required: true },
+    tags: { type: "string", desc: "태그들 — 쉼표로 구분", required: true },
+    mode: { type: "string", desc: '"add"(기본, 뒤에 새 블록으로 붙임) · "replace"(지목한 블록의 태그를 갈아 끼움) · "remove"(그 블록을 걷어냄 — 되돌릴 수 있다)' },
+    block: { type: "string", desc: "어느 블록을 — **블록 id** (`get_workspace` 가 블록마다 준다). ★블록 이름은 대개 다 같으므로 id 가 정본이다. 이름이 여럿에 걸리면 고르지 않고 되묻는다" },
+    workspace: { type: "string", desc: "어느 워크스페이스 — 비우면 지금 열린 것 (다르면 거절한다)" },
+    tab: { type: "string", desc: "어느 탭 — id 가 정확하다 (이름도 받는다). 비우면 말을 건 때의 탭" },
+    sceneGroup: { type: "string", desc: "어느 씬 그룹 — **id 로** 줘라 (이름은 탭마다 겹친다). 비우면 말을 건 때의 씬 그룹" },
+  },
+  confirm: "none",
+  run: async (a) => {
+    const { openAddress, readEdit, applyEdit, editVerb } = await import("./promptEdit.ts");
+    const { dropUndoZone } = await import("./undo");
+    const o = openAddress(a);
+    if ("error" in o) return o;
+    const area = String(a.part ?? "prompt") === "uc" ? "baseUc" : "base";
+    const e = readEdit(a);
+    let p = usePrompt.getState();
+    const created = !p.styleOn;
+    if (created) {
+      p.setStyleOn(true);
+      p = usePrompt.getState();
+    }
+    const before = p[area];
+    const r = applyEdit(before, e);
+    if ("error" in r) return r;
+    p.update(area, () => r.next);
+    dropUndoZone(area === "base" ? "base-p" : "base-uc");
+    const what = area === "base" ? "베이스 프롬프트" : "베이스 UC";
+    return {
+      ok: true, area, label: e.label, at: promptAt(o.set, area, e.label),
+      did: created
+        ? `${o.where}에 스타일 카드 「${p.style.name}」 를 만들고 ${what}에 「${e.label}」 을 ${editVerb(e)}`
+        : `${o.where}의 ${what}에 「${e.label}」 을 ${editVerb(e)}`,
+      before: created ? { sceneGroup: o.set.id, styleOff: true } : { sceneGroup: o.set.id, area, blocks: before },
+      after: { sceneGroup: o.set.id, area, blocks: usePrompt.getState()[area] },
+    };
+  },
+});
+
+defineAction({
+  id: "add_character",
+  title: "캐릭터 카드를 만듭니다",
+  desc: "★**빈 캐릭터 카드를 화면에 하나 더한다** (`characters` 항목). «캐릭터 칸 하나 더»·"
+    + "«빈 캐릭터 카드 추가» 가 이것이다. 내용까지 한 번에 넣으려면 `edit_character` 에 새 이름을 주면 된다 "
+    + "(없는 이름은 만들면서 쓴다). 덱의 카드를 꽂는 것은 `apply_card` 다.",
+  args: {
+    name: { type: "string", desc: "캐릭터 이름 (비우면 「캐릭터 N」)" },
+    workspace: { type: "string", desc: "어느 워크스페이스 — 비우면 지금 열린 것 (다르면 거절한다)" },
+    tab: { type: "string", desc: "어느 탭 — id 가 정확하다 (이름도 받는다). 비우면 말을 건 때의 탭" },
+    sceneGroup: { type: "string", desc: "어느 씬 그룹 — **id 로** 줘라 (이름은 탭마다 겹친다). 비우면 말을 건 때의 씬 그룹" },
+  },
+  confirm: "none",
+  run: async (a) => {
+    const { openAddress } = await import("./promptEdit.ts");
+    const o = openAddress(a);
+    if ("error" in o) return o;
+    const name = String(a.name ?? "").trim();
+    const id = usePrompt.getState().addChar(name ? { name } : {});
+    const ch = usePrompt.getState().chars.find((c) => c.id === id);
+    if (!ch) return err("blocked", "캐릭터 카드를 만들지 못했습니다.", { retry: "never" });
+    return {
+      ok: true, character: ch.id, did: `${o.where}에 캐릭터 카드 「${ch.name}」 를 만듦`,
+      at: promptAt(o.set, ch.name),
+      before: { sceneGroup: o.set.id, created: ch.id },
+    };
+  },
+});
+
+defineAction({
+  id: "edit_character",
+  title: "캐릭터 카드를 고칩니다",
+  desc: "★**캐릭터 카드(`characters` 항목)의 블록을 고친다** — 그 인물의 몸·머리·눈·의상·표정·포즈. "
+    + "«키키 의상 바꿔 줘» 가 이것이다. ★`character` 는 id 가 정확하다 (`get_workspace` 의 "
+    + "`characters[].id`). **없는 이름을 주면 그 카드를 만들면서 쓴다** — «뒤에 메이드 하나 세워» 는 한 번의 호출이다. "
+    + "그림 전체에 걸리는 것(배경·조명·구도·그림체)은 여기가 아니라 `edit_style_card` 다.",
+  args: {
+    character: { type: "string", desc: "캐릭터 카드 — id 또는 이름 (없는 이름이면 새로 만든다)", required: true },
+    part: { type: "string", desc: '"prompt"(기본) · "uc"(그 캐릭터의 UC)' },
+    label: { type: "string", desc: "블록 이름 (예: 그림체). 새 블록을 붙일 때 그 이름이 된다", required: true },
+    tags: { type: "string", desc: "태그들 — 쉼표로 구분", required: true },
+    mode: { type: "string", desc: '"add"(기본, 뒤에 새 블록으로 붙임) · "replace"(지목한 블록의 태그를 갈아 끼움) · "remove"(그 블록을 걷어냄 — 되돌릴 수 있다)' },
+    block: { type: "string", desc: "어느 블록을 — **블록 id** (`get_workspace` 가 블록마다 준다). ★블록 이름은 대개 다 같으므로 id 가 정본이다. 이름이 여럿에 걸리면 고르지 않고 되묻는다" },
+    workspace: { type: "string", desc: "어느 워크스페이스 — 비우면 지금 열린 것 (다르면 거절한다)" },
+    tab: { type: "string", desc: "어느 탭 — id 가 정확하다 (이름도 받는다). 비우면 말을 건 때의 탭" },
+    sceneGroup: { type: "string", desc: "어느 씬 그룹 — **id 로** 줘라 (이름은 탭마다 겹친다). 비우면 말을 건 때의 씬 그룹" },
+  },
+  confirm: "none",
+  run: async (a) => {
+    const { openAddress, readEdit, applyEdit, editVerb, findChar } = await import("./promptEdit.ts");
+    const { dropUndoZone } = await import("./undo");
+    const o = openAddress(a);
+    if ("error" in o) return o;
+    const key = String(a.character ?? "").trim();
+    if (!key) return err("unknown_field", "character 를 주세요.");
+    const f = findChar(key);
+    if ("error" in f) return f;
+    let created = "";
+    let id: string;
+    if ("none" in f) {
+      created = usePrompt.getState().addChar({ name: key });
+      id = created;
+    } else id = f.hit.id;
+    const field = String(a.part ?? "prompt") === "uc" ? ("uc" as const) : ("prompt" as const);
+    const e = readEdit(a);
+    const ch = usePrompt.getState().chars.find((c) => c.id === id);
+    if (!ch) return err("blocked", `캐릭터 카드를 만들지 못했습니다: ${key}`, { retry: "never" });
+    const before = ch[field];
+    const r = applyEdit(before, e);
+    if ("error" in r) return r;
+    usePrompt.getState().updateChar(ch.id, field, () => r.next);
+    dropUndoZone(`${ch.id}-${field === "uc" ? "uc" : "p"}`);
+    const what = field === "uc" ? `${ch.name} UC` : ch.name;
+    return {
+      ok: true, character: ch.id, label: e.label, at: promptAt(o.set, ch.name, e.label),
+      did: created
+        ? `${o.where}에 캐릭터 카드 「${ch.name}」 를 만들고 「${e.label}」 을 ${editVerb(e)}`
+        : `${o.where}의 ${what}에 「${e.label}」 을 ${editVerb(e)}`,
+      before: created
+        ? { sceneGroup: o.set.id, created }
+        : { sceneGroup: o.set.id, area: ch.id, part: field, blocks: before },
+      after: { sceneGroup: o.set.id, area: ch.id, part: field, blocks: usePrompt.getState().chars.find((c) => c.id === ch.id)?.[field] ?? [] },
+    };
+  },
+});
+
+defineAction({
+  id: "edit_scene",
+  title: "씬을 고칩니다",
+  desc: "★**씬 칸 하나의 태그를 갈아 끼운다** (칸에는 블록이 하나뿐이라 태그만 준다). "
+    + "«미소 씬을 윙크로» 가 이것이다. 씬을 더하는 것은 `create_scene`, 이름·잠금은 `apply` 다.",
+  args: {
+    scene: { type: "string", desc: "씬 이름 또는 id", required: true },
+    tags: { type: "string", desc: "태그들 — 쉼표로 구분 (통째로 갈아 끼운다)", required: true },
+    workspace: { type: "string", desc: "어느 워크스페이스 — 비우면 지금 열린 것 (다르면 거절한다)" },
+    tab: { type: "string", desc: "어느 탭 — id 가 정확하다 (이름도 받는다). 비우면 말을 건 때의 탭" },
+    sceneGroup: { type: "string", desc: "어느 씬 그룹 — **id 로** 줘라 (이름은 탭마다 겹친다). 비우면 말을 건 때의 씬 그룹" },
+  },
+  confirm: "none",
+  run: async (a) => {
+    const { openAddress } = await import("./promptEdit.ts");
+    const { slotBlocksOf, makeBlock, parseSegs } = await import("./blocks.ts");
+    const { dropUndoZone } = await import("./undo");
+    const o = openAddress(a);
+    if ("error" in o) return o;
+    const set = useWs.getState().activeSceneGroup();
+    if (set?.kind !== "sceneGroup") return err("no_workspace", "열려 있는 씬 그룹이 없습니다.", { retry: "never" });
+    const key = String(a.scene ?? "").trim();
+    const tags = parseSegs(String(a.tags ?? ""));
+    const cells = set.cards.flatMap((k) => k.cells);
+    const hit = cells.find((c) => c.id === key) ?? cells.find((c) => c.name === key);
+    if (!hit)
+      return err("not_found", `그런 씬이 없습니다: ${key}`, { what: "scene", given: key, candidates: nearBy(key, cells.map((c) => c.name)) });
+    const was = hit.blocks ?? [];
+    const cur = was[0] ?? makeBlock("", [], { open: true, tags: [] });
+    useWs.getState().patchSceneGroup(set.id, {
+      cards: set.cards.map((k) => ({
+        ...k,
+        cells: k.cells.map((c) => (c.id === hit.id ? { ...c, blocks: slotBlocksOf({ ...cur, tags }) } : c)),
+      })),
+    } as never);
+    dropUndoZone(`scene-${hit.id}`);
+    return {
+      ok: true, scene: hit.name, did: `${o.where}의 씬 「${hit.name}」 을 고침`,
+      at: { ...promptAt(set, "scene", hit.name), scene: hit.id },
+      before: { sceneGroup: set.id, scene: hit.id, blocks: was },
+      after: { sceneGroup: set.id, scene: hit.id },
+    };
+  },
+});
+
+defineAction({
+  id: "save_card",
+  title: "화면의 카드를 덱에 저장합니다",
+  desc: "★**화면에 있는 카드를 덱에 새로 저장한다** — 스타일 카드(styles) · 캐릭터 카드(characters) · "
+    + "씬 카드(posesets). 배너를 덱에 끌어다 놓는 것과 같다 (그림·생성 옵션까지 함께). "
+    + "언제나 **새로 추가**이고 화면은 안 바뀐다. ★사용자가 «저장»·«덱에 넣어» 라고 말했을 때만 쓴다 — "
+    + "화면을 고치는 것이 기본이고, 저장은 사용자의 일이다.",
+  args: {
+    kind: { type: "string", desc: '"styles" | "characters" | "posesets"', required: true },
+    source: { type: "string", desc: "무엇을 — styles 는 비움(스타일 카드는 하나) · characters 는 캐릭터 카드 id · posesets 는 씬 카드 id (`get_workspace` 의 `cards[].id`)" },
+    name: { type: "string", desc: "덱에 저장될 이름 (비우면 화면의 이름)" },
+  },
+  confirm: "ask",
+  preview: (a) => `「${String(a.name ?? "").trim() || "화면의 이름"}」 으로 덱(${String(a.kind ?? "")})에 새 카드를 저장합니다.`,
+  run: async (a) => {
+    const kind = String(a.kind ?? "").trim();
+    if (!["styles", "characters", "posesets"].includes(kind))
+      return err("unknown_field", `카드 종류가 아닙니다: ${kind}`, { candidates: ["styles", "characters", "posesets"] });
+    const { saveCardWithThumb } = await import("../cards/saveCard");
+    const { kindColor } = await import("../cards/kindColor");
+    const { pickStyleOpts } = await import("./styleOpts.ts");
+    const { findChar } = await import("./promptEdit.ts");
+    const name = String(a.name ?? "").trim();
+    const src = String(a.source ?? "").trim();
+    const p = usePrompt.getState();
+    let saved: { id: string; name: string };
+    if (kind === "styles") {
+      if (!p.styleOn) return err("not_found", "화면에 스타일 카드가 없습니다.", { retry: "never" });
+      saved = await saveCardWithThumb("styles", {
+        name: name || p.style.name, color: kindColor("styles"), base: p.base, uc: p.baseUc,
+        opts: pickStyleOpts(useGen.getState().params), folder: "",
+      }, p.style.thumb);
+    } else if (kind === "characters") {
+      if (!src) return err("unknown_field", "source 에 캐릭터 카드 id 를 주세요.", { candidates: p.chars.map((c) => `${c.id}: ${c.name}`) });
+      const f = findChar(src);
+      if ("error" in f) return f;
+      if ("none" in f) return err("not_found", `그런 캐릭터 카드가 없습니다: ${src}`, { candidates: p.chars.map((c) => `${c.id}: ${c.name}`) });
+      const ch = p.chars.find((c) => c.id === f.hit.id)!;
+      saved = await saveCardWithThumb("characters", {
+        name: name || ch.name, color: kindColor("characters"), prompt: ch.prompt, uc: ch.uc, folder: "",
+      }, ch.thumb);
+    } else {
+      const set = useWs.getState().activeSceneGroup();
+      if (set?.kind !== "sceneGroup") return err("no_workspace", "열려 있는 씬 그룹이 없습니다.", { retry: "never" });
+      const card = src ? set.cards.find((k) => k.id === src) : set.cards.length === 1 ? set.cards[0] : undefined;
+      if (!card)
+        return err(src ? "not_found" : "ambiguous", src ? `그런 씬 카드가 없습니다: ${src}` : "씬 카드가 여럿입니다. source 에 id 를 주세요.", {
+          candidates: set.cards.map((k) => `${k.id}: ${k.name}`),
+        });
+      saved = await saveCardWithThumb("posesets", {
+        name: name || card.name, color: kindColor("posesets"),
+        cells: card.cells.map((c) => ({ name: c.name, blocks: c.blocks })), folder: "",
+      }, null);
+    }
+    return {
+      ok: true, id: saved.id, name: saved.name,
+      did: `덱(${kind})에 「${saved.name}」 을 새로 저장함`,
+      at: { kind: "card", cardKind: kind, id: saved.id },
+      after: { id: saved.id, name: saved.name },
     };
   },
 });
