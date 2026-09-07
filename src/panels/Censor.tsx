@@ -11,7 +11,9 @@ import { TreeRoot } from "../components/TreeRoot";
 import { onNearBottom } from "../lib/nearBottom";
 import { CensorStage } from "./censor/CensorStage";
 import { CensorSide } from "./censor/CensorSide";
-import { card, box } from "./censor/ui";
+import { card } from "./censor/ui";
+import { FolderOpenButton } from "../components/FolderOpenButton";
+import { ClearButton } from "../components/ClearButton";
 
 /** 자동 검열. **여러 장을 한 번에** 찾고 가린다 (v2 이식).
  *
@@ -217,15 +219,12 @@ export function Censor() {
         >
           {saveLabel}
         </span>
-        <button
+        <FolderOpenButton
           data-censor-open-folder
-          data-tip={t("censor.openFolder")}
+          tip={t("censor.openFolder")}
           disabled={!openTarget && openTarget !== ""}
           onClick={() => void openSaveDir()}
-          style={{ ...box, display: "grid", placeItems: "center", padding: "3px var(--sp-2)" }}
-        >
-          {Icon.folderOpen}
-        </button>
+        />
       </div>
 
       {/* ── 썸네일 띠: 지금 다루는 목록 ── */}
@@ -331,14 +330,10 @@ export function Censor() {
           </span>
         )}
         {c.tab === "before" && !!list.length && (
-          <button data-censor-clear onClick={() => c.clearImages()} style={{ ...box, flexShrink: 0 }}>
-            {t("censor.clear")}
-          </button>
+          <ClearButton data-censor-clear tip={t("censor.clear")} onClick={() => c.clearImages()} />
         )}
         {c.tab === "after" && !!list.length && (
-          <button data-censor-clear-after onClick={() => c.clearAfter()} style={{ ...box, flexShrink: 0 }}>
-            {t("censor.clear")}
-          </button>
+          <ClearButton data-censor-clear-after tip={t("censor.clear")} onClick={() => c.clearAfter()} />
         )}
       </div>
 

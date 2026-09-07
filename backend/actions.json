@@ -177,7 +177,7 @@
     },
     {
       "id": "stack_character",
-      "desc": "★**덱의 캐릭터 카드를 어느 캐릭터 칸의 스택(순차 생성 대기줄)에 얹는다.** 화면에서 카드를 칸 위에 끌어다 놓는 것과 같다 — 생성 한 장이 끝날 때마다 다음 카드로 돌아간다. «키키 다음에 미나도 번갈아» 가 이것이다. ★새 칸을 만드는 것이 아니다 — 새 칸은 `apply_card` 다.",
+      "desc": "★**덱의 캐릭터 카드를 어느 캐릭터 칸의 스택(순차 생성 대기줄)에 얹는다.** 화면에서 카드를 칸 위에 끌어다 놓는 것과 같다 — 생성 한 장이 끝날 때마다 다음 카드로 돌아간다. «키키 다음에 미나도 번갈아» 가 이것이다. ★새 칸을 만드는 것이 아니다 — 새 칸은 `apply_card`(덱에서) 또는 `add_character`(빈 카드) 다.",
       "args": {
         "character": {
           "type": "string",
@@ -223,7 +223,7 @@
     },
     {
       "id": "apply",
-      "desc": "★**이름·잠금 같은 단순한 값을 고친다.** «씬 그룹 이름을 표정으로»·«미소 씬 잠가줘» 가 이것이다. `what` 은 tab·sceneGroup·scene·sceneCard 중 하나이고, `patch` 에 고칠 값을 준다. 고칠 수 있는 값 — tab·sceneGroup: name / scene: name·locked / sceneCard: name·locked·folded. ★프롬프트·블록은 여기가 아니라 `edit_current_prompt` 로 고친다.",
+      "desc": "★**이름·잠금 같은 단순한 값을 고친다.** «씬 그룹 이름을 표정으로»·«미소 씬 잠가줘» 가 이것이다. `what` 은 tab·sceneGroup·scene·sceneCard 중 하나이고, `patch` 에 고칠 값을 준다. 고칠 수 있는 값 — tab·sceneGroup: name / scene: name·locked / sceneCard: name·locked·folded. ★프롬프트·블록은 여기가 아니라 `edit_style_card`·`edit_character`·`edit_scene` 으로 고친다.",
       "args": {
         "what": {
           "type": "string",
@@ -239,6 +239,200 @@
           "type": "object",
           "desc": "",
           "required": true
+        }
+      }
+    },
+    {
+      "id": "add_style_card",
+      "desc": "★**빈 스타일 카드를 화면에 세운다** — 베이스 프롬프트·UC 를 담는 그릇이다 (탭당 하나). «스타일 카드 추가해»·«베이스 프롬프트 카드 만들어» 가 이것이다. 이미 있으면 거절한다 (내용은 `edit_style_card` 로 고친다). 덱에는 아무것도 안 남는다.",
+      "args": {
+        "name": {
+          "type": "string",
+          "desc": "카드 이름 (비우면 기본 이름)"
+        },
+        "workspace": {
+          "type": "string",
+          "desc": "어느 워크스페이스 — 비우면 지금 열린 것 (다르면 거절한다)"
+        },
+        "tab": {
+          "type": "string",
+          "desc": "어느 탭 — id 가 정확하다 (이름도 받는다). 비우면 말을 건 때의 탭"
+        },
+        "sceneGroup": {
+          "type": "string",
+          "desc": "어느 씬 그룹 — **id 로** 줘라 (이름은 탭마다 겹친다). 비우면 말을 건 때의 씬 그룹"
+        }
+      }
+    },
+    {
+      "id": "remove_style_card",
+      "desc": "★**스타일 카드를 화면에서 뺀다** — 베이스 프롬프트·UC 가 함께 빠져 생성에 안 나간다. 블록 하나를 지우는 것은 `edit_style_card` 의 mode=\"remove\" 다. 되돌릴 수 있다.",
+      "args": {
+        "workspace": {
+          "type": "string",
+          "desc": "어느 워크스페이스 — 비우면 지금 열린 것 (다르면 거절한다)"
+        },
+        "tab": {
+          "type": "string",
+          "desc": "어느 탭 — id 가 정확하다 (이름도 받는다). 비우면 말을 건 때의 탭"
+        },
+        "sceneGroup": {
+          "type": "string",
+          "desc": "어느 씬 그룹 — **id 로** 줘라 (이름은 탭마다 겹친다). 비우면 말을 건 때의 씬 그룹"
+        }
+      }
+    },
+    {
+      "id": "edit_style_card",
+      "desc": "★**스타일 카드(베이스 프롬프트·UC)의 블록을 고친다** — 그림체·배경·분위기·구도처럼 그림 전체에 걸리는 것. «그림체를 더 플랫하게»·«배경을 밤으로» 가 이것이다. ★스타일 카드가 없으면 **만들고 쓴다** — 답에 그렇게 적힌다. 덱의 카드에는 안 닿는다. ★답에는 어느 탭의 어느 씬 그룹을 고쳤는지가 적혀 있다 — 사용자가 보는 자리와 다르면 성공이라 말하지 말고 알려라.",
+      "args": {
+        "part": {
+          "type": "string",
+          "desc": ""
+        },
+        "label": {
+          "type": "string",
+          "desc": "블록 이름 (예: 그림체). 새 블록을 붙일 때 그 이름이 된다",
+          "required": true
+        },
+        "tags": {
+          "type": "string",
+          "desc": "태그들 — 쉼표로 구분",
+          "required": true
+        },
+        "mode": {
+          "type": "string",
+          "desc": ""
+        },
+        "block": {
+          "type": "string",
+          "desc": "어느 블록을 — **블록 id** (`get_workspace` 가 블록마다 준다). ★블록 이름은 대개 다 같으므로 id 가 정본이다. 이름이 여럿에 걸리면 고르지 않고 되묻는다"
+        },
+        "workspace": {
+          "type": "string",
+          "desc": "어느 워크스페이스 — 비우면 지금 열린 것 (다르면 거절한다)"
+        },
+        "tab": {
+          "type": "string",
+          "desc": "어느 탭 — id 가 정확하다 (이름도 받는다). 비우면 말을 건 때의 탭"
+        },
+        "sceneGroup": {
+          "type": "string",
+          "desc": "어느 씬 그룹 — **id 로** 줘라 (이름은 탭마다 겹친다). 비우면 말을 건 때의 씬 그룹"
+        }
+      }
+    },
+    {
+      "id": "add_character",
+      "desc": "★**빈 캐릭터 카드를 화면에 하나 더한다** (`characters` 항목). «캐릭터 칸 하나 더»·«빈 캐릭터 카드 추가» 가 이것이다. 내용까지 한 번에 넣으려면 `edit_character` 에 새 이름을 주면 된다 (없는 이름은 만들면서 쓴다). 덱의 카드를 꽂는 것은 `apply_card` 다.",
+      "args": {
+        "name": {
+          "type": "string",
+          "desc": "캐릭터 이름 (비우면 「캐릭터 N」)"
+        },
+        "workspace": {
+          "type": "string",
+          "desc": "어느 워크스페이스 — 비우면 지금 열린 것 (다르면 거절한다)"
+        },
+        "tab": {
+          "type": "string",
+          "desc": "어느 탭 — id 가 정확하다 (이름도 받는다). 비우면 말을 건 때의 탭"
+        },
+        "sceneGroup": {
+          "type": "string",
+          "desc": "어느 씬 그룹 — **id 로** 줘라 (이름은 탭마다 겹친다). 비우면 말을 건 때의 씬 그룹"
+        }
+      }
+    },
+    {
+      "id": "edit_character",
+      "desc": "★**캐릭터 카드(`characters` 항목)의 블록을 고친다** — 그 인물의 몸·머리·눈·의상·표정·포즈. «키키 의상 바꿔 줘» 가 이것이다. ★`character` 는 id 가 정확하다 (`get_workspace` 의 `characters[].id`). **없는 이름을 주면 그 카드를 만들면서 쓴다** — «뒤에 메이드 하나 세워» 는 한 번의 호출이다. 그림 전체에 걸리는 것(배경·조명·구도·그림체)은 여기가 아니라 `edit_style_card` 다.",
+      "args": {
+        "character": {
+          "type": "string",
+          "desc": "캐릭터 카드 — id 또는 이름 (없는 이름이면 새로 만든다)",
+          "required": true
+        },
+        "part": {
+          "type": "string",
+          "desc": ""
+        },
+        "label": {
+          "type": "string",
+          "desc": "블록 이름 (예: 그림체). 새 블록을 붙일 때 그 이름이 된다",
+          "required": true
+        },
+        "tags": {
+          "type": "string",
+          "desc": "태그들 — 쉼표로 구분",
+          "required": true
+        },
+        "mode": {
+          "type": "string",
+          "desc": ""
+        },
+        "block": {
+          "type": "string",
+          "desc": "어느 블록을 — **블록 id** (`get_workspace` 가 블록마다 준다). ★블록 이름은 대개 다 같으므로 id 가 정본이다. 이름이 여럿에 걸리면 고르지 않고 되묻는다"
+        },
+        "workspace": {
+          "type": "string",
+          "desc": "어느 워크스페이스 — 비우면 지금 열린 것 (다르면 거절한다)"
+        },
+        "tab": {
+          "type": "string",
+          "desc": "어느 탭 — id 가 정확하다 (이름도 받는다). 비우면 말을 건 때의 탭"
+        },
+        "sceneGroup": {
+          "type": "string",
+          "desc": "어느 씬 그룹 — **id 로** 줘라 (이름은 탭마다 겹친다). 비우면 말을 건 때의 씬 그룹"
+        }
+      }
+    },
+    {
+      "id": "edit_scene",
+      "desc": "★**씬 칸 하나의 태그를 갈아 끼운다** (칸에는 블록이 하나뿐이라 태그만 준다). «미소 씬을 윙크로» 가 이것이다. 씬을 더하는 것은 `create_scene`, 이름·잠금은 `apply` 다.",
+      "args": {
+        "scene": {
+          "type": "string",
+          "desc": "씬 이름 또는 id",
+          "required": true
+        },
+        "tags": {
+          "type": "string",
+          "desc": "태그들 — 쉼표로 구분 (통째로 갈아 끼운다)",
+          "required": true
+        },
+        "workspace": {
+          "type": "string",
+          "desc": "어느 워크스페이스 — 비우면 지금 열린 것 (다르면 거절한다)"
+        },
+        "tab": {
+          "type": "string",
+          "desc": "어느 탭 — id 가 정확하다 (이름도 받는다). 비우면 말을 건 때의 탭"
+        },
+        "sceneGroup": {
+          "type": "string",
+          "desc": "어느 씬 그룹 — **id 로** 줘라 (이름은 탭마다 겹친다). 비우면 말을 건 때의 씬 그룹"
+        }
+      }
+    },
+    {
+      "id": "save_card",
+      "desc": "★**화면에 있는 카드를 덱에 새로 저장한다** — 스타일 카드(styles) · 캐릭터 카드(characters) · 씬 카드(posesets). 배너를 덱에 끌어다 놓는 것과 같다 (그림·생성 옵션까지 함께). 언제나 **새로 추가**이고 화면은 안 바뀐다. ★사용자가 «저장»·«덱에 넣어» 라고 말했을 때만 쓴다 — 화면을 고치는 것이 기본이고, 저장은 사용자의 일이다.",
+      "args": {
+        "kind": {
+          "type": "string",
+          "desc": "",
+          "required": true
+        },
+        "source": {
+          "type": "string",
+          "desc": "무엇을 — styles 는 비움(스타일 카드는 하나) · characters 는 캐릭터 카드 id · posesets 는 씬 카드 id (`get_workspace` 의 `cards[].id`)"
+        },
+        "name": {
+          "type": "string",
+          "desc": "덱에 저장될 이름 (비우면 화면의 이름)"
         }
       }
     }

@@ -19,7 +19,8 @@ export function DragLayer() {
 
   // ★블록 저장소는 **어둠을 깔지 않는다** — 놓을 자리가 프롬프트 패널 안의 목록들이라,
   //   화면을 덮으면 정작 어디에 놓는지가 안 보인다. 칩 끌기와 같은 작은 고스트만 띄운다.
-  if (drag.kind === "blocklib") {
+  // ★보관함 **폴더**를 끌 때도 칩 하나면 된다 — 그림도 카드도 아니다
+  if (drag.kind === "blocklib" || drag.folder !== undefined) {
     return (
       <DragGhost
         x={pos.x}
@@ -37,7 +38,7 @@ export function DragLayer() {
           whiteSpace: "nowrap",
         }}
       >
-        {drag.item?.label ?? drag.block?.label}
+        {drag.folder !== undefined ? drag.folder.split("/").pop() : (drag.item?.label ?? drag.block?.label)}
       </DragGhost>
     );
   }

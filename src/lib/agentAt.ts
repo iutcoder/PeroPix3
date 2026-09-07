@@ -88,7 +88,7 @@ export async function openAt(at: AgentAt): Promise<void> {
        예전에는 `block:<블록이름>` 을 켰는데 **그 표식을 아무도 안 읽었고**, 이름이 없으면
        `params`(생성 설정)로 떨어져 *"스타일을 눌렀는데 하단 생성 설정이 강조"* 됐다.
        ★자리를 가르는 것은 `area` 다: `base`·`baseUc` 는 스타일 섹션, 그 밖은 **캐릭터 이름**
-         (`edit_current_prompt` 의 `area` 규약). 표식은 `PromptSections` 가 읽는다.
+         (`edit_style_card`·`edit_character` 의 `area` 규약). 표식은 `PromptSections` 가 읽는다.
        ★★`params` 로 떨어지지 않는다 — 갈 곳을 모르면 **패널만 편다.** 엉뚱한 자리를
          강조하는 것은 아무것도 안 하는 것보다 나쁘다. */
     const area = at.area ?? "";

@@ -35,6 +35,9 @@ export type Dragging = {
    *  ★★**HTML5 드래그를 쓰지 않는다** (머리 주석): Tauri 가 `dragDropEnabled` 로 그것을
    *    가로채므로 앱 안에서는 `dragstart` 가 안 온다. 끌기는 전부 이 포인터 판을 쓴다. */
   files?: string[];
+  /** kind 가 keep 일 때 — 보관함에서 끌고 있는 **폴더** (다른 폴더 줄에 놓으면 그 아래로 들어간다,
+   *  사용자 지시 2026-09-06). `files` 와 함께 오지 않는다. */
+  folder?: string;
   /** kind 가 blocklib · dir 가 apply 일 때 — 저장소에서 끌어낸 항목 (놓으면 **사본**이 들어간다) */
   item?: LibItem;
   /** kind 가 blocklib · dir 가 save 일 때 — 프롬프트에서 저장소로 끌어온 블록.

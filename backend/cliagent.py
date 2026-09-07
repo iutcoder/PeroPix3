@@ -232,7 +232,11 @@ def mcp_spec(backend: str) -> dict:
     return {
         "command": sys.executable,
         "args": [str(Path(__file__).resolve().parent / "mcp_stdio.py")],
-        "env": {"PEROPIX_BACKEND": backend},
+        # ★★**앱 안의 조수**라고 밝힌다 (사용자 결정 2026-09-07, 1안). 이 다리(`mcp_stdio.py`)는 바깥
+        #   에이전트용 설정(`/api/mcp/config`)과 같은 파일이라, 표식 없이는 매 요청에 「바깥」 머리글을 붙여
+        #   `name_chat` 이 거절되고(「이 도구는 PeroPix 앱 안의 조수만 씁니다」) **승인 카드도 건너뛰었다** —
+        #   앱이 띄운 CLI 엔진인데도 (실연동 2026-09-07). 바깥 설정에는 이 변수가 없으므로 그쪽 규칙은 그대로다.
+        "env": {"PEROPIX_BACKEND": backend, "PEROPIX_INSIDE": "1"},
     }
 
 

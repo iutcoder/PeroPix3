@@ -78,7 +78,9 @@ export function DropImport() {
             : withMeta;
         if (!list.length) return;
         const ws = useWs.getState().current;
-        for (const r of list) await useGallery.getState().importImage(ws, r.meta!.data!, r.name);
+        // ★★**지금 고른 폴더에** 넣는다 (사용자 지시 2026-09-06: *"특정 폴더 선택하고 드롭하면 그 폴더에"*)
+        const folder = useGallery.getState().folder;
+        for (const r of list) await useGallery.getState().importImage(ws, r.meta!.data!, r.name, folder);
         toast(list.length > 1 ? t("drop.addedMany", { n: list.length }) : t("drop.added"));
         return;
       }
@@ -162,7 +164,8 @@ function Sheet({
     if (!m?.data || busy) return;
     setBusy(true);
     try {
-      await useGallery.getState().importImage(useWs.getState().current, m.data, name);
+      // ★갤러리에서 고른 폴더로 (위 ★★주와 같은 규칙)
+      await useGallery.getState().importImage(useWs.getState().current, m.data, name, useGallery.getState().folder);
       toast(t("drop.added"));
       onClose();
     } catch (e) {

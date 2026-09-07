@@ -252,7 +252,7 @@ export function CharSection({
   }, [active]);
 
   /* ★★강조 열쇠는 **id 와 이름 둘 다** 본다 — 조수는 사람이 부르는 **이름**으로 자리를
-     가리키는데(`edit_current_prompt` 의 `area`), 화면이 아는 것은 id 다.
+     가리키는데(`edit_style_card`·`edit_character` 가 내는 `at.area`), 화면이 아는 것은 id 다.
      ★훅을 두 번 부르지 않는다: `||` 로 이으면 뒤엣것이 **조건부 호출**이 된다. */
   const char_ = useFlashAt<HTMLDivElement>([`prompt:${ch.id}`, `prompt:${ch.name}`]);
   const name = ch.name || t("cards.charN", { n: index + 1 });
