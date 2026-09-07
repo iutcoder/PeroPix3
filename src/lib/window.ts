@@ -56,6 +56,32 @@ export const appWindow = {
   async startResize(dir: ResizeDir) {
     (await win())?.startResizeDragging(dir as never);
   },
+  /** ★★**최대화 상태에서 제목줄을 끌면 복원하고 그대로 끌린다** (사용자 제보 2026-09-07).
+   *
+   *  왜 안 됐나: `decorations: false` 라 tao 가 창에서 캡션 스타일(WS_CAPTION)을 떼어 낸다. 윈도우가
+   *  「최대화된 창의 제목줄을 끌면 복원」을 해 주는 것은 **진짜 캡션이 있는 창**뿐이고, Tauri 의
+   *  `startDragging` 은 `WM_NCLBUTTONDOWN(HTCAPTION)` 을 흉내 내는 가짜 메시지라 최대화된 창에서는
+   *  아무 일도 안 한다 (tao `drag_window`). Electron 은 캡션 스타일을 남겨 두어 공짜로 되던 동작이다.
+   *  ★그래서 우리가 한다: 커서가 제목줄에서 차지하던 **가로 비율**을 기억 → 복원 → 복원된 창 너비에
+   *    그 비율을 곱한 만큼 커서 왼쪽에 오도록 창을 옮김 → 드래그 시작. 커서 아래 그 자리를 잡은 채로
+   *    끌리므로 윈도우 기본 동작과 같아 보인다.
+   *  ★좌표는 **논리 픽셀**로 맞춘다 — 브라우저의 `screenX` 도 논리 좌표라 배율을 따로 곱지 않는다.
+   *  ★권한: unmaximize · set-position · start-dragging (`capabilities/default.json`, 이미 있다). */
+  async dragFromMaximized(cursor: { screenX: number; screenY: number; ratioX: number; offsetY: number }) {
+    try {
+      const w = await win();
+      if (!w) return;
+      const { LogicalPosition } = await import("@tauri-apps/api/dpi");
+      await w.unmaximize();
+      const scale = await w.scaleFactor();
+      const size = await w.outerSize();
+      const width = size.width / scale;
+      await w.setPosition(new LogicalPosition(cursor.screenX - cursor.ratioX * width, cursor.screenY - cursor.offsetY));
+      await w.startDragging();
+    } catch (e) {
+      console.error("[window] 최대화에서 끌어 복원하지 못했습니다:", e);
+    }
+  },
   /** ★★**위·아래 테두리 더블클릭 = 세로로만 화면 끝까지** (사용자 지적 2026-08-28:
    *  *"윈도우 앱들은 다 기본으로 되는데 우린 안 된다"*).
    *
