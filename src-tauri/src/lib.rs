@@ -34,6 +34,23 @@ fn backend_url() -> String {
 
 /// 이 앱이 서 있는 자리. ★화면이 **「지금 붙은 백엔드가 내 것인가」**를 묻는 데 쓴다 —
 /// 백엔드도 같은 값을 알려 주므로(`/api/health` 의 `root`), 둘이 다르면 남의 것에 붙은 것이다.
+/// 최대화 창을 커서 아래로 한 번에 복원하고 끌기를 시작한다 — 까닭은 `window_edge::drag_restore`.
+/// `offset_y` 는 논리 픽셀로 받아 여기서 물리 픽셀로 바꾼다.
+#[tauri::command]
+fn drag_restore(window: tauri::WebviewWindow, ratio_x: f64, offset_y: f64) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        let h = window.hwnd().map_err(|e| e.to_string())?;
+        let scale = window.scale_factor().unwrap_or(1.0);
+        return window_edge::drag_restore(h.0 as isize as *mut core::ffi::c_void, ratio_x, (offset_y * scale).round() as i32);
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (window, ratio_x, offset_y);
+        Err("윈도우에서만".into())
+    }
+}
+
 #[tauri::command]
 fn app_root() -> String {
     backend::root().to_string_lossy().to_string()
@@ -170,7 +187,7 @@ pub fn run() {
 
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
-        .invoke_handler(tauri::generate_handler![backend_url, app_root, update_staged, apply_update, uptime_ms])
+        .invoke_handler(tauri::generate_handler![backend_url, app_root, update_staged, apply_update, uptime_ms, drag_restore])
         .setup(move |app| {
             // ★`apply_update` 가 새 판을 띄우기 전에 자물쇠를 놓을 수 있게 맡겨 둔다
             app.manage(InstanceLock(lock));

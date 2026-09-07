@@ -74,6 +74,17 @@ export const appWindow = {
       const { LogicalPosition, PhysicalPosition, PhysicalSize } = await import("@tauri-apps/api/dpi");
       const scale = await w.scaleFactor();
       if (await w.isMaximized()) {
+        /* ★★**껍데기가 한 번에 한다** (사용자 지적 2026-09-07: *"커서랑 헤더가 잠깐 불일치했다가 돌아와서
+           튀듯이 움직임"*). `unmaximize → setPosition → startDragging` 은 IPC 세 번 사이에 창이 옛 자리에
+           복원된 채 보였다. `drag_restore` 는 복원 사각형을 커서 아래로 잡아 복원과 끌기 시작을 한 호출로
+           한다 (`src-tauri/src/window_edge.rs`). 그쪽이 실패하면 예전 길로. */
+        try {
+          const { invoke } = await import("@tauri-apps/api/core");
+          await invoke("drag_restore", { ratioX: cursor.ratioX, offsetY: cursor.offsetY });
+          return;
+        } catch (e) {
+          logLine("warn", "창", `drag_restore 실패 — 화면 쪽으로 되돌림: ${String(e)}`);
+        }
         await w.unmaximize();
         const size = await w.outerSize();
         const width = size.width / scale;

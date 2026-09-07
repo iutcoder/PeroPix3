@@ -26,6 +26,8 @@ windows-sys = { version = "0.59", features = [
   "Win32_Foundation", "Win32_Security", "Win32_System_JobObjects", "Win32_System_Threading",
   # ★Tauri 의 크기 조절 덧창을 찾아 없앤다 (window_edge.rs)
   "Win32_UI_WindowsAndMessaging",
+  # ★최대화 창을 커서 아래로 한 번에 복원해 끌기 시작한다 (window_edge.rs 의 drag_restore)
+  "Win32_UI_Input_KeyboardAndMouse", "Win32_Graphics_Gdi",
 ] }
 
 [profile.release]

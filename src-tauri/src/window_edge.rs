@@ -54,3 +54,64 @@ pub fn drop_tauri_resize_overlay(hwnd: *mut core::ffi::c_void) -> bool {
 pub fn drop_tauri_resize_overlay(_hwnd: *mut core::ffi::c_void) -> bool {
     false
 }
+
+
+/// ★★**최대화 창을 커서 아래로 한 번에 복원하고 끌기를 시작한다** (사용자 지적 2026-09-07: *"전체 최대를 하고
+/// 헤더를 드래그할 때 커서랑 헤더가 잠깐 불일치했다가 돌아와서 앱이 튀듯이 움직임"*).
+///
+/// 화면에서 `unmaximize → setPosition → startDragging` 을 차례로 부르면 IPC 세 번 사이에 창이 **옛 자리에
+/// 복원된 채 한두 프레임 보이고** 커서 아래로 뛴다. 여기서는 `SetWindowPlacement` 으로 복원 사각형을 먼저
+/// 커서 아래로 잡고 같은 호출로 복원하므로 중간 상태가 없다. 이어서 tao 의 `drag_window` 와 같은 메시지
+/// (`WM_NCLBUTTONDOWN`·`HTCAPTION`)를 부쳐 OS 이동 루프에 넣는다.
+///
+/// `ratio_x` 는 커서가 제목줄에서 차지하던 가로 비율, `offset_y` 는 제목줄 위에서의 세로 위치(물리 픽셀).
+/// ★`rcNormalPosition` 은 **작업 영역 좌표**라(문서), 커서가 있는 모니터의 작업 영역 원점을 뺀다.
+#[cfg(windows)]
+pub fn drag_restore(hwnd: *mut core::ffi::c_void, ratio_x: f64, offset_y: i32) -> Result<(), String> {
+    use windows_sys::Win32::Foundation::{HWND, POINT, RECT};
+    use windows_sys::Win32::Graphics::Gdi::{GetMonitorInfoW, MonitorFromPoint, MONITORINFO, MONITOR_DEFAULTTONEAREST};
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::ReleaseCapture;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        GetCursorPos, GetWindowPlacement, PostMessageW, SetWindowPlacement, HTCAPTION, SW_SHOWNORMAL,
+        WINDOWPLACEMENT, WM_NCLBUTTONDOWN,
+    };
+    let hwnd = hwnd as HWND;
+    unsafe {
+        let mut pt = POINT { x: 0, y: 0 };
+        if GetCursorPos(&mut pt) == 0 {
+            return Err("GetCursorPos 실패".into());
+        }
+        let mut wp: WINDOWPLACEMENT = std::mem::zeroed();
+        wp.length = std::mem::size_of::<WINDOWPLACEMENT>() as u32;
+        if GetWindowPlacement(hwnd, &mut wp) == 0 {
+            return Err("GetWindowPlacement 실패".into());
+        }
+        let w = wp.rcNormalPosition.right - wp.rcNormalPosition.left;
+        let h = wp.rcNormalPosition.bottom - wp.rcNormalPosition.top;
+        // 작업 영역 원점 — 커서가 있는 모니터 기준
+        let mon = MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST);
+        let mut mi: MONITORINFO = std::mem::zeroed();
+        mi.cbSize = std::mem::size_of::<MONITORINFO>() as u32;
+        let (ox, oy) = if !mon.is_null() && GetMonitorInfoW(mon, &mut mi) != 0 {
+            (mi.rcWork.left, mi.rcWork.top)
+        } else {
+            (0, 0)
+        };
+        let left = pt.x - (ratio_x * w as f64).round() as i32 - ox;
+        let top = pt.y - offset_y - oy;
+        wp.rcNormalPosition = RECT { left, top, right: left + w, bottom: top + h };
+        wp.showCmd = SW_SHOWNORMAL as u32;
+        if SetWindowPlacement(hwnd, &wp) == 0 {
+            return Err("SetWindowPlacement 실패".into());
+        }
+        ReleaseCapture();
+        let lparam = ((pt.y as isize) << 16) | (pt.x as isize & 0xffff);
+        PostMessageW(hwnd, WM_NCLBUTTONDOWN, HTCAPTION as usize, lparam);
+    }
+    Ok(())
+}
+
+#[cfg(not(windows))]
+pub fn drag_restore(_hwnd: *mut core::ffi::c_void, _ratio_x: f64, _offset_y: i32) -> Result<(), String> {
+    Err("윈도우에서만".into())
+}
