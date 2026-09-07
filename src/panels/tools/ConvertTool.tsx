@@ -11,6 +11,7 @@ import { Icon } from "../../components/Icon";
 import { Help } from "../../components/Tip";
 import { DragGhost } from "../../cards/DragGhost";
 import { FolderOpenButton } from "../../components/FolderOpenButton";
+import { ClearButton } from "../../components/ClearButton";
 
 /** 이름 변환 — **형식과 이름을 한 번에** 바꾼다 (v2 `보조 도구 › 이미지 변환`).
  *
@@ -232,16 +233,12 @@ export function ConvertTool() {
           <span style={{ fontSize: "var(--text-2xs)", color: "var(--ink-faint)" }}>
             {items.length ? t("tools.listCount", { n: items.length }) : ""}
           </span>
-          <button
+          <ClearButton
             data-convert-clear
+            tip={t("tools.clearList")}
             onClick={() => setItems([], [])}
             disabled={busy || !items.length}
-            data-tip={t("tools.clearList")}
-            style={{ ...box, display: "flex", alignItems: "center", gap: 4, opacity: busy || !items.length ? 0.5 : 1 }}
-          >
-            {Icon.trash}
-            {t("tools.clear")}
-          </button>
+          />
         </div>
         <div
           {...zone}

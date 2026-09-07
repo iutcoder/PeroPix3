@@ -13,6 +13,7 @@ import { CensorStage } from "./censor/CensorStage";
 import { CensorSide } from "./censor/CensorSide";
 import { card, box } from "./censor/ui";
 import { FolderOpenButton } from "../components/FolderOpenButton";
+import { ClearButton } from "../components/ClearButton";
 
 /** 자동 검열. **여러 장을 한 번에** 찾고 가린다 (v2 이식).
  *
@@ -329,14 +330,10 @@ export function Censor() {
           </span>
         )}
         {c.tab === "before" && !!list.length && (
-          <button data-censor-clear onClick={() => c.clearImages()} style={{ ...box, flexShrink: 0 }}>
-            {t("censor.clear")}
-          </button>
+          <ClearButton data-censor-clear tip={t("censor.clear")} onClick={() => c.clearImages()} />
         )}
         {c.tab === "after" && !!list.length && (
-          <button data-censor-clear-after onClick={() => c.clearAfter()} style={{ ...box, flexShrink: 0 }}>
-            {t("censor.clear")}
-          </button>
+          <ClearButton data-censor-clear-after tip={t("censor.clear")} onClick={() => c.clearAfter()} />
         )}
       </div>
 
