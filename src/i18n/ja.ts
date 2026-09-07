@@ -628,6 +628,8 @@ export const ja: Dict = {
     effortDefault: "モデル既定",
     effortOff: "オフ",
     modelMissing: "使いたいモデルがない場合はご要望をお送りください。",
+    modelGone: "なし",
+    modelGoneHint: "ローカルサーバーにこのモデルがありません。一覧から選び直してください。",
     guide: "自分の指示",
     guidePlaceholder: "例)\n- thighhighs タグは使わない\n- 返事は短く",
     guideHint: "アシスタントに「覚えて」と言うとこの文書を書き換えます。エンジンを問わず適用され、直前の内容は data/.guide-bak/ に残ります。",

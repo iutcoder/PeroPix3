@@ -630,6 +630,8 @@ export const en = {
     effortDefault: "Model default",
     effortOff: "Off",
     modelMissing: "Model you need isn't listed? Send us a request.",
+    modelGone: "not found",
+    modelGoneHint: "The local server does not have this model. Pick one from the list.",
     guide: "Your instructions",
     guidePlaceholder: "e.g.\n- never use the thighhighs tag\n- keep replies short",
     guideHint: "Ask the assistant to remember something and it edits this. Applies to every engine. Previous versions are kept in data/.guide-bak/.",

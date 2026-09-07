@@ -649,6 +649,8 @@ export const ko: Dict = {
     effortDefault: "모델 기본값",
     effortOff: "끄기",
     modelMissing: "쓰려는 모델이 없나요? 요청해 주세요.",
+    modelGone: "없음",
+    modelGoneHint: "로컬 서버에 이 모델이 없습니다. 목록에서 다시 고르세요.",
     guide: "내 지침",
     guidePlaceholder: "예)\n- thighhighs 태그는 쓰지 않는다\n- 답은 짧게",
     guideHint: "조수에게 「기억해」 라고 하면 이 문서를 고칩니다. 엔진(API·CLI)과 무관하게 지켜집니다. 직전 내용은 data/.guide-bak/ 에 남습니다.",
