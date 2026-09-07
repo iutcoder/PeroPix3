@@ -29,6 +29,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 
 import httpx
@@ -112,7 +113,9 @@ DEFAULT_PROVIDER = "openrouter"
 #   (사용자 지시: "잠궈뒀던 로컬 llm 다시 열어줘"), 2026-09-07 에 다시 닫았다 (사용자 지시: "로컬 모델은 다시
 #   비활성화"). 닫으면 목록에서 빠지고 저장도 400 이며, 설정에 `local` 이 남아 있어도 기본 공급자로
 #   돈다 (`provider_of`). 코드·판정·설정 화면은 그대로다. ★열고 닫을 때 `test_llm` 의 개수 판정도 함께.
-LOCAL_READY = False
+#   ★실연동 테스트만 `PEROPIX_LOCAL_LLM=1` 로 문을 연다 (2026-09-07, "로컬 모델로도 테스트") — 배포·개발 앱은
+#     이 변수가 없어 닫힌 그대로다 (`qa/test-ai-cards-real.mjs` 의 LOCAL 모드가 QA 인스턴스에만 준다).
+LOCAL_READY = os.environ.get("PEROPIX_LOCAL_LLM") == "1"
 
 
 def exposed(pid: str) -> bool:
