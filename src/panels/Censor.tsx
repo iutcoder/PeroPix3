@@ -11,7 +11,7 @@ import { TreeRoot } from "../components/TreeRoot";
 import { onNearBottom } from "../lib/nearBottom";
 import { CensorStage } from "./censor/CensorStage";
 import { CensorSide } from "./censor/CensorSide";
-import { card, box } from "./censor/ui";
+import { card } from "./censor/ui";
 import { FolderOpenButton } from "../components/FolderOpenButton";
 import { ClearButton } from "../components/ClearButton";
 
