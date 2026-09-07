@@ -2,9 +2,9 @@ name: macOS port check
 
 on:
   push:
-    branches: [macos-port]
+    branches: [macos-port, macos-port-dev]
   pull_request:
-    branches: [master]
+    branches: [macos-port]
   workflow_dispatch:
 
 jobs:
