@@ -30,4 +30,13 @@ export async function sameApp(h: Health): Promise<boolean> {
 }
 
 /** 윈도우 경로는 대소문자·구분자·끝 슬래시가 흔들린다 — 뜻이 같으면 같게 본다 */
-const norm = (p: string) => p.replace(/[\\/]+$/, "").replace(/\\/g, "/").toLowerCase();
+const norm = (p: string) => {
+  /* ★`..` 도 접는다 (2026-09-07) — QA 호스트는 뿌리를 `…\PeroPix3\..\PeroPix3-qaroot` 꼴로 주는데
+     백엔드는 접힌 경로를 말하므로, 글자로 견주면 같은 자리를 다른 자리로 본다. */
+  const out: string[] = [];
+  for (const seg of p.replace(/\\/g, "/").split("/")) {
+    if (seg === "..") out.pop();
+    else if (seg !== "." && seg !== "") out.push(seg);
+  }
+  return out.join("/").toLowerCase();
+};

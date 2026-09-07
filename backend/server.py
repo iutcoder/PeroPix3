@@ -81,7 +81,11 @@ def _app_dir() -> Path:
       두 단계면 된다 — 폴더 이름으로 가른다.
     ★껍데기도 같은 규칙을 쓴다 (`src-tauri/src/backend.rs` 의 `inner`). 두 곳이 어긋나면
       앱과 백엔드가 서로 다른 창고를 본다."""
-    here = Path(__file__).resolve().parent.parent
+    # ★★`resolve()` 를 쓰지 않는다 (2026-09-07). QA 뿌리(`PeroPix3-qaroot`)는 `backend/` 가 개발 트리를
+    #   가리키는 **정션**이라 resolve 가 그것을 따라가 뿌리를 개발 트리로 잡았다 — 껍데기가 아는 자리와
+    #   달라져 화면의 「내 백엔드인가」 대조(`lib/sameApp`)가 실패하고 QA 인스턴스가 「백엔드 실패」로 죽었다.
+    #   `abspath` 는 `..` 만 접고 링크는 안 따라간다 — 껍데기가 준 자리 그대로다.
+    here = Path(os.path.abspath(__file__)).parent.parent
     return here.parent if here.name == "app" else here
 
 
