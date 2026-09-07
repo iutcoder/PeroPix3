@@ -739,7 +739,9 @@ type SendItem = { mark: string; label: string; run: () => void | Promise<void> }
  *
  *  ★목록은 `document.body` 에 띄운다 (portal). 이 줄은 그림 위에 겹쳐 있고 `overflow` 가
  *    걸린 조상이 있어서, 안에서 펼치면 잘린다.
- *  ★갈 곳이 하나뿐이면 **메뉴를 안 연다** — 한 줄짜리 목록은 누르는 수만 늘린다.
+ *  ★★갈 곳이 하나뿐이어도 **메뉴를 연다** (사용자 지시 2026-09-07: *"선택지가 하나라고 바로 실행하면
+ *    아이콘이 동일한데 동작이 달라서 헷갈림"*). 예전에는 한 줄짜리 목록이 누르는 수만 늘린다고 바로
+ *    실행했는데, 같은 아이콘이 자리마다 다른 일을 하게 되어 무엇이 일어날지 알 수 없었다.
  */
 function SendMenu({ busy, items }: { busy: boolean; items: SendItem[] }) {
   const t = useI18n((s) => s.t);
@@ -788,7 +790,7 @@ function SendMenu({ busy, items }: { busy: boolean; items: SendItem[] }) {
         disabled={busy}
         data-tip={t("act.send")}
         onClick={() => {
-          if (items.length === 1) return fire(items[0]);
+          // ★하나뿐이어도 연다 (위 ★★주)
           const r = ref.current?.getBoundingClientRect();
           if (r) setAt({ x: r.left, y: r.top });
           setOpen((v) => !v);
