@@ -710,6 +710,8 @@ export const ko: Dict = {
     keepName: "원래 이름 .{f}",
     openAfter: "끝나면 폴더 열기",
     clearList: "목록 비우기",
+    clear: "비우기",
+    listCount: "{n}장",
     rowFailed: "실패",
     exif: "EXIF 리더",
     tagger: "태거",

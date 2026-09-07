@@ -691,6 +691,8 @@ export const en = {
     keepName: "original name .{f}",
     openAfter: "Open the folder when done",
     clearList: "Clear list",
+    clear: "Clear",
+    listCount: "{n} files",
     rowFailed: "Failed",
     exif: "EXIF reader",
     tagger: "Tagger",

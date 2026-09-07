@@ -689,6 +689,8 @@ export const ja: Dict = {
     keepName: "元の名前 .{f}",
     openAfter: "終わったらフォルダーを開く",
     clearList: "リストを空にする",
+    clear: "空にする",
+    listCount: "{n}枚",
     rowFailed: "失敗",
     exif: "EXIF リーダー",
     tagger: "タガー",

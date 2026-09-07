@@ -203,6 +203,23 @@ export function ConvertTool() {
         {/* ★★**목록 판 자체가 드롭존**이다 (사용자 지시 2026-08-23: 따로 두지 말고 화면
             전체에서 받기). 위에 점선 상자를 따로 두면 목록이 길 때 그 상자가 화면 밖으로
             밀려 나가, 넓은 아래쪽에 떨궈도 아무 일이 안 일어났다 (EXIF 리더와 같은 자국). */}
+        {/* ★목록 머리 — 오른쪽 끝에 「비우기」 (사용자 지시 2026-09-07). 예전에는 실행 단추 아래에
+            「목록 비우기」가 있었는데 목록과 떨어져 있어 눈에 안 띄었다 — 그 단추는 걷었다 (창구는 하나). */}
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", minHeight: 22 }}>
+          <span style={{ fontSize: "var(--text-2xs)", color: "var(--ink-faint)" }}>
+            {items.length ? t("tools.listCount", { n: items.length }) : ""}
+          </span>
+          <button
+            data-convert-clear
+            onClick={() => setItems([], [])}
+            disabled={busy || !items.length}
+            data-tip={t("tools.clearList")}
+            style={{ ...box, display: "flex", alignItems: "center", gap: 4, opacity: busy || !items.length ? 0.5 : 1 }}
+          >
+            {Icon.trash}
+            {t("tools.clear")}
+          </button>
+        </div>
         <div
           {...zone}
           data-convert-drop
@@ -482,9 +499,6 @@ export function ConvertTool() {
         <button data-convert-run onClick={() => void run()} disabled={busy || !items.length} style={runBtn}>
           {Icon.refresh}
           {t("tools.runConvert", { n: items.length })}
-        </button>
-        <button data-convert-clear onClick={() => setItems([], [])} disabled={busy || !items.length} style={box}>
-          {t("tools.clearList")}
         </button>
       </div>
 
