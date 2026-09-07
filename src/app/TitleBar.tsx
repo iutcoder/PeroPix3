@@ -24,18 +24,34 @@ export function TitleBar({ left, right }: { left?: ReactNode; right?: ReactNode 
 
   useEffect(() => {
     let un: (() => void) | undefined;
+    let timer: ReturnType<typeof setTimeout> | undefined;
     (async () => {
       setMaxed(await appWindow.isMaximized());
-      un = await appWindow.onResized(async () => setMaxed(await appWindow.isMaximized()));
+      /* ★★크기 변경 사건이 올 때 `isMaximized()` 가 **아직 false** 인 때가 있다 (실측 2026-09-07: 더블클릭
+         최대화 뒤 제목줄을 눌렀는데 `maxed=false` 로 찍혔다). 그 뒤로 사건이 다시 안 오므로 잠깐 뒤 한 번
+         더 묻는다. 누르는 순간의 판정은 아래 `isMaximizedNow` 가 창 크기로도 본다. */
+      un = await appWindow.onResized(async () => {
+        setMaxed(await appWindow.isMaximized());
+        clearTimeout(timer);
+        timer = setTimeout(async () => setMaxed(await appWindow.isMaximized()), 250);
+      });
     })();
-    return () => un?.();
+    return () => {
+      un?.();
+      clearTimeout(timer);
+    };
   }, []);
   const maxedRef = useRef(false);
   maxedRef.current = maxed;
+  /** 누르는 순간의 동기 판정 — 스토어 값이 늦어도, 창이 작업 영역을 꽉 채우고 있으면 최대화다
+   *  (세로만 늘린 창은 너비가 모자라 여기 안 걸린다). */
+  const isMaximizedNow = () =>
+    maxedRef.current ||
+    (window.innerWidth >= window.screen.availWidth - 1 && window.innerHeight >= window.screen.availHeight - 1);
 
   /** 최대화 상태의 제목줄 누름 — 드래그 영역이 아닌 곳(단추·글)은 그대로 둔다 */
   const onDragDown = (e: ReactMouseEvent<HTMLElement>) => {
-    if (!maxedRef.current || e.button !== 0) return;
+    if (e.button !== 0 || !isMaximizedNow()) return;
     const el = e.target as HTMLElement | null;
     if (!el?.hasAttribute?.("data-tauri-drag-region")) return;
     /* ★Tauri 가 주입한 스크립트(document 의 mousedown)는 이 창에서 죽은 드래그를 시작하므로 막는다 */
