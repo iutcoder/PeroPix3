@@ -165,6 +165,16 @@ function noteError(text: string) {
 }
 
 /** 공급자에게 보낼 대화 — 오류 조각을 뺀다 (그것만 든 메시지는 통째로) */
+/** 첫 턴의 「이름부터 지어라」를 **마지막 사용자 말**에 얹는다 — 보내는 사본에만, 대화 기록에는 안 남긴다.
+ *  시스템 지침을 건드리지 않아야 프롬프트 캐시가 산다 (`NAME_FIRST` 의 ★★주). */
+export function withNameFirst(msgs: Wire[], on: boolean): Wire[] {
+  if (!on) return msgs;
+  let at = -1;
+  for (let i = msgs.length - 1; i >= 0; i--) if (msgs[i].role === "user") { at = i; break; }
+  if (at < 0) return msgs;
+  return msgs.map((m, i) => (i === at ? { ...m, content: [...m.content, { type: "text", text: NAME_FIRST }] } : m));
+}
+
 export function forProvider(wire: Wire[]): Wire[] {
   return wire
     .map((m) => ({ ...m, content: m.content.filter((b) => b.type !== "error") }))
@@ -239,8 +249,12 @@ const titleOf = (wire: Wire[]) => {
  *  ★**이름이 없을 때만** 붙인다 — 매 턴 붙이면 지침이 턴마다 달라져 프롬프트 캐시가 깨진다.
  *    CLI 는 애초에 첫 턴에만 지침을 받는다 (`cliagent.argv` 의 `--append-system-prompt`).
  *  ★안 불러도 대화는 그대로 돈다 — 그때는 목록 이름이 첫 발화로 남는다 (`titleOf`). */
+/** ★★**시스템 지침에 붙이지 않는다** — 마지막 사용자 말에 얹는다 (`withNameFirst`).
+ *  실측 2026-09-07 (로컬 llama-server, 지침 ≈11,300 토큰): 이 문장을 시스템 뒤에 붙였더니 `name_chat` 이
+ *  이름을 붙인 **다음 바퀴부터 시스템이 달라져** 프롬프트 캐시가 39% 에서 끊겼고, 11,305 토큰을 다시 처리하느라
+ *  이름 짓기에 28초·답까지 48초가 걸렸다. 지침·도구 명세가 앞에서 그대로면 그 뒤만 다시 읽는다 (0.7초). */
 const NAME_FIRST =
-  "\n\n[first turn] This chat has no name yet. Before anything else, call `name_chat` " +
+  "[first turn] This chat has no name yet. Before anything else, call `name_chat` " +
   "with a short title (about 20 characters) saying what the chat is about, " +
   "in the user's language. Then do the work.";
 
@@ -553,6 +567,8 @@ export const useLlm = create<S>((set, get) => ({
       return; // 끝은 `turn_end` 가 알린다 (cliEvent)
     }
 
+    // ★이 턴 동안은 한 값으로 간다 — 첫 바퀴에서 이름이 붙어도 다음 바퀴의 앞부분이 같아야 캐시가 산다 (`NAME_FIRST` 의 ★★주)
+    const nameFirst = !get().title;
     try {
       for (let round = 0; round < MAX_ROUNDS; round++) {
         if (abort) break;
@@ -566,8 +582,8 @@ export const useLlm = create<S>((set, get) => ({
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            system: SYSTEM + (get().title ? "" : NAME_FIRST),
-            messages: forProvider(get().wire),
+            system: SYSTEM,
+            messages: withNameFirst(forProvider(get().wire), nameFirst),
             tools: specs.map((t) => ({ name: t.name, description: t.description, schema: t.inputSchema })),
           }),
         });
