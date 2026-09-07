@@ -118,7 +118,6 @@ type Persisted = {
   weightHl: boolean;
   /** 파일 관리의 보기 — 썸네일 격자 / 이름·크기·수정일 목록 (v2 `fmViewThumbnail`·`fmViewList`) */
   fmView: "grid" | "list";
-  /** 변환이 끝나면 저장한 폴더를 연다 (v2 `convertOpenFolder`, 기본 켬) */
   /** ★★**그리는 중인 그림을 보여 줄까** (사용자 지시 2026-08-26, 기본 켬).
    *  NAI 가 생성 중에 흘려 주는 프레임을 대기 칸과 큰 그림에 깐다.
    *  ★**결과는 달라지지 않는다** — 보는 방식만 달라진다. 그래서 생성 옵션(`gen.params`)이
@@ -128,7 +127,6 @@ type Persisted = {
    *  기본은 끔 — 켜기 전의 동작(고른 자리 그대로)이 기본이다. `streamPreview` 와 같은
    *  성격(결과는 그대로, 보는 방식만)이라 같은 묶음에 둔다. */
   focusNewPending: boolean;
-  convertOpenFolder: boolean;
   /** 씬 줄의 PIP — 칸에 커서를 올리면 그 장이 떠 있는 창에 크게 뜬다 (v2 `pipModeEnabled`) */
   /** ★인핸스 창을 **마지막에 쓴 강도로** 연다 (v2 `enhanceLast`, index.html:24045).
    *  열 때마다 3 으로 되돌아가면 같은 값을 매번 다시 맞춰야 한다. 배율은 여기 없다 —
@@ -220,7 +218,6 @@ const DEFAULTS: Persisted = {
   fmView: "grid",
   streamPreview: true,
   focusNewPending: false,
-  convertOpenFolder: true,
   // v2 `enhanceLast` 의 초기값 그대로 (magnitude 3 = strength 0.5 · noise 0)
   enhanceLast: { mag: 3, adv: false, strength: 0.5, noise: 0 },
   maskBrush: 30,
@@ -290,7 +287,6 @@ type S = Persisted & {
   setArtistPrefix: (v: boolean) => void;
   setWeightHl: (v: boolean) => void;
   setFmView: (v: "grid" | "list") => void;
-  setConvertOpenFolder: (v: boolean) => void;
   setEnhanceLast: (v: { mag: number; adv: boolean; strength: number; noise: number }) => void;
   setMaskBrush: (v: number) => void;
   /** 일괄 변환의 마지막 설정을 얹는다 (한 칸씩 바뀐다) */
@@ -439,10 +435,6 @@ export const useUi = create<S>((set, get) => ({
     set({ fmView: v });
     get().commitLayout();
   },
-  setConvertOpenFolder: (v) => {
-    set({ convertOpenFolder: v });
-    get().commitLayout();
-  },
   setEnhanceLast: (v) => {
     set({ enhanceLast: v });
     get().commitLayout();
@@ -531,7 +523,7 @@ export const useUi = create<S>((set, get) => ({
     const { leftWidth, rightWidth, leftCollapsed, rightCollapsed, cols, laneSize, laneHeadW,
       laneHeight, font, textScale, importPick, aiWidth, aiCollapsed,
       notifyDone, notifySound, notifyVolume, perSlot, curated, agentAuto, agentAskHard,
-      tagSuggest, artistPrefix, weightHl, fmView, streamPreview, focusNewPending, convertOpenFolder, enhanceLast, maskBrush, convertLast, sizeLast,
+      tagSuggest, artistPrefix, weightHl, fmView, streamPreview, focusNewPending, enhanceLast, maskBrush, convertLast, sizeLast,
       laneSide, laneWidth, laneHeadH, view } = get();
     try {
       localStorage.setItem(
@@ -563,7 +555,6 @@ export const useUi = create<S>((set, get) => ({
           fmView,
           streamPreview,
           focusNewPending,
-          convertOpenFolder,
           enhanceLast,
           maskBrush,
           convertLast,

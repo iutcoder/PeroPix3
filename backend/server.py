@@ -2765,6 +2765,20 @@ async def tools_convert(body: ToolConvert):
         raise HTTPException(400, str(e))
 
 
+class ToolDest(BaseModel):
+    items: list[ToolItem] = []
+    mode: str = "sub"
+    dest: str = ""
+
+
+@app.post("/api/tools/convert-dest")
+async def tools_convert_dest(body: ToolDest):
+    """지금 옵션으로 결과가 쓰일 폴더 — 화면의 「저장될 위치」 (사용자 지시 2026-09-07).
+    ★변환과 **같은 함수**(`tools.dest_dir`)라 보여 준 자리와 실제 자리가 같다. 만들지는 않는다."""
+    d = tools_mod.dest_dir(WS_ROOT, [i.model_dump() for i in body.items], body.mode, body.dest)
+    return {"dir": str(d) if d is not None else None}
+
+
 class ToolProbe(BaseModel):
     items: list[ToolItem] = []
 

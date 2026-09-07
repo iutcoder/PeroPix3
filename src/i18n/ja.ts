@@ -687,7 +687,7 @@ export const ja: Dict = {
     pNeg: "ネガティブプロンプト",
     reorderHint: "つまみをドラッグすると並べ替えられます",
     keepName: "元の名前 .{f}",
-    openAfter: "終わったらフォルダーを開く",
+    openFolder: "フォルダーを開く",
     clearList: "リストを空にする",
     clear: "空にする",
     listCount: "{n}枚",

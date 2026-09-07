@@ -69,13 +69,37 @@ export function ConvertTool() {
   const [done, setDone] = useState(0);
   const [rows, setRows] = useState<Row[]>([]);
   const [probes, setProbes] = useState<Probe[]>([]);
-  const openAfter = useUi((s) => s.convertOpenFolder);
-  const setOpenAfter = useUi((s) => s.setConvertOpenFolder);
+  /* ★★「끝나면 폴더 열기」는 걷었다 (사용자 지시 2026-09-07). 그 자리에 **지금 옵션으로 저장될 위치**와
+     「폴더 열기」 단추를 둔다 — 자리는 서버가 변환과 같은 함수로 정해 준다 (`/api/tools/convert-dest`).
+     ★열기는 `files.openDir` — 아직 없는 폴더(`output/`)면 서버가 있는 상위로 올라가 연다. */
+  const [saveDir, setSaveDir] = useState<string | null>(null);
   const { zone, over, pick } = useImageDrop(add);
 
   /** ★경로를 모르는 그림(브라우저 드롭)은 원본 자리를 알 수 없다 — 폴더를 골라야 한다 */
   const noHome = items.some((i) => !i.path && !i.rel);
   const needDest = mode === "folder" || noHome;
+  useEffect(() => {
+    let alive = true;
+    if (!items.length) {
+      setSaveDir(null);
+      return;
+    }
+    const effMode = noHome ? "folder" : mode;
+    void api<{ dir: string | null }>("/api/tools/convert-dest", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        items: items.map((it) => ({ name: it.name, rel: it.rel, path: it.path })),
+        mode: effMode,
+        dest: noHome || mode === "folder" ? dest : "",
+      }),
+    })
+      .then((r) => alive && setSaveDir(r.dir))
+      .catch(() => alive && setSaveDir(null));
+    return () => {
+      alive = false;
+    };
+  }, [items, mode, dest, noHome]);
 
   /** 썸네일·크기는 **목록이 바뀔 때 한 번** 물어본다. 순서만 바꾼 것은 화면에서 같이 옮긴다 */
   useEffect(() => {
@@ -150,8 +174,6 @@ export function ConvertTool() {
     const out: Row[] = [];
     try {
       for (let i = 0; i < items.length; i++) {
-        // ★마지막 장에서만 폴더를 연다 — 장마다 열면 창이 쌓인다
-        const last = i === items.length - 1;
         try {
           const r = await api<{ results: { saved?: string; error?: string; ok: boolean }[]; ok: number }>(
             "/api/tools/convert",
@@ -169,7 +191,7 @@ export function ConvertTool() {
                 // ★`dest` 는 「저장 폴더 지정」에서만 뜻이 있다 — 다른 갈래에서 실어 보내면
                 //   서버가 거절한다 (`backend/tools.convert`)
                 dest: noHome || mode === "folder" ? dest : "",
-                open_folder: openAfter && last,
+                open_folder: false,
                 // ★자리를 모르는 그림이 섞여 있으면 폴더로 몰아 준다 (위 `noHome`)
                 mode: noHome ? "folder" : mode,
               }),
@@ -458,16 +480,28 @@ export function ConvertTool() {
           )}
           {/* ★남는 것은 **지금 막힌 이유**뿐이다 — 무엇을 하는 자리인지는 라벨 옆 `?` 에 있다 */}
           {needDest && !dest && <Hint>{t("tools.needDest")}</Hint>}
-          {/* ★여는 것은 **방금 우리가 쓴 자리**뿐이다 (backend/files.py `open_dir` 주석) */}
-          <label style={lbl}>
-            <input
-              type="checkbox"
-              data-open-after
-              checked={openAfter}
-              onChange={(e) => setOpenAfter(e.target.checked)}
-            />
-            {t("tools.openAfter")}
-          </label>
+          {/* ★지금 옵션으로 **저장될 위치** + 「폴더 열기」 (사용자 지시 2026-09-07). 그림이 없거나
+              자리를 모르면 비운다 — 틀린 자리를 보여 주는 것보다 낫다. */}
+          {saveDir && (
+            <div data-convert-save-dir style={{ display: "flex", alignItems: "center", gap: "var(--sp-2)", minWidth: 0 }}>
+              <span
+                title={saveDir}
+                style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+                         fontSize: "var(--text-2xs)", color: "var(--ink-soft)", direction: "rtl", textAlign: "left" }}
+              >
+                {saveDir}
+              </span>
+              <button
+                data-convert-open-dir
+                onClick={() => void useFiles.getState().openDir(saveDir).catch((e) => toast(String(e), "warn"))}
+                data-tip={t("tools.openFolder")}
+                style={{ ...box, display: "flex", alignItems: "center", gap: 4, flexShrink: 0 }}
+              >
+                {Icon.folderOpen}
+                {t("tools.openFolder")}
+              </button>
+            </div>
+          )}
         </Section>
 
         {/* 진행바 — 돌 때만. 눌렀다는 신호이자 어디까지 갔는지다 (v2 `convertProgress`) */}

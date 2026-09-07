@@ -708,7 +708,7 @@ export const ko: Dict = {
     pNeg: "네거티브 프롬프트",
     reorderHint: "손잡이를 끌면 순서가 바뀝니다",
     keepName: "원래 이름 .{f}",
-    openAfter: "끝나면 폴더 열기",
+    openFolder: "폴더 열기",
     clearList: "목록 비우기",
     clear: "비우기",
     listCount: "{n}장",

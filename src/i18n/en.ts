@@ -689,7 +689,7 @@ export const en = {
     pNeg: "Negative prompt",
     reorderHint: "Drag the handle to reorder",
     keepName: "original name .{f}",
-    openAfter: "Open the folder when done",
+    openFolder: "Open folder",
     clearList: "Clear list",
     clear: "Clear",
     listCount: "{n} files",
