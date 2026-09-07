@@ -43,11 +43,13 @@ export function TitleBar({ left, right }: { left?: ReactNode; right?: ReactNode 
   }, []);
   const maxedRef = useRef(false);
   maxedRef.current = maxed;
-  /** 누르는 순간의 동기 판정 — 스토어 값이 늦어도, 창이 작업 영역을 꽉 채우고 있으면 최대화다
-   *  (세로만 늘린 창은 너비가 모자라 여기 안 걸린다). */
+  /** 누르는 순간의 동기 판정 — 스토어 값이 늦어도 창 크기로 본다. **세로만 늘린 창**(위·아래 테두리
+   *  더블클릭)도 끌면 되돌릴 대상이다 (실측 2026-09-07) — 높이가 작업 영역을 꽉 채웠으면 그렇다. */
   const isMaximizedNow = () =>
     maxedRef.current ||
-    (window.innerWidth >= window.screen.availWidth - 1 && window.innerHeight >= window.screen.availHeight - 1);
+    appWindow.isVFitted() ||
+    (window.innerWidth >= window.screen.availWidth - 1 && window.innerHeight >= window.screen.availHeight - 1) ||
+    window.innerHeight >= window.screen.availHeight - 1;
 
   /** 최대화 상태의 제목줄 누름 — 드래그 영역이 아닌 곳(단추·글)은 그대로 둔다 */
   const onDragDown = (e: ReactMouseEvent<HTMLElement>) => {

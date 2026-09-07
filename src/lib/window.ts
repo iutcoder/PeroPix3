@@ -71,16 +71,34 @@ export const appWindow = {
     try {
       const w = await win();
       if (!w) return;
-      const { LogicalPosition } = await import("@tauri-apps/api/dpi");
-      await w.unmaximize();
+      const { LogicalPosition, PhysicalPosition, PhysicalSize } = await import("@tauri-apps/api/dpi");
       const scale = await w.scaleFactor();
-      const size = await w.outerSize();
-      const width = size.width / scale;
-      await w.setPosition(new LogicalPosition(cursor.screenX - cursor.ratioX * width, cursor.screenY - cursor.offsetY));
+      if (await w.isMaximized()) {
+        await w.unmaximize();
+        const size = await w.outerSize();
+        const width = size.width / scale;
+        await w.setPosition(new LogicalPosition(cursor.screenX - cursor.ratioX * width, cursor.screenY - cursor.offsetY));
+      } else if (vFitted && vFitBack) {
+        /* ★★**세로 최대화**(위·아래 테두리 더블클릭, `fitVertical`)도 같은 몸짓으로 되돌린다 (실측 2026-09-07:
+           사용자가 「더블클릭 확장」이라 부른 것이 이쪽이었다 — 로그의 창 크기가 1440×1400, 너비는 그대로).
+           윈도우도 세로 최대화 창의 제목줄을 끌면 원래 높이로 되돌린다. 너비는 안 바뀌므로 x 는 그대로 두고,
+           제목줄이 커서 아래에 남도록 y 만 맞춘다. 되돌릴 높이는 `fitVertical` 이 적어 둔 것이다. */
+        const pos = await w.outerPosition();
+        const size = await w.outerSize();
+        const back = vFitBack;
+        vFitted = false;
+        await w.setSize(new PhysicalSize(size.width, back.h));
+        await w.setPosition(new PhysicalPosition(pos.x, Math.round((cursor.screenY - cursor.offsetY) * scale)));
+      }
       await w.startDragging();
     } catch (e) {
-      console.error("[window] 최대화에서 끌어 복원하지 못했습니다:", e);
+      console.error("[window] 끌어 복원하지 못했습니다:", e);
+      logLine("error", "창", `dragFromMaximized 실패: ${String(e)}`);
     }
+  },
+  /** 세로로 늘려 둔 상태인가 — 제목줄의 동기 판정에 쓴다 (`fitVertical` 이 적는 값) */
+  isVFitted(): boolean {
+    return vFitted;
   },
   /** ★★**위·아래 테두리 더블클릭 = 세로로만 화면 끝까지** (사용자 지적 2026-08-28:
    *  *"윈도우 앱들은 다 기본으로 되는데 우린 안 된다"*).
