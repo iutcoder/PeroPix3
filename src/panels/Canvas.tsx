@@ -386,7 +386,9 @@ function SceneActions() {
           try {
             const files = multiFiles.length > 1 ? multiFiles : [await ensureSaved()].filter((x): x is string => !!x);
             if (!files.length) return;
-            for (const f of files) await useGallery.getState().keep(ws, f);
+            // ★갤러리에서 고른 폴더로 (`BottomNav` 의 ★★주와 같은 규칙)
+            const folder = useGallery.getState().folder;
+            for (const f of files) await useGallery.getState().keep(ws, f, folder);
             toast(tr("gallery.kept"));
             useUi.getState().setMode("gallery");
           } catch (e) {

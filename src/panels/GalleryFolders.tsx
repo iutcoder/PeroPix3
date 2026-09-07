@@ -96,10 +96,12 @@ export function GalleryFolders() {
           onClick={() => void setFolder(ws, ALL)}
           onDropFiles={(files) => void moveFiles(files, ALL)}
         />
+        {/* ★나머지는 뿌리의 **하위**다 — 깊이만큼 들여쓴다 (사용자 지시 2026-09-06) */}
         {rest.map((f) => (
           <Row
             key={f.path}
             label={f.path}
+            depth={f.path.split("/").length}
             count={f.count}
             on={folder === f.path}
             onClick={() => void setFolder(ws, f.path)}
@@ -227,6 +229,7 @@ export function GalleryFolders() {
 
 function Row({
   label,
+  depth = 0,
   count,
   on,
   onClick,
@@ -234,6 +237,8 @@ function Row({
   onDropFiles,
 }: {
   label: string;
+  /** 트리 깊이 — 뿌리 0, 그 아래 폴더 1, `a/b` 는 2. 들여쓰기만 정한다 */
+  depth?: number;
   count: number;
   on: boolean;
   onClick: () => void;
@@ -279,6 +284,7 @@ function Row({
         gap: "var(--sp-2)",
         width: "100%",
         padding: "5px var(--sp-3)",
+        paddingLeft: `calc(var(--sp-3) + ${depth * 14}px)`,
         borderRadius: "var(--r-2)",
         background: on ? "var(--surface2)" : "transparent",
         color: on ? "var(--ink)" : "var(--ink-dim)",

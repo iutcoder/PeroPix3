@@ -128,10 +128,11 @@ def adopt_stars(root: Path, files: list[str]) -> list[str]:
 def folders(root: Path) -> list[dict]:
     """보관함의 폴더들.
 
-    ★첫 줄(`""`)은 **전체**다 — 루트에 놓인 것만이 아니라 보관함에 든 전부를 센다.
-      폴더에 넣어 둔 그림이 "전체"에서 안 보이면 넣는 순간 사라진 것처럼 보인다
-      (실측 2026-08-05: 폴더에 3장을 넣었는데 전체가 0장)."""
-    out = [{"path": "", "count": sum(1 for _ in _imgs(root, root, True))}]
+    ★★첫 줄(`""`)은 **뿌리 폴더 그 자체**다 — 뿌리에 놓인 것만 센다 (사용자 지시 2026-09-06:
+      *"최상위 gallery 선택하면 하위 폴더의 이미지는 안 보이게"*). 예전에는 「전체」라 하위까지
+      셌는데(2026-08-05), 화면의 첫 줄이 「전체」가 아니라 `gallery` 폴더가 된 뒤로(2026-08-23)
+      다른 폴더와 같은 규칙이어야 맞다. 숫자도 `images()` 가 보여 주는 것과 같아야 한다."""
+    out = [{"path": "", "count": sum(1 for _ in _imgs(root, root, False))}]
     for d in sorted(p for p in root.rglob("*") if p.is_dir() and _visible(root, p)):
         out.append({"path": d.relative_to(root).as_posix(), "count": sum(1 for _ in _imgs(root, d, False))})
     return out
@@ -167,7 +168,8 @@ def drop_folder(root: Path, name: str) -> dict:
 
 
 def images(root: Path, folder: str = "", page: int = 1, limit: int = 0) -> dict:
-    """그림 목록. ★`folder` 가 비면 **전체**(하위 폴더까지), 주면 그 폴더만.
+    """그림 목록. ★`folder` 가 비면 **뿌리 폴더**, 주면 그 폴더 — 어느 쪽이든 **그 폴더에 놓인 것만**
+    (하위 폴더는 안 훑는다. 사용자 지시 2026-09-06, `folders()` 의 ★★주).
 
     ★**쪽으로 끊어 준다** (v2 `/api/outputs-list` 와 같은 방식, 사용자 결정 2026-08-05).
       수백 장을 한 번에 내려 주면 화면이 그만큼의 DOM 을 만들어야 한다. `limit=0` 이면 전량.
@@ -182,7 +184,7 @@ def images(root: Path, folder: str = "", page: int = 1, limit: int = 0) -> dict:
     #   다음 쪽에 같은 그림이 또 온다 (아래 주석과 같은 이유). 파일 이름만으로는 모자란다:
     #   폴더가 다르면 같은 이름이 둘 있을 수 있고, 그러면 순서를 파일시스템이 정하게 된다.
     files = sorted(
-        _imgs(root, d, not folder),
+        _imgs(root, d, False),
         key=lambda x: (x.stat().st_mtime, x.relative_to(root).as_posix()),
         reverse=True,
     )
