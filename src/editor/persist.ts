@@ -12,7 +12,7 @@
  *  ★★켜서 다 읽기 전에는 적지 않는다 (`store.ts` 의 `hydrated`) — 빈 상태로 덮어쓰면 남긴 것이 전부 휴지통으로 간다. */
 import { emptyHist, type LayerMeta } from "./model";
 import { getPx, loadState, putPx, putState, type PersistDoc } from "./io";
-import { ensureFont, rebakeText, type Layer } from "./pixels";
+import { bakeBubble, bakePanel, ensureFont, fitBubble, rebakeText, type Layer } from "./pixels";
 import type { Doc } from "./store";
 
 const keyOf = new WeakMap<HTMLCanvasElement, string>();
@@ -94,7 +94,7 @@ async function flush(): Promise<void> {
         }
       }
       keep[d.id] = [...keys];
-      out.push({ id: d.id, name: d.name, w: d.w, h: d.h, sel: d.sel, src: d.src, dirty: d.dirty, view: d.view, layers });
+      out.push({ id: d.id, name: d.name, w: d.w, h: d.h, sel: d.sel, src: d.src, dirty: d.dirty, view: d.view, layers, ...(d.comic ? { comic: d.comic } : {}) });
     }
     await putState({ docs: out, cur, keep });
   } catch (e) {
@@ -151,6 +151,18 @@ export async function loadDocs(): Promise<{ docs: Doc[]; cur: string | null }> {
         //   다시 구운 캔버스는 `uploaded` 에 없어 첫 flush 가 올린다 (켤 때마다 한 번, 작다). 글꼴은 먼저 싣는다
         if (layer.text) await ensureFont(layer.text);
         const baked = rebakeText(layer);
+        // ★만화 페이지의 컷·말풍선도 원문에서 다시 굽는다 (굽는 셈이 바뀌어도 옛 픽셀이 남지 않게, 글자 레이어와 같다)
+        if (layer.panel && p.comic) {
+          layers.push({ ...layer, cv: bakePanel(layer.panel, layer.w, layer.h, p.comic) });
+          continue;
+        }
+        if (layer.bubble) {
+          await ensureFont({ ...layer.bubble });
+          const b = fitBubble(layer.bubble);
+          const { box, cv: bcv } = bakeBubble(b);
+          layers.push({ ...layer, bubble: b, cv: bcv, sw: bcv.width, sh: bcv.height, x: box.x, y: box.y, w: box.w, h: box.h });
+          continue;
+        }
         layers.push(baked ? { ...layer, ...baked } : layer);
       } catch (e) {
         console.warn(`[editor] 레이어 픽셀을 못 읽었다 (${p.name} / ${l.name})`, e);
@@ -160,6 +172,7 @@ export async function loadDocs(): Promise<{ docs: Doc[]; cur: string | null }> {
       id: p.id, name: p.name, w: p.w, h: p.h, layers,
       sel: selOf(p.sel, layers),
       src: p.src ?? null, hist: emptyHist(), dirty: !!p.dirty, view: p.view ?? { fit: true, zoom: 1 },
+      ...(p.comic ? { comic: p.comic } : {}),
     });
   }
   return { docs, cur: st.cur ?? null };

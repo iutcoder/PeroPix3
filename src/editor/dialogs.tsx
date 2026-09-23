@@ -3,6 +3,8 @@ import { useI18n } from "../i18n";
 import { Icon } from "../components/Icon";
 import { Line, box, dropFocus, on } from "../panels/censor/ui";
 import { sizePreview, withRatio, type Anchor, type Fill, type Size } from "./model";
+import { LAYOUTS, paperPx, type Dir, type Dpi, type PaperId } from "./comic";
+import { LayoutThumb } from "./comicUi";
 import { composite } from "./pixels";
 import { useEditor, type Doc } from "./store";
 
@@ -156,7 +158,7 @@ function NumField({ mark, value, onChange }: { mark: string; value: number; onCh
 }
 
 /** 작은 창 — 확인 창(`AskDialog`)과 같은 뼈대. Esc 취소 · Enter 적용 */
-function Modal({ title, children, onOk, onClose, mark, width = 380 }: { title: string; children: React.ReactNode; onOk: () => void; onClose: () => void; mark: string; width?: number }) {
+function Modal({ title, children, onOk, onClose, mark, width = 380, okLabel }: { title: string; children: React.ReactNode; onOk: () => void; onClose: () => void; mark: string; width?: number; okLabel?: string }) {
   const t = useI18n((s) => s.t);
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -177,7 +179,7 @@ function Modal({ title, children, onOk, onClose, mark, width = 380 }: { title: s
         {children}
         <div style={{ display: "flex", gap: "var(--sp-2)", justifyContent: "flex-end" }}>
           <button data-modal-cancel onClick={onClose} style={btn}>{t("common.cancel")}</button>
-          <button data-modal-ok onClick={onOk} style={{ ...btn, background: "var(--accent)", borderColor: "var(--accent)", color: "#fff" }}>{t("editor.apply")}</button>
+          <button data-modal-ok onClick={onOk} style={{ ...btn, background: "var(--accent)", borderColor: "var(--accent)", color: "#fff" }}>{okLabel ?? t("editor.apply")}</button>
         </div>
       </div>
     </div>
@@ -192,3 +194,109 @@ const btn: React.CSSProperties = {
   padding: "var(--sp-2) var(--sp-5)",
   fontSize: "var(--text-xs)",
 };
+
+/** 새 캔버스 — 목업 ② (사용자 확정 2026-09-23). 이미지 / 만화 페이지를 먼저 고르고, 만화 페이지면 판형 · 해상도 · 읽는 방향 · 첫 배치.
+ *  ★만화 페이지가 새 모드가 아니라 **캔버스의 한 종류**다 (설계 2번) — 그래서 「새 캔버스」가 이 둘로 갈린다 */
+export function NewCanvasDialog({ onClose }: { onClose: () => void }) {
+  const t = useI18n((s) => s.t);
+  const [kind, setKind] = useState<"image" | "comic">("comic");
+  const [iw, setIw] = useState(1216);
+  const [ih, setIh] = useState(832);
+  const [paper, setPaper] = useState<PaperId>("a4");
+  const [dpi, setDpi] = useState<Dpi>(200);
+  const [cw, setCw] = useState(1654);
+  const [ch, setCh] = useState(2339);
+  const [dir, setDir] = useState<Dir>("rtl");
+  const [layout, setLayout] = useState("hero-top");
+  const size = paper === "custom" ? { w: cw, h: ch } : paperPx(paper, dpi);
+  const ok = () => {
+    const st = useEditor.getState();
+    if (kind === "image") st.newDoc({ w: Math.max(1, iw), h: Math.max(1, ih) });
+    else st.newDoc({ w: Math.max(64, size.w), h: Math.max(64, size.h), comic: { dir, layout } });
+    onClose();
+  };
+  const card = (on2: boolean): React.CSSProperties => ({
+    ...box, ...(on2 ? on : {}), flex: 1, display: "flex", alignItems: "center", gap: "var(--sp-3)", padding: "var(--sp-3) var(--sp-4)", textAlign: "left", borderRadius: "var(--r-3)",
+  });
+  const sub: React.CSSProperties = { display: "block", fontSize: "var(--text-3xs)", color: "var(--ink-faint)", marginTop: 1 };
+  const seg = (active: boolean): React.CSSProperties => ({ ...box, ...(active ? on : {}), padding: "3px 10px", whiteSpace: "nowrap" });
+  return (
+    <Modal title={t("editor.newDoc")} onOk={ok} onClose={onClose} mark="editor-new-dialog" width={kind === "comic" ? 580 : 420} okLabel={t("editor.create")}>
+      <div style={{ display: "flex", gap: "var(--sp-3)" }}>
+        <button data-editor-new-kind="image" onMouseDown={dropFocus} onClick={() => setKind("image")} style={card(kind === "image")}>
+          {Icon.image}
+          <span>{t("editor.kindImage")}<small style={sub}>1216 × 832</small></span>
+        </button>
+        <button data-editor-new-kind="comic" onMouseDown={dropFocus} onClick={() => setKind("comic")} style={card(kind === "comic")}>
+          {Icon.page}
+          <span>{t("editor.kindComic")}<small style={sub}>{t("editor.kindComicSub")}</small></span>
+        </button>
+      </div>
+      {kind === "image" && (
+        <Line label={t("editor.dims")}>
+          <NumField mark="editor-new-w" value={iw} onChange={setIw} />
+          <span style={{ color: "var(--ink-ghost)" }}>×</span>
+          <NumField mark="editor-new-h" value={ih} onChange={setIh} />
+        </Line>
+      )}
+      {kind === "comic" && (
+        <div style={{ display: "flex", gap: "var(--sp-5)", alignItems: "flex-start" }}>
+          <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", gap: "var(--sp-3)" }}>
+            <Line label={t("editor.paperSize")}>
+              <select data-editor-new-paper value={paper} onChange={(e) => setPaper(e.target.value as PaperId)} style={{ ...box, flex: 1, minWidth: 0 }}>
+                <option value="a4">A4 (210 × 297 mm)</option>
+                <option value="b5">B5 (182 × 257 mm)</option>
+                <option value="b4">B4 (257 × 364 mm)</option>
+                <option value="web">{t("editor.paperWeb")}</option>
+                <option value="custom">{t("editor.paperCustom")}</option>
+              </select>
+            </Line>
+            {paper !== "custom" && paper !== "web" && (
+              <Line label={t("editor.resolution")} help={t("editor.resolutionHint")}>
+                {([200, 300] as const).map((d) => {
+                  const p = paperPx(paper, d);
+                  return (
+                    <button key={d} data-editor-new-dpi={d} onMouseDown={dropFocus} onClick={() => setDpi(d)} style={seg(dpi === d)}>
+                      {t(d === 200 ? "editor.dpiNormal" : "editor.dpiPrint")} {p.w} × {p.h}
+                    </button>
+                  );
+                })}
+              </Line>
+            )}
+            {paper === "web" && <Line label={t("editor.resolution")}><span style={{ fontSize: "var(--text-2xs)", color: "var(--ink-soft)" }}>{size.w} × {size.h}</span></Line>}
+            {paper === "custom" && (
+              <Line label={t("editor.dims")}>
+                <NumField mark="editor-new-cw" value={cw} onChange={setCw} />
+                <span style={{ color: "var(--ink-ghost)" }}>×</span>
+                <NumField mark="editor-new-ch" value={ch} onChange={setCh} />
+              </Line>
+            )}
+            <Line label={t("editor.readDir")}>
+              <button data-editor-new-dir="rtl" onMouseDown={dropFocus} onClick={() => setDir("rtl")} style={seg(dir === "rtl")}>{t("editor.dirRtl")}</button>
+              <button data-editor-new-dir="ltr" onMouseDown={dropFocus} onClick={() => setDir("ltr")} style={seg(dir === "ltr")}>{t("editor.dirLtr")}</button>
+            </Line>
+            <div style={{ display: "flex", gap: "var(--sp-2)" }}>
+              <span style={{ width: 52, flexShrink: 0, fontSize: "var(--text-2xs)", color: "var(--ink-faint)", paddingTop: 4 }}>{t("editor.firstLayout")}</span>
+              <div data-editor-new-layouts style={{ display: "grid", gridTemplateColumns: "repeat(6, 38px)", gap: 6 }}>
+                {Object.keys(LAYOUTS).map((k) => (
+                  <button
+                    key={k}
+                    data-editor-new-layout={k}
+                    onMouseDown={dropFocus}
+                    onClick={() => setLayout(k)}
+                    style={{ ...box, ...(layout === k ? on : {}), width: 38, height: 52, padding: 0, display: "grid", placeItems: "center" }}
+                  >
+                    <LayoutThumb layout={k} w={28} h={40} />
+                  </button>
+                ))}
+              </div>
+            </div>
+          </div>
+          <div style={{ flexShrink: 0, borderRadius: 3, overflow: "hidden", boxShadow: "0 0 0 1px var(--line)" }}>
+            <LayoutThumb layout={layout} w={118} h={Math.round((118 * size.h) / Math.max(1, size.w))} />
+          </div>
+        </div>
+      )}
+    </Modal>
+  );
+}

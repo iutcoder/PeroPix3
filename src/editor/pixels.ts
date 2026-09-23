@@ -4,6 +4,7 @@
  *    옛 캔버스를 그대로 들고 있으므로 되돌리기는 참조를 바꾸는 것으로 끝난다.
  *  ★합성은 **문서 좌표계**에서 한다 — 레이어의 변형(자리·크기·회전·반전)은 그릴 때 `ctx` 변환으로 건다 (비파괴). */
 import { centerOf, filterOf, floodFill, hexRgb, layoutText, rad, textBaseline, type LayerMeta, type Rect, type Size, type TextMeta, type Xform } from "./model";
+import { bodyFor, bubbleBounds, bubbleShape, panelPts, wrapLines, type BubbleMeta, type ComicPage, type PanelMeta, type Pt } from "./comic";
 
 export type Layer = LayerMeta & { cv: HTMLCanvasElement };
 
@@ -50,8 +51,15 @@ function applyXform(ctx: CanvasRenderingContext2D, l: Xform) {
 
 /** 레이어 하나를 문서 좌표계의 `ctx` 에 그린다 (불투명도·보정·긋는 중인 획까지).
  *  ★보정(`l.adj`)은 레이어의 속성이라 **언제나** 건다 — 합치기·저장이 이 함수를 거치므로 그때 픽셀에 굽힌다 */
-export function drawLayer(ctx: CanvasRenderingContext2D, l: Layer, opt?: { stroke?: Stroke | null }) {
+export function drawLayer(ctx: CanvasRenderingContext2D, l: Layer, opt?: { stroke?: Stroke | null; clip?: Pt[] | null }) {
   ctx.save();
+  // ★컷에 든 그림 — 그 컷 모양(문서 좌표)으로 자른다. 변형을 걸기 **전에** 건다 (컷은 문서 좌표다)
+  if (opt?.clip?.length) {
+    ctx.beginPath();
+    opt.clip.forEach(([x, y], i) => (i ? ctx.lineTo(x, y) : ctx.moveTo(x, y)));
+    ctx.closePath();
+    ctx.clip();
+  }
   ctx.globalAlpha = l.opacity / 100;
   const f = filterOf(l.adj);
   if (f) ctx.filter = f;
@@ -96,9 +104,16 @@ export function composite(
   ctx.scale(w / doc.w, h / doc.h);
   for (const l of doc.layers) {
     if (!l.on || l.id === opt?.skip) continue;
-    drawLayer(ctx, l, l.id === opt?.sel ? { stroke: opt?.stroke } : undefined);
+    drawLayer(ctx, l, { stroke: l.id === opt?.sel ? opt?.stroke : null, clip: clipOf(doc.layers, l) });
   }
   ctx.restore();
+}
+
+/** 그 그림이 든 컷의 모양 (문서 좌표). 컷에 안 들었거나 컷이 없어졌으면 null */
+export function clipOf(layers: Layer[], l: LayerMeta): Pt[] | null {
+  if (!l.clip) return null;
+  const p = layers.find((x) => x.id === l.clip && x.panel);
+  return p?.panel ? panelPts(p, p.panel.pts) : null;
 }
 
 /* ── 글자 ───────────────────────────────────────────────────────── */
@@ -147,6 +162,127 @@ export function rebakeText(l: Layer): Pick<Layer, "text" | "cv" | "sw" | "sh" | 
 export const ensureFont = (t: TextMeta): Promise<void> =>
   document.fonts.load(fontOf(t), t.value || " ").then(() => undefined, () => undefined);
 
+/* ── 만화 페이지: 컷 · 말풍선 ───────────────────────────────────── */
+
+/** 컷 테두리 — 레이어 상자 크기의 캔버스에 다각형 **안쪽으로** 그린다 (그림을 자르는 자리와 선의 바깥 변이 같다).
+ *  「테두리 없음」이면 빈 캔버스 */
+export function bakePanel(meta: PanelMeta, w: number, h: number, page: Pick<ComicPage, "border" | "color">): HTMLCanvasElement {
+  const cv = makeCanvas(w, h);
+  if (meta.noBorder || page.border <= 0) return cv;
+  const g = cv.getContext("2d")!;
+  g.beginPath();
+  meta.pts.forEach(([u, v], i) => (i ? g.lineTo(u * cv.width, v * cv.height) : g.moveTo(u * cv.width, v * cv.height)));
+  g.closePath();
+  g.save();
+  g.clip();
+  g.lineJoin = "miter";
+  g.lineWidth = page.border * 2;
+  g.strokeStyle = page.color;
+  g.stroke();
+  g.restore();
+  return cv;
+}
+
+/** 말풍선 글 — 가로쓰기는 줄, 세로쓰기는 **세로 줄(열)** 이다. 글 상자 크기(`tw`×`th`)와 줄마다의 글.
+ *  풍선에 맞춤이면 몸통 안쪽 폭(세로쓰기는 높이)에서 줄을 바꾼다 */
+export function bubbleText(b: BubbleMeta) {
+  if (!probe) probe = makeCanvas(1, 1).getContext("2d")!;
+  const font = fontOf({ ...b, value: b.value });
+  probe.font = font;
+  const measure = (s: string) => probe!.measureText(s).width;
+  const lineH = Math.ceil(b.size * b.lineGap);
+  const k = b.kind === "narration" ? 1 : b.kind === "shout" ? 1.55 : b.kind === "thought" ? 1.5 : Math.SQRT2;
+  const innerW = Math.max(b.size, (b.body.w - b.pad * 2) / k);
+  const innerH = Math.max(b.size, (b.body.h - b.pad * 2) / k);
+  const adv = Math.ceil(b.size * 1.04);
+  if (b.vertical) {
+    const cap = Math.max(1, Math.floor(innerH / adv));
+    // 풍선에 맞춤이면 한 열이 몸통 높이를 넘지 않게 글자 수로 자른다
+    const cols = b.fit === "box"
+      ? b.value.split("\n").flatMap((s) => {
+          const cs = [...s];
+          if (!cs.length) return [""];
+          const out: string[] = [];
+          for (let i = 0; i < cs.length; i += cap) out.push(cs.slice(i, i + cap).join(""));
+          return out;
+        })
+      : b.value.split("\n");
+    const most = Math.max(1, ...cols.map((c) => [...c].length));
+    return { font, lines: cols, lineH, adv, tw: lineH * Math.max(1, cols.length), th: adv * most, asc: 0, desc: 0, widths: undefined as number[] | undefined };
+  }
+  const lines = b.fit === "box" ? wrapLines(b.value, innerW, measure) : b.value.split("\n");
+  const ms = lines.map((s) => probe!.measureText(s || " "));
+  const tw = Math.ceil(Math.max(b.size * 2, ...ms.map((m) => m.width)));
+  return { font, lines, lineH, adv, tw, th: lineH * Math.max(1, lines.length), asc: ms[0].fontBoundingBoxAscent, desc: ms[0].fontBoundingBoxDescent, widths: ms.map((m) => m.width) };
+}
+
+/** 글에 맞춤이면 몸통을 글에 맞춰 다시 잰다 (가운데는 그 자리) — 풍선에 맞춤이면 그대로 */
+export function fitBubble(b: BubbleMeta): BubbleMeta {
+  if (b.fit !== "text") return b;
+  const L = bubbleText(b);
+  const s = bodyFor(b.kind, L.tw, L.th, b.pad);
+  const cx = b.body.x + b.body.w / 2;
+  const cy = b.body.y + b.body.h / 2;
+  return { ...b, body: { x: cx - s.w / 2, y: cy - s.h / 2, w: s.w, h: s.h } };
+}
+
+/** 말풍선을 굽는다 → 레이어 상자(`bubbleBounds`)와 그 크기의 캔버스.
+ *  ★선을 먼저 모두 긋고 채움을 선 없이 덮는다 — 몸통과 꼬리가 이음매 없는 한 외곽선이 된다 (선은 안쪽 반이 덮이므로 두 배로 긋는다).
+ *  `hideText` 는 글을 고치는 동안 (글 상자가 그 자리에 떠 있다) */
+export function bakeBubble(b: BubbleMeta, hideText = false): { box: Rect; cv: HTMLCanvasElement } {
+  const box = bubbleBounds(b);
+  const cv = makeCanvas(box.w, box.h);
+  const g = cv.getContext("2d")!;
+  g.translate(-box.x, -box.y);
+  const sh = bubbleShape(b);
+  const paths = [sh.body, ...sh.tails].map((d) => new Path2D(d));
+  g.lineJoin = "round";
+  g.strokeStyle = b.line;
+  g.fillStyle = b.fill;
+  if (b.stroke > 0) {
+    g.lineWidth = b.stroke * 2;
+    if (sh.dash) g.setLineDash([b.stroke * 3, b.stroke * 2.6]);
+    for (const p of paths) g.stroke(p);
+    g.setLineDash([]);
+  }
+  for (const p of paths) g.fill(p);
+  for (const [x, y, r] of sh.dots) {
+    g.beginPath();
+    g.arc(x, y, r, 0, Math.PI * 2);
+    g.fill();
+    if (b.stroke > 0) {
+      g.lineWidth = b.stroke;
+      g.stroke();
+    }
+  }
+  if (!hideText && b.value) {
+    const L = bubbleText(b);
+    const cx = b.body.x + b.body.w / 2;
+    const cy = b.body.y + b.body.h / 2;
+    g.font = L.font;
+    g.fillStyle = b.color;
+    if (b.vertical) {
+      // 세로쓰기 — 오른쪽 열부터, 글자마다 가운데에
+      g.textAlign = "center";
+      g.textBaseline = "middle";
+      L.lines.forEach((col, i) => {
+        const x = cx + L.tw / 2 - L.lineH / 2 - i * L.lineH;
+        [...col].forEach((ch, j) => g.fillText(ch, x, cy - L.th / 2 + (j + 0.5) * L.adv));
+      });
+    } else {
+      g.textAlign = "left";
+      g.textBaseline = "alphabetic";
+      const base = textBaseline(L.lineH, L.asc, L.desc);
+      L.lines.forEach((s, i) => {
+        const lw = L.widths?.[i] ?? 0;
+        const x = b.align === "left" ? cx - L.tw / 2 : b.align === "right" ? cx + L.tw / 2 - lw : cx - lw / 2;
+        g.fillText(s, x, cy - L.th / 2 + i * L.lineH + base);
+      });
+    }
+  }
+  return { box, cv };
+}
+
 /** 획을 레이어에 **굽는다** → 새 캔버스 */
 export function bakeStroke(l: Layer, st: Stroke): HTMLCanvasElement {
   const cv = cloneCanvas(l.cv);
@@ -159,7 +295,7 @@ export function bakeStroke(l: Layer, st: Stroke): HTMLCanvasElement {
 
 /** 위 레이어를 아래 레이어의 **원본 픽셀 공간**에 그려 넣는다 → 아래 레이어의 새 캔버스.
  *  아래 레이어의 변형은 그대로 두고, 위 레이어는 문서 좌표로 그린 것을 아래의 역변환으로 받는다. */
-export function mergeInto(below: Layer, top: Layer): HTMLCanvasElement {
+export function mergeInto(below: Layer, top: Layer, clip?: Pt[] | null): HTMLCanvasElement {
   const cv = cloneCanvas(below.cv);
   const g = cv.getContext("2d")!;
   const c = centerOf(below);
@@ -168,7 +304,7 @@ export function mergeInto(below: Layer, top: Layer): HTMLCanvasElement {
   g.scale(below.flipH ? -1 : 1, below.flipV ? -1 : 1);
   g.rotate(-rad(below.rot));
   g.translate(-c.x, -c.y);
-  drawLayer(g, top);
+  drawLayer(g, top, { clip });
   return cv;
 }
 

@@ -507,6 +507,14 @@ export const Icon = {
   flipH: s(<><path d="M12 3v18" /><path d="M8 7 4 12l4 5V7z" /><path d="M16 7l4 5-4 5V7z" /></>, 12),
   flipV: s(<><path d="M3 12h18" /><path d="M7 8l5-4 5 4H7z" /><path d="M7 16l5 4 5-4H7z" /></>, 12),
   /** 캔버스 밖 배경 (체커) */
+  /* 만화 페이지 (목업 `docs/comic-editor-mockup.html` 에서 새로 그린 넷) */
+  panel: s(<path d="M4 4h16v6.5H4zM4 13.5h7.2V20H4zM14 13.5h6V20h-6z" />),
+  bubble: s(<path d="M12 4c4.7 0 8.5 2.9 8.5 6.5S16.7 17 12 17c-.9 0-1.7-.1-2.5-.3L5 20l1.2-4.1C4.5 14.6 3.5 12.7 3.5 10.5 3.5 6.9 7.3 4 12 4z" />),
+  page: s(<><path d="M6.5 3h11A1.5 1.5 0 0 1 19 4.5v15a1.5 1.5 0 0 1-1.5 1.5h-11A1.5 1.5 0 0 1 5 19.5v-15A1.5 1.5 0 0 1 6.5 3z" /><path d="M8 6.5h8v4.5H8zM8 13h3.5v4.5H8zM13 13h3v4.5h-3z" /></>),
+  page12: s(<><path d="M6.5 3h11A1.5 1.5 0 0 1 19 4.5v15a1.5 1.5 0 0 1-1.5 1.5h-11A1.5 1.5 0 0 1 5 19.5v-15A1.5 1.5 0 0 1 6.5 3z" /><path d="M8 6.5h8v4.5H8zM8 13h3.5v4.5H8zM13 13h3v4.5h-3z" /></>, 12),
+  image: s(<><rect x="3.5" y="5" width="17" height="14" rx="2" /><circle cx="9" cy="10" r="1.6" /><path d="M20.5 15.5 15 11l-8.5 8" /></>),
+  image12: s(<><rect x="3.5" y="5" width="17" height="14" rx="2" /><circle cx="9" cy="10" r="1.6" /><path d="M20.5 15.5 15 11l-8.5 8" /></>, 12),
+  tailAdd: s(<><path d="M11 5c4 0 7 2.3 7 5.2S15 15.4 11 15.4l-4.5 4 1-4.6C5.4 13.9 4 12.2 4 10.2 4 7.3 7 5 11 5z" /><path d="M19 15v6M16 18h6" /></>, 12),
   checker: s(<><rect x="4" y="4" width="16" height="16" rx="1.5" /><path d="M4 4h8v8H4zM12 12h8v8h-8z" fill="currentColor" stroke="none" /></>, 14),
   settings: s(
     <>

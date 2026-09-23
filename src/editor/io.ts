@@ -5,6 +5,7 @@ import { api, backendUrl } from "../lib/backend";
 import { fileMgrImg } from "../lib/imgUrl";
 import type { Dropped } from "../lib/dropImages";
 import type { LayerMeta } from "./model";
+import type { ComicPage } from "./comic";
 import { canvasFrom } from "./pixels";
 
 /** 바이트를 받는다 — `rel` 은 파일 관리의 그림 창구, `path` 는 떨군 파일 읽기, `data` 는 그대로 */
@@ -79,6 +80,8 @@ export type PersistDoc = {
   dirty: boolean;
   view: { fit: boolean; zoom: number };
   layers: PersistLayer[];
+  /** 만화 페이지 캔버스의 속성 (없으면 보통 캔버스) */
+  comic?: ComicPage;
 };
 export type PersistState = { docs: PersistDoc[]; cur: string | null };
 

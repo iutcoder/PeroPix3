@@ -16,6 +16,8 @@ import { NO_ADJUST, hasAdjust, withRatio } from "./model";
 import { thumbOf, type Layer } from "./pixels";
 import { primaryOf, saveName, useEditor, whereOf, type Doc } from "./store";
 import { CanvasSizeDialog, ImageSizeDialog } from "./dialogs";
+import { BubbleKindIcon } from "./comicUi";
+import { bendable, defaultTail, hasTails, panelNumbers, panelPts, pointInPoly, type BubbleMeta } from "./comic";
 
 /** 오른쪽 기둥 — 레이어 · 변형 · 보정 · 캔버스 · 저장 위치. 검열의 오른쪽 기둥과 같은 조각(`Sec`·`Line`·`box`)으로 그린다 */
 export function Side({ doc }: { doc: Doc }) {
@@ -90,7 +92,11 @@ export function Side({ doc }: { doc: Doc }) {
           </div>
         </Sec>
 
-        {/* ── 변형 ── */}
+        {/* ── 만화 페이지: 고른 컷 · 고른 말풍선 · 컷에 든 그림 (설계 5·6·8번) ── */}
+        {doc.comic && sel && !many && <ComicSections doc={doc} sel={sel} />}
+
+        {/* ── 변형 ── 컷(꼭짓점으로 고친다)·말풍선(몸통·꼬리 손잡이)은 무대에서만 고친다 */}
+        {!(sel && !many && (sel.panel || sel.bubble)) && (
         <Sec label={sel && !many ? `${sel.name} · ${t("editor.transform")}` : t("editor.transform")}>
           {!sel && <Hint>{t("editor.noLayer")}</Hint>}
           {sel && many && <span data-editor-many><Hint>{t("editor.selectedN", { n: doc.sel.length })}</Hint></span>}
@@ -141,8 +147,10 @@ export function Side({ doc }: { doc: Doc }) {
             </>
           )}
         </Sec>
+        )}
 
         {/* ── 보정 — 레이어의 속성이라 슬라이더 값이 **언제나** 걸린다 (사용자 지시 2026-09-22: 「적용」 없음, 초기화만) ── */}
+        {!(sel && !many && (sel.panel || sel.bubble)) && (
         <div style={{ display: "flex", flexDirection: "column", gap: "var(--sp-2)" }}>
           <span style={{ display: "flex", alignItems: "center", gap: "var(--sp-2)", fontSize: "var(--text-xs)", fontWeight: "var(--w-semi)", color: "var(--ink-soft)" }}>
             {t("editor.adjust")}
@@ -176,6 +184,10 @@ export function Side({ doc }: { doc: Doc }) {
             </Line>
           ))}
         </div>
+        )}
+
+        {/* ── 페이지 (만화 페이지만) ── */}
+        {doc.comic && <PageSection doc={doc} />}
 
         {/* ── 캔버스 ── */}
         <Sec label={`${t("editor.canvas")}  ${doc.w} × ${doc.h}`}>
@@ -280,18 +292,35 @@ export function Side({ doc }: { doc: Doc }) {
 function LayerList({ doc }: { doc: Doc }) {
   const t = useI18n((s) => s.t);
   const s = useEditor();
-  const rows = [...doc.layers].reverse();
+  const rows = listRows(doc);
   const listRef = useRef<HTMLDivElement | null>(null);
   /** 화면 차례(위가 0)의 틈 번호로 받아 스토어 차례(아래가 먼저)로 넘긴다 — 셈은 앱 공통 `moveTo` */
   const move = (from: number, to: number) => s.orderLayers(moveTo(rows, from, to).map((l) => l.id).reverse());
   const { register, handleProps, dragIdx, overIdx } = useReorder(rows.length, move, { tapSafe: true, within: listRef });
 
+  // ★만화 페이지는 묶음으로 보인다 — 말풍선 · 컷(그 컷에 든 그림이 아래로 들여 쓰인다) · 그 밖 (설계 4번 · 목업 ①).
+  //   차례는 스토어가 묶음대로 맞춰 두므로(`comicStack`) 줄 사이에 머리만 끼우면 된다
+  const nums = doc.comic ? panelNumbers(doc.layers, doc.comic.dir, doc.h) : null;
+  const groupOf = (l: Layer) => (l.bubble ? "bubble" : l.panel || (l.clip && doc.layers.some((p) => p.id === l.clip && p.panel)) ? "panel" : "other");
+  const counts = { bubble: doc.layers.filter((l) => l.bubble).length, panel: doc.layers.filter((l) => l.panel).length, other: 0 };
+  counts.other = doc.layers.length - counts.bubble - doc.layers.filter((l) => groupOf(l) === "panel").length;
+  const head = (g: "bubble" | "panel" | "other") => (
+    <div data-editor-layer-group={g} style={{ display: "flex", alignItems: "center", gap: 6, padding: "4px var(--sp-2) 2px", fontSize: "var(--text-3xs)", color: "var(--ink-faint)", letterSpacing: ".02em" }}>
+      {t(g === "bubble" ? "editor.groupBubbles" : g === "panel" ? "editor.groupPanels" : "editor.groupOther")}
+      <span style={{ flex: 1 }} />
+      {g === "bubble" ? counts.bubble : g === "panel" ? counts.panel : counts.other}
+    </div>
+  );
   return (
-    <div ref={listRef} data-editor-layers style={{ display: "flex", flexDirection: "column", maxHeight: 220, overflowY: "auto" }}>
+    <div ref={listRef} data-editor-layers style={{ display: "flex", flexDirection: "column", maxHeight: doc.comic ? 300 : 220, overflowY: "auto" }}>
       {rows.map((l, i) => (
         <Fragment key={l.id}>
+          {nums && (i === 0 || groupOf(rows[i - 1]) !== groupOf(l)) && head(groupOf(l))}
           <DropLine on={dragIdx != null && overIdx === i} />
           <LayerRow
+            no={l.panel ? nums?.get(l.id) : undefined}
+            sub={l.panel ? t("editor.panelImages", { n: doc.layers.filter((x) => x.clip === l.id).length }) : undefined}
+            indent={!!nums && !!l.clip && !l.panel}
             rowRef={register(i)}
             l={l}
             selected={doc.sel.includes(l.id)}
@@ -311,12 +340,33 @@ function LayerList({ doc }: { doc: Doc }) {
   );
 }
 
+/** 목록의 줄 차례 — 위가 앞(스토어 차례를 뒤집은 것). 만화 페이지는 컷 묶음만 **컷 번호 차례**로 보인다
+ *  (컷의 쌓임 차례는 겹칠 때만 뜻이 있고, 목록에서 찾는 것은 번호다). 끌어 바꾸면 이 차례가 스토어로 간다 */
+function listRows(doc: Doc): Layer[] {
+  const rows = [...doc.layers].reverse();
+  if (!doc.comic) return rows;
+  const nums = panelNumbers(doc.layers, doc.comic.dir, doc.h);
+  const panels = rows.filter((l) => l.panel).sort((a, b) => (nums.get(a.id) ?? 0) - (nums.get(b.id) ?? 0));
+  const inPanel = (l: Layer) => !l.panel && !l.bubble && !!l.clip && panels.some((p) => p.id === l.clip);
+  return [
+    ...rows.filter((l) => l.bubble),
+    ...panels.flatMap((p) => [p, ...rows.filter((l) => inPanel(l) && l.clip === p.id)]),
+    ...rows.filter((l) => !l.bubble && !l.panel && !inPanel(l)),
+  ];
+}
+
 type Handle = ReturnType<ReturnType<typeof useReorder>["handleProps"]>;
 
 function LayerRow({
-  l, selected, dim, hp, rowRef, onSelect, onToggle, onRename, tipOn,
+  l, selected, dim, hp, rowRef, onSelect, onToggle, onRename, tipOn, no, indent, sub,
 }: {
   l: Layer;
+  /** 컷 번호 (읽는 차례) — 컷 줄에만 */
+  no?: number;
+  /** 컷에 든 그림 — 그 컷 아래로 들여 쓴다 */
+  indent?: boolean;
+  /** 컷 줄의 덧말 (「그림 N」) */
+  sub?: string;
   selected: boolean;
   /** 끌리는 중 — 제자리에서 흐려진다 */
   dim?: boolean;
@@ -328,6 +378,7 @@ function LayerRow({
   onRename: (v: string) => void;
   tipOn: string;
 }) {
+  const tPanel = (n?: number) => useI18n.getState().t("editor.panelNo", { n: n ?? "" });
   return (
     <div
       ref={rowRef}
@@ -346,6 +397,7 @@ function LayerRow({
         alignItems: "center",
         gap: "var(--sp-2)",
         padding: "3px var(--sp-2)",
+        paddingLeft: indent ? 22 : undefined,
         margin: "1px 0",
         borderRadius: "var(--r-2)",
         border: `1px solid ${selected ? "var(--accent)" : "transparent"}`,
@@ -356,15 +408,31 @@ function LayerRow({
       <button data-editor-layer-toggle onClick={onToggle} data-tip={tipOn} style={{ display: "grid", color: l.on ? "var(--ink-soft)" : "var(--ink-ghost)" }}>
         {l.on ? Icon.dotOn : Icon.dotOff}
       </button>
-      <img
-        src={thumbOf(l.cv)}
-        alt=""
-        draggable={false}
-        style={{ width: 44, height: 30, borderRadius: 3, flexShrink: 0, background: "conic-gradient(#3a3a44 25%, #2a2a32 0 50%, #3a3a44 0 75%, #2a2a32 0) 0 0/8px 8px" }}
-      />
+      {/* 컷은 번호, 말풍선은 종류 아이콘, 나머지는 그림 썸네일 */}
+      {l.panel ? (
+        <span data-editor-layer-no={no} style={{ width: 18, height: 18, borderRadius: "50%", background: "var(--line)", color: "var(--ink-soft)", fontSize: 10, display: "grid", placeItems: "center", fontVariantNumeric: "tabular-nums", flexShrink: 0 }}>{no}</span>
+      ) : l.bubble ? (
+        <span style={{ width: 44, height: 30, borderRadius: 3, flexShrink: 0, background: "#fff", display: "grid", placeItems: "center", color: "#111" }}>
+          <BubbleKindIcon kind={l.bubble.kind} w={30} h={20} />
+        </span>
+      ) : (
+        <img
+          src={thumbOf(l.cv)}
+          alt=""
+          draggable={false}
+          style={{ width: 44, height: 30, borderRadius: 3, flexShrink: 0, background: "conic-gradient(#3a3a44 25%, #2a2a32 0 50%, #3a3a44 0 75%, #2a2a32 0) 0 0/8px 8px" }}
+        />
+      )}
       {/* 글자 레이어 표식 — 붓이 안 먹는 이유가 목록에서 보인다 */}
       {l.text && <span style={{ display: "grid", color: "var(--ink-faint)", flexShrink: 0 }}>{Icon.typeT12}</span>}
-      <EditableName name={l.name} onRename={onRename} mark="editor-layer" style={{ flex: 1, minWidth: 0, fontSize: "var(--text-2xs)" }} />
+      {/* 컷의 이름은 읽는 차례 번호다 (고칠 이름이 아니다) */}
+      {l.panel ? (
+        <span style={{ flex: 1, minWidth: 0, fontSize: "var(--text-2xs)", color: "var(--ink)" }}>
+          {tPanel(no)}<small style={{ marginLeft: 6, color: "var(--ink-faint)" }}>{sub}</small>
+        </span>
+      ) : (
+        <EditableName name={l.name} onRename={onRename} mark="editor-layer" style={{ flex: 1, minWidth: 0, fontSize: "var(--text-2xs)" }} />
+      )}
     </div>
   );
 }
@@ -413,5 +481,150 @@ function IconBtn({ children, tip, onClick, disabled, danger, mark }: { children:
     >
       {children}
     </button>
+  );
+}
+
+/** 만화 페이지의 기둥 칸 — 고른 것에 따라 하나가 선다 (목업 ① · ⑤).
+ *  컷: 테두리 없음 · 그림 수. 말풍선: 꼬리(개수 · 추가 · 밑동 폭 · 휨) · 글(여백 · 줄 간격). 그림: 든 컷 (넣기 · 빼기) */
+function ComicSections({ doc, sel }: { doc: Doc; sel: Layer }) {
+  const t = useI18n((s) => s.t);
+  const s = useEditor();
+  const nums = panelNumbers(doc.layers, doc.comic!.dir, doc.h);
+  const panels = doc.layers.filter((l) => l.panel);
+
+  if (sel.panel) {
+    const kids = doc.layers.filter((l) => l.clip === sel.id).length;
+    return (
+      <Sec label={`${t("editor.panelNo", { n: nums.get(sel.id) ?? "" })} · ${t("editor.panelImages", { n: kids })}`}>
+        <Line label={t("editor.border")}>
+          <button
+            data-editor-panel-noborder
+            onMouseDown={dropFocus}
+            onClick={() => s.setPanelBorder(sel.id, !sel.panel!.noBorder)}
+            style={{ ...box, ...(sel.panel.noBorder ? on : {}), padding: "2px 10px" }}
+          >
+            {t("editor.noBorder")}
+          </button>
+        </Line>
+      </Sec>
+    );
+  }
+
+  if (sel.bubble) {
+    const b = sel.bubble;
+    const tails = hasTails(b.kind) ? b.tails : [];
+    const first = tails[0];
+    const patch = (p: Partial<BubbleMeta>, live = false) => s.patchBubble(sel.id, p, live);
+    return (
+      <>
+        {hasTails(b.kind) && (
+          <Sec label={`${t("editor.tails")} · ${t("editor.tailsN", { n: tails.length })}`} help={t("editor.tailsHint")}>
+            <div style={{ display: "flex", gap: "var(--sp-2)" }}>
+              <button
+                data-editor-tail-add
+                onMouseDown={dropFocus}
+                onClick={() => {
+                  // 하나 더 — 있던 꼬리의 반대쪽 (두 사람이 같이 말할 때)
+                  const base = defaultTail(b.body, doc.comic!.dir === "rtl" ? (tails.length % 2 ? "rtl" : "ltr") : tails.length % 2 ? "ltr" : "rtl", b.size);
+                  patch({ tails: [...b.tails, base] });
+                }}
+                style={{ ...box, display: "inline-flex", alignItems: "center", gap: 4, padding: "2px 8px" }}
+              >
+                {Icon.tailAdd}{t("editor.tailAdd")}
+              </button>
+              {tails.length > 0 && (
+                <button data-editor-tail-clear onMouseDown={dropFocus} onClick={() => patch({ tails: [] })} style={{ ...box, padding: "2px 8px" }}>
+                  {t("editor.tailClear")}
+                </button>
+              )}
+            </div>
+            {first && bendable(b.kind) && (
+              <>
+                <Line label={t("editor.tailWidth")}>
+                  <input
+                    type="range"
+                    data-editor-tail-width
+                    min={4}
+                    max={Math.max(60, Math.round(b.size * 2))}
+                    value={Math.round(first.w)}
+                    onPointerDown={() => s.markBefore()}
+                    onChange={(e) => patch({ tails: b.tails.map((q) => ({ ...q, w: Number(e.target.value) })) }, true)}
+                    style={{ flex: 1 }}
+                  />
+                  <span style={num}>{Math.round(first.w)}</span>
+                </Line>
+                <Line label={t("editor.tailBend")}>
+                  <input
+                    type="range"
+                    data-editor-tail-bend
+                    min={-Math.round(b.size * 3)}
+                    max={Math.round(b.size * 3)}
+                    value={Math.round(first.bend)}
+                    onPointerDown={() => s.markBefore()}
+                    onChange={(e) => patch({ tails: b.tails.map((q, i) => (i === 0 ? { ...q, bend: Number(e.target.value) } : q)) }, true)}
+                    style={{ flex: 1 }}
+                  />
+                  <span style={num}>{Math.round(first.bend)}</span>
+                </Line>
+              </>
+            )}
+          </Sec>
+        )}
+        <Sec label={t("editor.bubbleText")}>
+          <Line label={t("editor.pad")}>
+            <input type="range" data-editor-bubble-pad min={0} max={Math.round(b.size * 2)} value={Math.round(b.pad)} onPointerDown={() => s.markBefore()} onChange={(e) => patch({ pad: Number(e.target.value) }, true)} style={{ flex: 1 }} />
+            <span style={num}>{Math.round(b.pad)}</span>
+          </Line>
+          <Line label={t("editor.lineGap")}>
+            <input type="range" data-editor-bubble-linegap min={90} max={200} value={Math.round(b.lineGap * 100)} onPointerDown={() => s.markBefore()} onChange={(e) => patch({ lineGap: Number(e.target.value) / 100 }, true)} style={{ flex: 1 }} />
+            <span style={num}>{b.lineGap.toFixed(2)}</span>
+          </Line>
+        </Sec>
+      </>
+    );
+  }
+
+  // 그림 — 어느 컷에 들었나 (넣으면 그 컷을 가득 채우게 놓인다)
+  if (!sel.text && panels.length) {
+    const inside = panels.find((p) => pointInPoly({ x: sel.x + sel.w / 2, y: sel.y + sel.h / 2 }, panelPts(p, p.panel!.pts)));
+    const ordered = [...panels].sort((a, b) => (nums.get(a.id) ?? 0) - (nums.get(b.id) ?? 0));
+    return (
+      <Sec label={t("editor.inPanel")} help={t("editor.inPanelHint")}>
+        <select
+          data-editor-clip
+          value={sel.clip ?? ""}
+          onChange={(e) => s.setClip(sel.id, e.target.value || null)}
+          style={{ ...box, width: "100%" }}
+        >
+          <option value="">{t("editor.inPanelNone")}</option>
+          {ordered.map((p) => (
+            <option key={p.id} value={p.id}>
+              {t("editor.panelNo", { n: nums.get(p.id) ?? "" })}{p.id === inside?.id && !sel.clip ? ` · ${t("editor.inPanelHere")}` : ""}
+            </option>
+          ))}
+        </select>
+      </Sec>
+    );
+  }
+  return null;
+}
+
+/** 페이지 — 용지 크기 · 읽는 방향 · 안내선 (목업 ①의 「페이지」 칸) */
+function PageSection({ doc }: { doc: Doc }) {
+  const t = useI18n((s) => s.t);
+  const s = useEditor();
+  const page = doc.comic!;
+  return (
+    <Sec label={`${t("editor.page")}  ${doc.w} × ${doc.h}`}>
+      <Line label={t("editor.readDir")}>
+        <button data-editor-dir="rtl" onMouseDown={dropFocus} onClick={() => s.setComic({ dir: "rtl" })} style={{ ...box, ...(page.dir === "rtl" ? on : {}), padding: "2px 8px" }}>{t("editor.dirRtl")}</button>
+        <button data-editor-dir="ltr" onMouseDown={dropFocus} onClick={() => s.setComic({ dir: "ltr" })} style={{ ...box, ...(page.dir === "ltr" ? on : {}), padding: "2px 8px" }}>{t("editor.dirLtr")}</button>
+      </Line>
+      <Line label={t("editor.guides")}>
+        <button data-editor-guides-toggle onMouseDown={dropFocus} onClick={() => s.setComic({ guides: !page.guides })} style={{ ...box, ...(page.guides ? on : {}), display: "inline-flex", alignItems: "center", gap: 4, padding: "2px 8px" }}>
+          {Icon.fitBox}{t(page.guides ? "editor.guidesOn" : "editor.guidesOff")}
+        </button>
+      </Line>
+    </Sec>
   );
 }

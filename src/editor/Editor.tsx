@@ -12,6 +12,9 @@ import { saveName, useEditor, type Tool } from "./store";
 import { Stage } from "./Stage";
 import { Side } from "./Side";
 import { sendToEditor } from "./sendTo";
+import { NewCanvasDialog } from "./dialogs";
+import { BubbleKindIcon, LayoutThumb } from "./comicUi";
+import { BUBBLE_KINDS, LAYOUTS, type BubbleKind } from "./comic";
 
 /** 이미지 편집 모드 (사용자 지시 2026-09-22, 목업 `docs/image-editor-mockup.html`).
  *
@@ -28,6 +31,8 @@ export default function Editor() {
   const hydrated = s.hydrated;
   const editLast = useUi((st) => st.editLast);
   const { zone, over } = useImageDrop((items) => void sendToEditor(items));
+  /** 새 캔버스 창 (이미지 / 만화 페이지) */
+  const [newOpen, setNewOpen] = useState(false);
 
   /* ── 단축키 ── */
   useEffect(() => {
@@ -51,8 +56,10 @@ export default function Editor() {
         if (e.key === "Escape") { e.preventDefault(); return st.setCrop(null); }
       }
       // ★Del — 고른 레이어를 지운다 (사용자 지시 2026-09-22). 되돌리기가 있어 묻지 않는다 (삭제 단추와 같다)
-      if (e.key === "Delete" && st.layer()) { e.preventDefault(); return st.removeLayer(); }
-      const tools: Record<string, Tool> = { KeyV: "select", KeyB: "brush", KeyE: "eraser", KeyG: "bucket", KeyT: "text", KeyC: "crop", KeyH: "pan" };
+      if (e.key === "Delete" && st.layer()) { e.preventDefault(); void st.removeLayer(); return; }
+      // 컷(K)·말풍선(U)은 만화 페이지에만 있다
+      const comic = !!st.doc()?.comic;
+      const tools: Record<string, Tool> = { KeyV: "select", KeyB: "brush", KeyE: "eraser", KeyG: "bucket", KeyT: "text", KeyC: "crop", KeyH: "pan", ...(comic ? { KeyK: "panel" as Tool, KeyU: "bubble" as Tool } : {}) };
       const tool = tools[e.code];
       if (tool) { e.preventDefault(); st.setTool(tool); }
     };
@@ -99,6 +106,8 @@ export default function Editor() {
                 maxWidth: 220,
               }}
             >
+              {/* 캔버스 종류 — 만화 페이지 · 이미지 (목업 ①의 탭) */}
+              <span data-editor-doc-kind={d.comic ? "comic" : "image"} style={{ display: "grid", color: "var(--ink-faint)" }}>{d.comic ? Icon.page12 : Icon.image12}</span>
               {d.dirty && <span data-editor-dirty style={{ width: 6, height: 6, borderRadius: "50%", background: "var(--accent)", flexShrink: 0 }} />}
               <span style={{ overflow: "hidden", textOverflow: "ellipsis" }}>{d.name}</span>
               <button
@@ -112,7 +121,7 @@ export default function Editor() {
             </span>
           );
         })}
-        <button data-editor-new onClick={() => s.newDoc()} data-tip={t("editor.newDoc")} style={{ display: "grid", placeItems: "center", width: 30, height: 30, color: "var(--ink-faint)" }}>
+        <button data-editor-new onClick={() => setNewOpen(true)} data-tip={t("editor.newDoc")} style={{ display: "grid", placeItems: "center", width: 30, height: 30, color: "var(--ink-faint)" }}>
           {Icon.plus}
         </button>
         {/* 저장 자리는 오른쪽 기둥의 「저장 위치」 아래에만 있다 (일괄 변환과 같은 모양, 사용자 지시 2026-09-22) — 여기 두 번 적지 않는다 */}
@@ -123,7 +132,7 @@ export default function Editor() {
           <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: "var(--sp-3)", color: "var(--ink-faint)" }}>
             <span style={{ display: "grid", color: "var(--ink-ghost)" }}>{Icon.images}</span>
             <span style={{ fontSize: "var(--text-xs)", color: "var(--ink-dim)" }}>{t("editor.empty")}</span>
-            <button data-editor-new-big onClick={() => s.newDoc()} style={{ ...box, display: "inline-flex", alignItems: "center", gap: 6, padding: "5px var(--sp-4)" }}>
+            <button data-editor-new-big onClick={() => setNewOpen(true)} style={{ ...box, display: "inline-flex", alignItems: "center", gap: 6, padding: "5px var(--sp-4)" }}>
               {Icon.plus}{t("editor.newDoc")}
             </button>
           </div>
@@ -168,6 +177,7 @@ export default function Editor() {
           </div>
         </>
       )}
+      {newOpen && <NewCanvasDialog onClose={() => setNewOpen(false)} />}
     </div>
   );
 }
@@ -182,7 +192,8 @@ const dropTrappedFocus = (e: React.PointerEvent) => {
   if (a && a !== document.body && a.matches("input, textarea, select, [contenteditable=true]")) a.blur();
 };
 
-const TOOLS: { id: Tool; icon: React.ReactNode; key: "editor.toolSelect" | "editor.toolBrush" | "editor.toolEraser" | "editor.toolBucket" | "editor.toolText" | "editor.toolCrop" | "editor.toolPan" }[] = [
+type ToolKey = "editor.toolSelect" | "editor.toolBrush" | "editor.toolEraser" | "editor.toolBucket" | "editor.toolText" | "editor.toolCrop" | "editor.toolPan" | "editor.toolPanel" | "editor.toolBubble";
+const TOOLS: { id: Tool; icon: React.ReactNode; key: ToolKey }[] = [
   { id: "select", icon: Icon.cursor, key: "editor.toolSelect" },
   { id: "brush", icon: Icon.brush, key: "editor.toolBrush" },
   { id: "eraser", icon: Icon.eraser, key: "editor.toolEraser" },
@@ -191,6 +202,11 @@ const TOOLS: { id: Tool; icon: React.ReactNode; key: "editor.toolSelect" | "edit
   { id: "crop", icon: Icon.crop, key: "editor.toolCrop" },
   { id: "pan", icon: Icon.move, key: "editor.toolPan" },
 ];
+/** 만화 페이지에만 붙는 도구 (목업 ①: 도구 띠 가운데 칸) */
+const COMIC_TOOLS: { id: Tool; icon: React.ReactNode; key: ToolKey }[] = [
+  { id: "panel", icon: Icon.panel, key: "editor.toolPanel" },
+  { id: "bubble", icon: Icon.bubble, key: "editor.toolBubble" },
+];
 
 /** 왼쪽 도구 띠 — 새 자리다 (다른 모드에는 없다). 아래에 되돌리기·다시 실행 */
 function ToolStrip() {
@@ -198,6 +214,7 @@ function ToolStrip() {
   const tool = useEditor((s) => s.tool);
   const canUndo = useEditor((s) => s.canUndo());
   const canRedo = useEditor((s) => s.canRedo());
+  const comic = useEditor((s) => !!s.doc()?.comic);
   const st = useEditor.getState();
   const b = (active: boolean, disabled = false): React.CSSProperties => ({
     width: 36,
@@ -216,6 +233,16 @@ function ToolStrip() {
           {x.icon}
         </button>
       ))}
+      {comic && (
+        <>
+          <span style={{ width: 24, height: 1, background: "var(--line)", margin: "var(--sp-2) 0" }} />
+          {COMIC_TOOLS.map((x) => (
+            <button key={x.id} data-editor-tool={x.id} onMouseDown={dropFocus} onClick={() => st.setTool(x.id)} data-tip={t(x.key)} style={b(tool === x.id)}>
+              {x.icon}
+            </button>
+          ))}
+        </>
+      )}
       <span style={{ width: 24, height: 1, background: "var(--line)", margin: "var(--sp-2) 0" }} />
       <button data-editor-undo onMouseDown={dropFocus} onClick={() => st.undo()} disabled={!canUndo} data-tip={t("editor.undo")} style={b(false, !canUndo)}>{Icon.undo}</button>
       <button data-editor-redo onMouseDown={dropFocus} onClick={() => st.redo()} disabled={!canRedo} data-tip={t("editor.redo")} style={b(false, !canRedo)}>{Icon.redo}</button>
@@ -258,7 +285,7 @@ function ToolOptions() {
   }, [bgOpen]);
 
   const tool = s.tool;
-  const toolMeta = TOOLS.find((x) => x.id === tool)!;
+  const toolMeta = [...TOOLS, ...COMIC_TOOLS].find((x) => x.id === tool)!;
   const zoomPct = doc.view.fit ? null : percent(doc.view.zoom);
   const bgs: { id: string; label: string; sw: React.CSSProperties }[] = [
     { id: "dark", label: t("editor.bgDark"), sw: { background: "var(--bg)" } },
@@ -305,6 +332,9 @@ function ToolOptions() {
           </Opt>
         </>
       )}
+      {/* 만화 페이지 — 컷 도구 · 말풍선 도구 (고른 말풍선이 있으면 어느 도구든) */}
+      {tool === "panel" && doc.comic && <PanelOptions />}
+      {(tool === "bubble" || !!sel?.bubble) && doc.comic && <BubbleOptions />}
       {/* 글자 옵션 — 글자 도구일 때, 그리고 **글자 레이어를 골라 두었을 때** (어느 도구든, 사용자 지시 2026-09-22) */}
       {(tool === "text" || !!sel?.text) && (
         <>
@@ -408,5 +438,159 @@ function Opt({ label, children }: { label: string; children: React.ReactNode }) 
       {label}
       {children}
     </span>
+  );
+}
+
+/** 컷 도구의 옵션 줄 — 배치(첫 배치를 다시 편다) · 컷 간격(가로·세로) · 테두리 두께 · 색 (목업 ③).
+ *  ★페이지 값이다 (`Doc.comic`) — 간격은 자르기선·템플릿이 쓰고, 테두리는 바꾸면 컷 전부가 다시 구워진다 */
+function PanelOptions() {
+  const t = useI18n((s) => s.t);
+  const s = useEditor();
+  const page = s.doc()!.comic!;
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    if (!open) return;
+    const close = (e: PointerEvent) => {
+      if (ref.current?.contains(e.target as Node)) return;
+      setOpen(false);
+    };
+    document.addEventListener("pointerdown", close, true);
+    return () => document.removeEventListener("pointerdown", close, true);
+  }, [open]);
+  return (
+    <>
+      <div ref={ref} style={{ position: "relative" }}>
+        <button data-editor-layout onMouseDown={dropFocus} onClick={() => setOpen((v) => !v)} style={{ ...box, ...(open ? on : {}), padding: "2px 10px" }}>
+          {t("editor.layout")}
+        </button>
+        {open && (
+          <div data-editor-layout-menu style={{ position: "absolute", left: 0, top: "100%", marginTop: 4, zIndex: 20, padding: 8, background: "var(--panel)", border: "1px solid var(--line)", borderRadius: "var(--r-2)", boxShadow: "0 8px 28px rgba(0,0,0,.5)", display: "grid", gridTemplateColumns: "repeat(6, 38px)", gap: 6 }}>
+            {Object.keys(LAYOUTS).map((k) => (
+              <button key={k} data-editor-layout-pick={k} onClick={() => { setOpen(false); void s.applyLayout(k); }} style={{ ...box, width: 38, height: 52, padding: 0, display: "grid", placeItems: "center" }}>
+                <LayoutThumb layout={k} w={28} h={40} />
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
+      <Opt label={t("editor.gapX")}>
+        <PageNum mark="editor-gap-x" value={page.gapX} onCommit={(v) => s.setComic({ gapX: v })} />
+      </Opt>
+      <Opt label={t("editor.gapY")}>
+        <PageNum mark="editor-gap-y" value={page.gapY} onCommit={(v) => s.setComic({ gapY: v })} />
+      </Opt>
+      <Opt label={t("editor.border")}>
+        <input
+          type="range"
+          data-editor-border
+          min={0}
+          max={30}
+          value={Math.round(page.border)}
+          onPointerDown={() => s.markBefore()}
+          onChange={(e) => s.setComic({ border: Number(e.target.value) }, true)}
+          style={{ width: 80 }}
+        />
+        <span style={num}>{Math.round(page.border)}</span>
+      </Opt>
+      <input type="color" data-editor-border-color value={page.color} onChange={(e) => s.setComic({ color: e.target.value })} style={colorBox} data-tip={t("editor.borderColor")} />
+    </>
+  );
+}
+
+/** 페이지 숫자 칸 — 적고 Enter·밖을 누르면 한 번 반영 */
+function PageNum({ value, onCommit, mark }: { value: number; onCommit: (v: number) => void; mark: string }) {
+  const [text, setText] = useState(String(Math.round(value)));
+  useEffect(() => setText(String(Math.round(value))), [value]);
+  const commit = () => {
+    const v = Math.max(0, Math.round(Number(text)));
+    if (Number.isFinite(v) && v !== Math.round(value)) onCommit(v);
+    else setText(String(Math.round(value)));
+  };
+  return (
+    <input
+      data-num={mark}
+      value={text}
+      onChange={(e) => setText(e.target.value)}
+      onBlur={commit}
+      onKeyDown={(e) => { if (e.key === "Enter") (e.currentTarget as HTMLInputElement).blur(); }}
+      style={{ ...box, width: 44, textAlign: "right", fontVariantNumeric: "tabular-nums", padding: "1px 6px" }}
+    />
+  );
+}
+
+const KIND_KEY: Record<BubbleKind, "editor.kindSpeech" | "editor.kindNarration" | "editor.kindShout" | "editor.kindThought" | "editor.kindWhisper" | "editor.kindWavy" | "editor.kindPhone"> = {
+  speech: "editor.kindSpeech", narration: "editor.kindNarration", shout: "editor.kindShout", thought: "editor.kindThought",
+  whisper: "editor.kindWhisper", wavy: "editor.kindWavy", phone: "editor.kindPhone",
+};
+
+/** 말풍선 도구의 옵션 줄 — 종류 · 글꼴 · 크기 · 가로/세로 · 글에 맞춤/풍선에 맞춤 · 선 두께 · 선 색 · 채움 색 (목업 ①).
+ *  ★새로 만들 말풍선의 기본값이면서, 말풍선을 골라 두었으면 **그 말풍선에 곧바로 걸린다** (글자 도구와 같은 규칙) */
+function BubbleOptions() {
+  const t = useI18n((s) => s.t);
+  const s = useEditor();
+  const ui = useUi((st) => st.editorBubble);
+  const setUi = useUi((st) => st.setEditorBubble);
+  const sel = s.layer();
+  const b = sel?.bubble;
+  const cur = b ?? { ...ui, fit: "text" as const };
+  /** `live` 는 슬라이더를 끄는 동안 (끌기 전에 `markBefore` 로 한 걸음) */
+  const set = (p: Partial<typeof ui> & { fit?: "text" | "box" }, live = false) => {
+    const { fit, ...rest } = p;
+    setUi(rest);
+    // 종류가 꼬리를 못 가지면(나레이션) 꼬리는 두고 안 그린다 — 다시 바꾸면 돌아온다
+    if (b && sel) s.patchBubble(sel.id, { ...rest, ...(fit ? { fit } : {}) }, live);
+  };
+  return (
+    <>
+      <span style={{ display: "inline-flex", border: "1px solid var(--line)", borderRadius: "var(--r-2)", overflow: "hidden" }}>
+        {BUBBLE_KINDS.map((k, i) => (
+          <button
+            key={k}
+            data-editor-bubble-kind={k}
+            onMouseDown={dropFocus}
+            onClick={() => set({ kind: k })}
+            data-tip={t(KIND_KEY[k])}
+            style={{
+              display: "grid", placeItems: "center", height: 24, minWidth: 30, padding: "0 5px",
+              borderLeft: i ? "1px solid var(--line)" : 0,
+              background: cur.kind === k ? "var(--accent-bg)" : "var(--panel)",
+              color: cur.kind === k ? "var(--ink)" : "var(--ink-faint)",
+              boxShadow: cur.kind === k ? "inset 0 0 0 1px var(--accent)" : undefined,
+            }}
+          >
+            <BubbleKindIcon kind={k} />
+          </button>
+        ))}
+      </span>
+      <select data-editor-bubble-font value={cur.font} onChange={(e) => set({ font: e.target.value })} style={{ ...box, width: 120, padding: "1px 6px" }}>
+        {FONTS.map((f) => <option key={f.id} value={f.stack}>{f.label}</option>)}
+        <option value="serif">Serif</option>
+      </select>
+      <input
+        type="number"
+        data-editor-bubble-size
+        min={6}
+        max={400}
+        value={Math.round(cur.size)}
+        onChange={(e) => set({ size: Math.max(6, Math.min(400, Math.round(Number(e.target.value) || 6))) })}
+        style={{ ...box, width: 52, textAlign: "right", fontVariantNumeric: "tabular-nums", padding: "1px 6px" }}
+      />
+      <span style={{ display: "inline-flex", gap: 2 }}>
+        <button data-editor-bubble-dir="h" onMouseDown={dropFocus} onClick={() => set({ vertical: false })} style={{ ...box, ...(!cur.vertical ? on : {}), padding: "2px 8px" }}>{t("editor.horizontal")}</button>
+        <button data-editor-bubble-dir="v" onMouseDown={dropFocus} onClick={() => set({ vertical: true })} style={{ ...box, ...(cur.vertical ? on : {}), padding: "2px 8px" }}>{t("editor.vertical")}</button>
+      </span>
+      <span style={{ display: "inline-flex", gap: 2 }}>
+        <button data-editor-bubble-fit="text" onMouseDown={dropFocus} onClick={() => set({ fit: "text" })} disabled={!b} style={{ ...box, ...(cur.fit === "text" ? on : {}), padding: "2px 8px" }}>{t("editor.fitText")}</button>
+        <button data-editor-bubble-fit="box" onMouseDown={dropFocus} onClick={() => set({ fit: "box" })} disabled={!b} style={{ ...box, ...(cur.fit === "box" ? on : {}), padding: "2px 8px" }}>{t("editor.fitBox")}</button>
+      </span>
+      <Opt label={t("editor.line")}>
+        <input type="range" data-editor-bubble-stroke min={0} max={12} step={0.5} value={cur.stroke} onPointerDown={() => b && s.markBefore()} onChange={(e) => set({ stroke: Number(e.target.value) }, true)} style={{ width: 70 }} />
+        <span style={num}>{cur.stroke}</span>
+      </Opt>
+      <input type="color" data-editor-bubble-line value={cur.line} onChange={(e) => set({ line: e.target.value })} style={colorBox} data-tip={t("editor.lineColor")} />
+      <input type="color" data-editor-bubble-fill value={cur.fill} onChange={(e) => set({ fill: e.target.value })} style={colorBox} data-tip={t("editor.fillColor")} />
+      <input type="color" data-editor-bubble-color value={cur.color} onChange={(e) => set({ color: e.target.value })} style={colorBox} data-tip={t("editor.textColor")} />
+    </>
   );
 }

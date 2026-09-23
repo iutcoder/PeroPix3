@@ -2,6 +2,8 @@
  *  픽셀을 만지는 것은 `pixels.ts`, 상태는 `store.ts`, 화면은 `Editor.tsx`·`Stage.tsx`·`Side.tsx` 다.
  *  ★여기 있는 것은 전부 `node --experimental-strip-types src/editor/model.test.ts` 로 판정한다 (사용자 지시 2026-09-22). */
 
+import type { BubbleMeta, PanelMeta } from "./comic";
+
 export type Size = { w: number; h: number };
 export type Rect = { x: number; y: number; w: number; h: number };
 
@@ -37,6 +39,12 @@ export type LayerMeta = Xform & {
   sw: number;
   sh: number;
   text?: TextMeta;
+  /** 만화 페이지의 컷 — 테두리만 굽고, 이 컷에 든 그림(`clip`)은 이 다각형으로 잘린다 (`comic.ts`) */
+  panel?: PanelMeta;
+  /** 만화 페이지의 말풍선 — 몸통·꼬리·글을 원문으로 들고 픽셀은 그것에서 굽는다 (`comic.ts`) */
+  bubble?: BubbleMeta;
+  /** 이 그림이 든 컷의 레이어 id — 합성·합치기·저장이 그 컷 모양으로 자른다 */
+  clip?: string;
 };
 
 /** 글자를 어떻게 앉히나 — 줄마다 잰 폭을 받아 상자 크기와 줄의 x 를 정한다 (재는 것은 캔버스가, 셈은 여기가) */
