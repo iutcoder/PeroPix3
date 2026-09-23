@@ -15,10 +15,15 @@ import { Hint, Line, Sec, box, dropFocus, num, on } from "../panels/censor/ui";
 import { NO_ADJUST, hasAdjust, withRatio } from "./model";
 import { thumbOf, type Layer } from "./pixels";
 import { primaryOf, saveName, useEditor, whereOf, type Doc } from "./store";
-import { CanvasSizeDialog, ImageSizeDialog } from "./dialogs";
+import { CanvasSizeDialog, ExportPagesDialog, ImageSizeDialog } from "./dialogs";
 import { BubbleKindIcon, CAST_COLORS } from "./comicUi";
 import { bendable, castSpot, comicGroupId, defaultTail, hasTails, panelNumbers, panelPts, pointInPoly, type BubbleMeta, type PanelGen } from "./comic";
-import { cutCost, generateCuts, pickTake, sizeOf } from "./cutGen";
+import { cutCost, cutRoute, generateCuts, inpaintCuts, pickTake, sizeOf } from "./cutGen";
+import { EnhanceDialog } from "../panels/EnhanceDialog";
+import { useImageInput } from "../store/imageInput";
+import { SfxSection } from "./SfxSection";
+import { HandedSection } from "./ComicAddon";
+import { retryComicFonts, useComicFonts } from "./comicFonts";
 import { BlockList } from "../blocks/BlockList";
 import { slotBlock, slotBlocksOf } from "../lib/blocks";
 import { thumbUrlOf } from "../lib/imgUrl";
@@ -34,7 +39,7 @@ export function Side({ doc }: { doc: Doc }) {
   const sel = doc.layers.find((l) => l.id === primaryOf(doc)) ?? null;
   const many = doc.sel.length > 1;
   const adj = sel && !many ? sel.adj : NO_ADJUST;
-  const [dlg, setDlg] = useState<"canvas" | "image" | null>(null);
+  const [dlg, setDlg] = useState<"canvas" | "image" | "pages" | null>(null);
   const editLast = useUi((st) => st.editLast);
   const setEditLast = useUi((st) => st.setEditLast);
 
@@ -101,6 +106,8 @@ export function Side({ doc }: { doc: Doc }) {
 
         {/* ── 만화 페이지: 고른 컷 · 고른 말풍선 · 컷에 든 그림 (설계 5·6·8번) ── */}
         {doc.comic && sel && !many && <ComicSections doc={doc} sel={sel} />}
+        {/* 효과음 — 고른 효과음을 고치거나, 효과음 도구만 들었으면 새 효과음의 글을 고른다 (설계 7번) */}
+        {doc.comic && !many && (sel?.sfx || (s.tool === "sfx" && !sel?.bubble && !sel?.panel)) && <SfxSection sel={sel?.sfx ? sel : null} />}
 
         {/* ── 변형 ── 컷(꼭짓점으로 고친다)·말풍선(몸통·꼬리 손잡이)은 무대에서만 고친다 */}
         {!(sel && !many && (sel.panel || sel.bubble)) && (
@@ -116,9 +123,9 @@ export function Side({ doc }: { doc: Doc }) {
               </Line>
               <Line label={t("editor.dims")}>
                 {/* ★글자 레이어는 언제나 비율대로 늘고, 늘린 만큼 글꼴 크기가 된다 (`settleText`) */}
-                <NumIn mark="editor-w" value={Math.round(sel.w)} min={1} onCommit={(v) => { s.patchLayer(sel.id, s.ratioLock || sel.text ? { w: v, h: withRatio(sel.w, sel.h, v) } : { w: v }); if (sel.text) s.settleText(sel.id); }} />
+                <NumIn mark="editor-w" value={Math.round(sel.w)} min={1} onCommit={(v) => { s.patchLayer(sel.id, s.ratioLock || sel.text || sel.sfx ? { w: v, h: withRatio(sel.w, sel.h, v) } : { w: v }); if (sel.text) s.settleText(sel.id); if (sel.sfx) s.settleSfx(sel.id); }} />
                 <span style={{ color: "var(--ink-ghost)" }}>×</span>
-                <NumIn mark="editor-h" value={Math.round(sel.h)} min={1} onCommit={(v) => { s.patchLayer(sel.id, s.ratioLock || sel.text ? { h: v, w: withRatio(sel.h, sel.w, v) } : { h: v }); if (sel.text) s.settleText(sel.id); }} />
+                <NumIn mark="editor-h" value={Math.round(sel.h)} min={1} onCommit={(v) => { s.patchLayer(sel.id, s.ratioLock || sel.text || sel.sfx ? { h: v, w: withRatio(sel.h, sel.w, v) } : { h: v }); if (sel.text) s.settleText(sel.id); if (sel.sfx) s.settleSfx(sel.id); }} />
                 <button
                   data-editor-ratio
                   onMouseDown={dropFocus}
@@ -194,7 +201,7 @@ export function Side({ doc }: { doc: Doc }) {
         )}
 
         {/* ── 페이지 (만화 페이지만) ── */}
-        {doc.comic && <PageSection doc={doc} />}
+        {doc.comic && <PageSection doc={doc} onExport={() => setDlg("pages")} />}
 
         {/* ── 캔버스 ── */}
         <Sec label={`${t("editor.canvas")}  ${doc.w} × ${doc.h}`}>
@@ -287,6 +294,7 @@ export function Side({ doc }: { doc: Doc }) {
 
       {dlg === "canvas" && <CanvasSizeDialog doc={doc} onClose={() => setDlg(null)} />}
       {dlg === "image" && <ImageSizeDialog doc={doc} onClose={() => setDlg(null)} />}
+      {dlg === "pages" && <ExportPagesDialog onClose={() => setDlg(null)} />}
     </div>
   );
 }
@@ -308,14 +316,15 @@ function LayerList({ doc }: { doc: Doc }) {
   // ★만화 페이지는 묶음으로 보인다 — 말풍선 · 컷(그 컷에 든 그림이 아래로 들여 쓰인다) · 그 밖 (설계 4번 · 목업 ①).
   //   차례는 스토어가 묶음대로 맞춰 두므로(`comicStack`) 줄 사이에 머리만 끼우면 된다
   const nums = doc.comic ? panelNumbers(doc.layers, doc.comic.dir, doc.h) : null;
-  const groupOf = (l: Layer) => (l.bubble ? "bubble" : l.panel || (l.clip && doc.layers.some((p) => p.id === l.clip && p.panel)) ? "panel" : "other");
-  const counts = { bubble: doc.layers.filter((l) => l.bubble).length, panel: doc.layers.filter((l) => l.panel).length, other: 0 };
-  counts.other = doc.layers.length - counts.bubble - doc.layers.filter((l) => groupOf(l) === "panel").length;
-  const head = (g: "bubble" | "panel" | "other") => (
+  const groupOf = (l: Layer) => (l.bubble ? "bubble" : l.sfx ? "sfx" : l.panel || (l.clip && doc.layers.some((p) => p.id === l.clip && p.panel)) ? "panel" : "other");
+  const counts = { bubble: doc.layers.filter((l) => l.bubble).length, sfx: doc.layers.filter((l) => l.sfx).length, panel: doc.layers.filter((l) => l.panel).length, other: 0 };
+  counts.other = doc.layers.length - counts.bubble - counts.sfx - doc.layers.filter((l) => groupOf(l) === "panel").length;
+  const GROUP_KEY = { bubble: "editor.groupBubbles", sfx: "editor.groupSfx", panel: "editor.groupPanels", other: "editor.groupOther" } as const;
+  const head = (g: "bubble" | "sfx" | "panel" | "other") => (
     <div data-editor-layer-group={g} style={{ display: "flex", alignItems: "center", gap: 6, padding: "4px var(--sp-2) 2px", fontSize: "var(--text-3xs)", color: "var(--ink-faint)", letterSpacing: ".02em" }}>
-      {t(g === "bubble" ? "editor.groupBubbles" : g === "panel" ? "editor.groupPanels" : "editor.groupOther")}
+      {t(GROUP_KEY[g])}
       <span style={{ flex: 1 }} />
-      {g === "bubble" ? counts.bubble : g === "panel" ? counts.panel : counts.other}
+      {counts[g]}
     </div>
   );
   return (
@@ -354,11 +363,12 @@ function listRows(doc: Doc): Layer[] {
   if (!doc.comic) return rows;
   const nums = panelNumbers(doc.layers, doc.comic.dir, doc.h);
   const panels = rows.filter((l) => l.panel).sort((a, b) => (nums.get(a.id) ?? 0) - (nums.get(b.id) ?? 0));
-  const inPanel = (l: Layer) => !l.panel && !l.bubble && !!l.clip && panels.some((p) => p.id === l.clip);
+  const inPanel = (l: Layer) => !l.panel && !l.bubble && !l.sfx && !!l.clip && panels.some((p) => p.id === l.clip);
   return [
     ...rows.filter((l) => l.bubble),
+    ...rows.filter((l) => l.sfx),
     ...panels.flatMap((p) => [p, ...rows.filter((l) => inPanel(l) && l.clip === p.id)]),
-    ...rows.filter((l) => !l.bubble && !l.panel && !inPanel(l)),
+    ...rows.filter((l) => !l.bubble && !l.sfx && !l.panel && !inPanel(l)),
   ];
 }
 
@@ -434,9 +444,13 @@ function LayerRow({
       {l.text && <span style={{ display: "grid", color: "var(--ink-faint)", flexShrink: 0 }}>{Icon.typeT12}</span>}
       {/* 컷의 이름은 읽는 차례 번호다 (고칠 이름이 아니다) */}
       {l.panel ? (
-        <span style={{ flex: 1, minWidth: 0, fontSize: "var(--text-2xs)", color: "var(--ink)" }}>
-          {tPanel(no)}<small style={{ marginLeft: 6, color: "var(--ink-faint)" }}>{sub}</small>
-        </span>
+        <>
+          <span style={{ flex: 1, minWidth: 0, fontSize: "var(--text-2xs)", color: "var(--ink)" }}>
+            {tPanel(no)}<small style={{ marginLeft: 6, color: "var(--ink-faint)" }}>{sub}</small>
+          </span>
+          {/* 넘겨받은 프롬프트가 있는 컷 — 플러그인 모드 색 점 (목업 ⑦) */}
+          {l.panel.gen?.handed && <span data-editor-layer-handed style={{ width: 7, height: 7, borderRadius: "50%", background: "var(--mode-plugins)", flexShrink: 0 }} />}
+        </>
       ) : (
         <EditableName name={l.name} onRename={onRename} mark="editor-layer" style={{ flex: 1, minWidth: 0, fontSize: "var(--text-2xs)" }} />
       )}
@@ -593,7 +607,7 @@ function ComicSections({ doc, sel }: { doc: Doc; sel: Layer }) {
   }
 
   // 그림 — 어느 컷에 들었나 (넣으면 그 컷을 가득 채우게 놓인다)
-  if (!sel.text && panels.length) {
+  if (!sel.text && !sel.sfx && panels.length) {
     const inside = panels.find((p) => pointInPoly({ x: sel.x + sel.w / 2, y: sel.y + sel.h / 2 }, panelPts(p, p.panel!.pts)));
     const ordered = [...panels].sort((a, b) => (nums.get(a.id) ?? 0) - (nums.get(b.id) ?? 0));
     return (
@@ -618,10 +632,11 @@ function ComicSections({ doc, sel }: { doc: Doc; sel: Layer }) {
 }
 
 /** 페이지 — 용지 크기 · 읽는 방향 · 안내선 (목업 ①의 「페이지」 칸) */
-function PageSection({ doc }: { doc: Doc }) {
+function PageSection({ doc, onExport }: { doc: Doc; onExport: () => void }) {
   const t = useI18n((s) => s.t);
   const s = useEditor();
   const page = doc.comic!;
+  const count = s.docs.filter((d) => d.comic).length;
   return (
     <Sec label={`${t("editor.page")}  ${doc.w} × ${doc.h}`}>
       <Line label={t("editor.readDir")}>
@@ -633,7 +648,32 @@ function PageSection({ doc }: { doc: Doc }) {
           {Icon.fitBox}{t(page.guides ? "editor.guidesOn" : "editor.guidesOff")}
         </button>
       </Line>
+      <ComicFontStatus />
+      {/* 여러 페이지 한 번에 — 만화 페이지 캔버스 전부를 이름 차례로 (설계 11번) */}
+      <button data-editor-export-pages onMouseDown={dropFocus} onClick={onExport} style={{ ...box, display: "inline-flex", alignItems: "center", justifyContent: "center", gap: 6 }}>
+        {Icon.pages}{t("editor.exportPagesN", { n: count })}
+      </button>
     </Sec>
+  );
+}
+
+/** 만화 글꼴 상태 — 받는 중이면 진행, 못 받았으면 이유와 다시 받기 (다 받았으면 아무것도 안 그린다, 설계 9-3) */
+function ComicFontStatus() {
+  const t = useI18n((s) => s.t);
+  const st = useComicFonts((s) => s.status);
+  if (!st || (st.ready && !st.downloading)) return null;
+  if (st.downloading) {
+    const pct = st.total ? Math.round((st.got / st.total) * 100) : 0;
+    return <span data-editor-fonts-state="downloading"><Hint>{t("editor.fontsDownloading", { p: pct })}</Hint></span>;
+  }
+  if (!st.error) return null;
+  return (
+    <div data-editor-fonts-state="error" style={{ display: "flex", alignItems: "center", gap: "var(--sp-2)" }}>
+      <span data-tip={st.error} style={{ flex: 1, minWidth: 0, fontSize: "var(--text-2xs)", color: "var(--ink-faint)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+        {t("editor.fontsFailed")}
+      </span>
+      <button data-editor-fonts-retry onMouseDown={dropFocus} onClick={() => void retryComicFonts()} style={{ ...box, padding: "1px 8px" }}>{t("editor.fontsRetry")}</button>
+    </div>
   );
 }
 
@@ -647,6 +687,7 @@ function CutSection({ doc, panel }: { doc: Doc; panel: Layer }) {
   const tabName = useWs((w) => w.activeTabOf()?.name ?? "");
   const pending = useQueue((q) => q.pending);
   const [count, setCount] = useState(1);
+  const [enhance, setEnhance] = useState(false);
   const [base, setBase] = useState("");
   useEffect(() => {
     void backendUrl().then(setBase);
@@ -654,14 +695,15 @@ function CutSection({ doc, panel }: { doc: Doc; panel: Layer }) {
   const g: PanelGen = { blocks: [], cast: [], takes: [], ...panel.panel!.gen };
   const blk = slotBlock(g.blocks, `cut-${panel.id}`);
   const size = sizeOf(panel);
-  const cost = cutCost([panel], count);
+  const cost = cutCost([panel], count, doc.comic?.addon);
   const cur = doc.layers.find((l) => l.clip === panel.id && l.take)?.take ?? null;
   const group = comicGroupId(doc.id);
   // 빈 컷 — 그림도 없고 대기도 없는 컷 (「빈 컷 전부 생성」이 도는 것)
   const empty = doc.layers.filter(
     (l) => l.panel && l.on && !doc.layers.some((x) => x.clip === l.id) && !pending.some((q) => q.groupId === group && q.cellId === l.id),
   );
-  const emptyCost = cutCost(empty, 1);
+  const emptyCost = cutCost(empty, 1, doc.comic?.addon);
+  const inpaintCost = cutCost([panel], count, doc.comic?.addon, useImageInput.getState().baseInpaintStrength ?? 1);
   const toggleCast = (id: string) => {
     const has = g.cast.some((c) => c.id === id);
     const next = has ? g.cast.filter((c) => c.id !== id) : [...g.cast, { id, ...castSpot(g.cast.length, g.cast.length + 1) }];
@@ -671,7 +713,7 @@ function CutSection({ doc, panel }: { doc: Doc; panel: Layer }) {
   const costText = (c: { total: number; free: boolean }) => t("editor.cutCost", { a: c.free ? 0 : c.total });
   return (
     <div data-editor-cut style={{ display: "flex", flexDirection: "column", gap: "var(--sp-3)", marginTop: "var(--sp-2)" }}>
-      <span style={{ fontSize: "var(--text-2xs)", color: "var(--ink-faint)" }}>{t("editor.cutUses", { tab: tabName })}</span>
+      {!g.handed && <span style={{ fontSize: "var(--text-2xs)", color: "var(--ink-faint)" }}>{t("editor.cutUses", { tab: tabName })}</span>}
       {g.takes.length > 0 && base && (
         <div data-editor-cut-takes style={{ display: "flex", flexWrap: "wrap", gap: "var(--sp-2)" }}>
           {g.takes.map((tk) => {
@@ -691,9 +733,14 @@ function CutSection({ doc, panel }: { doc: Doc; panel: Layer }) {
           })}
         </div>
       )}
+      {/* ★플러그인이 넘겨준 컷은 기본의 「컷 프롬프트 · 인물」 자리에 넘겨받은 프롬프트 칸이 선다 (설계 10-1 · 목업 ⑦) */}
+      {g.handed && <HandedSection doc={doc} panel={panel} />}
+      {!g.handed && (
       <div data-editor-cut-prompt>
         <BlockList single fill id={`cut-${panel.id}`} blocks={[blk]} onChange={(b) => s.setPanelGen(panel.id, { blocks: slotBlocksOf(b[0] ?? blk) })} libZone={`cut-${panel.id}`} />
       </div>
+      )}
+      {!g.handed && (
       <div style={{ display: "flex", flexDirection: "column", gap: "var(--sp-2)" }}>
         <span style={{ fontSize: "var(--text-2xs)", color: "var(--ink-faint)" }}>{t("editor.cutCast")}</span>
         {!chars.length && <Hint>{t("editor.cutNoChars")}</Hint>}
@@ -716,6 +763,7 @@ function CutSection({ doc, panel }: { doc: Doc; panel: Layer }) {
           })}
         </div>
       </div>
+      )}
       <Line label={t("editor.cutCount")}>
         <span style={{ display: "inline-flex", gap: 2 }}>
           {[1, 2, 3, 4].map((n) => (
@@ -737,6 +785,31 @@ function CutSection({ doc, panel }: { doc: Doc; panel: Layer }) {
         <small style={{ fontWeight: "var(--w-normal)", opacity: 0.85, marginLeft: 6 }}>{size.w} × {size.h} · {costText(cost)}</small>
       </button>
       {cost.overLimit && <Hint>{t("editor.cutOver")}</Hint>}
+      {/* 이 컷만 다시 — 지금 보이는 것을 베이스로 컷 모양 안만 다시 그리기(인페인트) · 든 그림을 큰 판으로 다시 그리기(강화). 결과는 이 컷의 후보로 */}
+      <div style={{ display: "flex", gap: "var(--sp-2)" }}>
+        <button
+          data-editor-cut-inpaint
+          disabled={inpaintCost.overLimit}
+          onMouseDown={dropFocus}
+          onClick={() => void inpaintCuts(doc, [panel.id], count)}
+          data-tip={t("editor.cutInpaintHint")}
+          style={{ ...box, flex: 1, display: "inline-flex", alignItems: "center", justifyContent: "center", gap: 6, padding: "var(--sp-2) 0" }}
+        >
+          {Icon.brush}{t("editor.cutInpaint")}
+          <small style={{ color: "var(--ink-faint)" }}>{costText(inpaintCost)}</small>
+        </button>
+        <button
+          data-editor-cut-enhance
+          disabled={!cur}
+          onMouseDown={dropFocus}
+          onClick={() => setEnhance(true)}
+          data-tip={t(cur ? "editor.cutEnhanceHint" : "editor.cutEnhanceNone")}
+          style={{ ...box, flex: 1, display: "inline-flex", alignItems: "center", justifyContent: "center", gap: 6, padding: "var(--sp-2) 0", color: cur ? undefined : "var(--ink-ghost)" }}
+        >
+          {Icon.spark}{t("enhance.button")}
+        </button>
+      </div>
+      {enhance && cur && <EnhanceDialog files={[cur.file]} ws={cur.ws} route={cutRoute(doc, panel)} onClose={() => setEnhance(false)} />}
       <button
         data-editor-cut-gen-empty
         disabled={!empty.length || emptyCost.overLimit}

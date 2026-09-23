@@ -12,7 +12,7 @@
  *  ★★켜서 다 읽기 전에는 적지 않는다 (`store.ts` 의 `hydrated`) — 빈 상태로 덮어쓰면 남긴 것이 전부 휴지통으로 간다. */
 import { emptyHist, type LayerMeta } from "./model";
 import { getPx, loadState, putPx, putState, type PersistDoc } from "./io";
-import { bakeBubble, bakePanel, ensureFont, fitBubble, rebakeText, type Layer } from "./pixels";
+import { bakeBubble, bakePanel, bakeSfx, ensureFont, fitBubble, rebakeText, type Layer } from "./pixels";
 import type { Doc } from "./store";
 
 const keyOf = new WeakMap<HTMLCanvasElement, string>();
@@ -161,6 +161,15 @@ export async function loadDocs(): Promise<{ docs: Doc[]; cur: string | null }> {
           const b = fitBubble(layer.bubble);
           const { box, cv: bcv } = bakeBubble(b);
           layers.push({ ...layer, bubble: b, cv: bcv, sw: bcv.width, sh: bcv.height, x: box.x, y: box.y, w: box.w, h: box.h });
+          continue;
+        }
+        if (layer.sfx) {
+          // 효과음도 원문에서 — 가운데를 지키고 다시 굽는다 (글꼴은 먼저 싣는다. 만화 글꼴은 받은 뒤 `refreshGlyphs` 가 한 번 더 굽는다)
+          await document.fonts.load(`${layer.sfx.size}px ${layer.sfx.font}`, layer.sfx.value || " ").catch(() => undefined);
+          const { cv: scv } = bakeSfx(layer.sfx);
+          const cx = layer.x + layer.w / 2;
+          const cy = layer.y + layer.h / 2;
+          layers.push({ ...layer, cv: scv, sw: scv.width, sh: scv.height, w: scv.width, h: scv.height, x: cx - scv.width / 2, y: cy - scv.height / 2 });
           continue;
         }
         layers.push(baked ? { ...layer, ...baked } : layer);

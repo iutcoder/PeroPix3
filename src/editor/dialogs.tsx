@@ -5,7 +5,10 @@ import { Line, box, dropFocus, on } from "../panels/censor/ui";
 import { sizePreview, withRatio, type Anchor, type Fill, type Size } from "./model";
 import { LAYOUTS, paperPx, type Dir, type Dpi, type PaperId } from "./comic";
 import { LayoutThumb } from "./comicUi";
-import { composite } from "./pixels";
+import { composite, exportDataUrl } from "./pixels";
+import { api } from "../lib/backend";
+import { toast } from "../store/toast";
+import { useUi } from "../store/ui";
 import { useEditor, type Doc } from "./store";
 
 /** 캔버스 크기 — 목업 ③ 그대로 (사용자 지적 2026-09-22: 생김새가 목업과 많이 달랐다).
@@ -299,4 +302,87 @@ export function NewCanvasDialog({ onClose }: { onClose: () => void }) {
       )}
     </Modal>
   );
+}
+
+/** 만화 페이지 여러 장을 **한 번에** 내보낸다 (설계 11번) — 이름 차례(숫자는 수로)로 `<이름>_01.png` …, ZIP 하나, PDF 하나.
+ *  ★저장 폴더는 한 장 저장의 「저장 폴더 지정」과 같은 값(`useUi.editLast.dest`)을 쓴다. 메타데이터는 한 장 저장과 같이 민다 */
+export function ExportPagesDialog({ onClose }: { onClose: () => void }) {
+  const t = useI18n((s) => s.t);
+  const docs = useEditor((s) => s.docs);
+  const pages = docs.filter((d) => d.comic).sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
+  const [pick, setPick] = useState<string[]>(() => pages.map((d) => d.id));
+  const [fmt, setFmt] = useState<"png" | "webp" | "zip" | "pdf">("png");
+  const [name, setName] = useState(() => commonStem(pages.map((d) => d.name)));
+  const dest = useUi((s) => s.editLast.dest);
+  const setEditLast = useUi((s) => s.setEditLast);
+  const [busy, setBusy] = useState(false);
+  const chosen = pages.filter((d) => pick.includes(d.id));
+  const pickDir = async () => {
+    try {
+      const r = await api<{ dir: string | null }>("/api/files/pick-dir", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ start: dest }) });
+      if (r.dir) setEditLast({ dest: r.dir });
+    } catch (e) {
+      toast(String(e), "warn");
+    }
+  };
+  const run = async () => {
+    if (busy || !chosen.length) return;
+    if (!dest) return toast(t("editor.needDest"), "warn");
+    setBusy(true);
+    try {
+      const images = chosen.map((d) => exportDataUrl(d));
+      const r = await api<{ files: string[]; dir: string }>("/api/edit/export-pages", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ images, base: name.trim() || "page", fmt, dest }),
+      });
+      toast(t("editor.exportDone", { n: chosen.length, dir: r.dir }));
+      onClose();
+    } catch (e) {
+      toast(t("editor.saveFail", { e: String(e) }), "warn");
+    } finally {
+      setBusy(false);
+    }
+  };
+  const ext = fmt === "zip" ? ".zip" : fmt === "pdf" ? ".pdf" : `_${"1".padStart(Math.max(2, String(chosen.length).length), "0")}.${fmt}`;
+  return (
+    <Modal title={t("editor.exportPages")} mark="editor-export-pages" onOk={() => void run()} onClose={onClose} okLabel={busy ? t("editor.exporting") : t("editor.export")} width={420}>
+      <div data-export-pages-list style={{ display: "flex", flexDirection: "column", gap: 2, maxHeight: 200, overflowY: "auto", border: "1px solid var(--line)", borderRadius: "var(--r-2)", padding: 4, background: "var(--panel)" }}>
+        {pages.map((d, i) => {
+          const onIt = pick.includes(d.id);
+          return (
+            <label key={d.id} data-export-page={d.id} style={{ display: "flex", alignItems: "center", gap: 8, padding: "3px 6px", fontSize: "var(--text-xs)", color: onIt ? "var(--ink)" : "var(--ink-faint)", cursor: "pointer" }}>
+              <input type="checkbox" checked={onIt} onChange={() => setPick(onIt ? pick.filter((x) => x !== d.id) : [...pick, d.id])} />
+              <span style={{ width: 22, color: "var(--ink-faint)", fontVariantNumeric: "tabular-nums" }}>{i + 1}</span>
+              <span style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{d.name}</span>
+              <span style={{ color: "var(--ink-ghost)", fontSize: "var(--text-3xs)" }}>{d.w} × {d.h}</span>
+            </label>
+          );
+        })}
+      </div>
+      <Line label={t("editor.exportName")}>
+        <input data-export-name value={name} onChange={(e) => setName(e.target.value)} style={{ ...box, flex: 1, padding: "3px 6px" }} />
+      </Line>
+      <Line label={t("tools.format")}>
+        {(["png", "webp", "zip", "pdf"] as const).map((f) => (
+          <button key={f} data-export-fmt={f} onMouseDown={dropFocus} onClick={() => setFmt(f)} style={{ ...box, ...(fmt === f ? on : {}), padding: "2px 10px" }}>{f.toUpperCase()}</button>
+        ))}
+      </Line>
+      <Line label={t("tools.dest")}>
+        <button data-export-dest onClick={() => void pickDir()} style={{ ...box, flex: 1, minWidth: 0, textAlign: "left", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", direction: dest ? "rtl" : undefined }}>
+          {dest || t("tools.destPick")}
+        </button>
+      </Line>
+      <span data-export-preview style={{ fontSize: "var(--text-2xs)", color: "var(--ink-faint)" }}>{t("tools.preview", { s: `${name.trim() || "page"}${ext}` })} · {t("editor.exportCount", { n: chosen.length })}</span>
+    </Modal>
+  );
+}
+
+/** 여러 이름의 공통 앞부분 — 끝의 구분 글자(`_`·`-`·공백·`p.`)를 걷는다. 없으면 첫 이름 */
+function commonStem(names: string[]): string {
+  if (!names.length) return "page";
+  let p = names[0];
+  for (const n of names) while (!n.startsWith(p)) p = p.slice(0, -1);
+  p = p.replace(/[\s_\-.]*(p|page|쪽)?[\s_\-.]*$/i, "").trim();
+  return p || names[0];
 }

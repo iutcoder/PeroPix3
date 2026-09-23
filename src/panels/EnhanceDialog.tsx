@@ -59,15 +59,22 @@ const MAGNITUDE: Record<number, { strength: number; noise: number }> = {
 export function EnhanceDialog({
   files,
   onClose,
+  ws: wsFor,
+  route,
 }: {
   /** 강화할 그림들. 여럿이면 **배치**다 — 큐로 보낸다 */
   files: string[];
   onClose: () => void;
+  /** 그림이 사는 워크스페이스 — 없으면 지금 워크스페이스 (만화 편집의 컷 그림은 뽑을 때의 워크스페이스에 산다) */
+  ws?: string;
+  /** 결과를 보낼 자리를 덮어쓴다 (탭·씬 그룹·칸) — 만화 편집의 컷 강화는 결과가 그 컷으로 돌아와야 한다 (`editor/cutGen`) */
+  route?: Record<string, unknown>;
 }) {
   const t = useI18n((s) => s.t);
   const { base, params } = useGen();
   const opus = (useCurrentSub()?.tier ?? 0) >= 3;
-  const ws = useWs((s) => s.current);
+  const wsNow = useWs((s) => s.current);
+  const ws = wsFor ?? wsNow;
   const records = useWs((s) => s.records);
   const setNow = useWs((s) => s.activeSceneGroup());
   // ★탭이 없으면 이 창이 뜰 수 없다 (부르는 두 자리가 다 탭 안이다). 옛 폴백은 `"싱글"`
@@ -278,6 +285,7 @@ export function EnhanceDialog({
           // ★이 워크스페이스의 계정으로 (점검 2026-09-02: 빠져 있어 강화가 첫 계정으로 나갔다)
           account: currentAccountId(),
           ...(found ? { cell: found.cell.name, cell_id: found.cell.id } : {}),
+          ...(route ?? {}),
         },
         jobs,
         1,

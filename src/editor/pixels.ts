@@ -5,6 +5,7 @@
  *  ★합성은 **문서 좌표계**에서 한다 — 레이어의 변형(자리·크기·회전·반전)은 그릴 때 `ctx` 변환으로 건다 (비파괴). */
 import { centerOf, filterOf, floodFill, hexRgb, layoutText, rad, textBaseline, type LayerMeta, type Rect, type Size, type TextMeta, type Xform } from "./model";
 import { bodyFor, bubbleBounds, bubbleShape, panelPts, wrapLines, type BubbleMeta, type ComicPage, type PanelMeta, type Pt } from "./comic";
+import { SFX_FALLBACK, layoutSfx, primaryFamily, sfxBounds, type Glyph, type SfxMeta } from "./sfx";
 
 export type Layer = LayerMeta & { cv: HTMLCanvasElement };
 
@@ -279,6 +280,133 @@ export function bakeBubble(b: BubbleMeta, hideText = false): { box: Rect; cv: HT
         g.fillText(s, x, cy - L.th / 2 + i * L.lineH + base);
       });
     }
+  }
+  return { box, cv };
+}
+
+/* ── 만화 페이지: 효과음 ─────────────────────────────────────────── */
+
+/** 그 글자가 주 글꼴에 **있나** — 캔버스는 없는 글자를 말없이 대체 글꼴로 그리므로, 두 기본 글꼴(고정폭·세리프)을
+ *  뒤에 붙여 잰 폭이 **둘 다** 기본 글꼴만의 폭과 같으면 없는 것이다 (설계 9-2 ★★: 한국어 효과음 글꼴에 빠진 음절이 있다) */
+const hasGlyphCache = new Map<string, boolean>();
+export function hasGlyph(ch: string, family: string): boolean {
+  if (!family || !ch.trim()) return true;
+  const key = `${family}\u0000${ch}`;
+  const hit = hasGlyphCache.get(key);
+  if (hit !== undefined) return hit;
+  if (!probe) probe = makeCanvas(1, 1).getContext("2d")!;
+  const w = (f: string) => {
+    probe!.font = `64px ${f}`;
+    return probe!.measureText(ch).width;
+  };
+  const q = `'${family.replace(/'/g, "")}'`;
+  const has = w(`${q}, monospace`) !== w("monospace") || w(`${q}, serif`) !== w("serif");
+  // 글꼴을 아직 안 받았으면 「없다」로 나온다 — 받은 뒤 다시 재야 하므로 그때는 적어 두지 않는다
+  if (has || document.fonts.check(`64px ${q}`, ch)) hasGlyphCache.set(key, has);
+  return has;
+}
+/** 글꼴을 새로 받았으면 잰 것을 버린다 (`comicFonts` 가 부른다) */
+export const forgetGlyphs = () => hasGlyphCache.clear();
+
+const sfxFont = (m: SfxMeta, size: number, font: string) => `${m.bold ? "bold " : ""}${size}px ${font}`;
+
+/** 효과음의 글자 배치 — 글자마다 주 글꼴에 없으면 대체 글꼴로 (`sfx.SFX_FALLBACK`) */
+export function sfxGlyphs(m: SfxMeta): Glyph[] {
+  if (!probe) probe = makeCanvas(1, 1).getContext("2d")!;
+  const fam = primaryFamily(m.font);
+  return layoutSfx(
+    m,
+    (ch, size, font) => {
+      probe!.font = sfxFont(m, size, font);
+      return probe!.measureText(ch).width;
+    },
+    (ch, font) => (hasGlyph(ch, fam) ? font : SFX_FALLBACK),
+  );
+}
+
+/** 대체 글꼴로 그린 글자들 — 화면이 알린다 (설계 9-2: 굵기·모양이 달라지므로) */
+export const sfxSubstituted = (m: SfxMeta): string[] => [...new Set(sfxGlyphs(m).filter((g) => g.font === SFX_FALLBACK && g.ch.trim()).map((g) => g.ch))];
+
+/** 효과음을 굽는다 → 상자(원점 기준)와 그 크기의 캔버스.
+ *  ★네 번 나눠 긋는다 — 그림자 → 바깥 외곽선 → 안쪽 외곽선 → 채움. 층마다 **글 전체**를 한 번에 그려서 이웃 글자의 외곽선이 한 덩어리가 된다 */
+export function bakeSfx(m: SfxMeta): { box: Rect; cv: HTMLCanvasElement } {
+  const glyphs = sfxGlyphs(m);
+  const box = sfxBounds(m, glyphs);
+  const cv = makeCanvas(box.w, box.h);
+  const g = cv.getContext("2d")!;
+  g.translate(-box.x, -box.y);
+  g.textAlign = "center";
+  g.textBaseline = "middle";
+  g.lineJoin = "round";
+  g.miterLimit = 2;
+  const skew = Math.tan((m.skew * Math.PI) / 180);
+  const each = (fn: (gl: Glyph) => void, dx = 0, dy = 0) => {
+    for (const gl of glyphs) {
+      if (!gl.ch.trim()) continue;
+      g.save();
+      g.translate(gl.x + dx, gl.y + dy);
+      g.rotate((gl.rot * Math.PI) / 180);
+      g.transform(1, 0, skew, 1, 0, 0);
+      g.font = sfxFont(m, gl.size, gl.font);
+      fn(gl);
+      g.restore();
+    }
+  };
+  const inner = m.inner * m.size;
+  const outer = m.outer * m.size;
+  if (m.shadow > 0) {
+    const d = m.shadow * m.size;
+    g.fillStyle = m.shadowColor;
+    g.strokeStyle = m.shadowColor;
+    g.lineWidth = (inner + outer) * 2;
+    each((gl) => {
+      if (g.lineWidth > 0) g.strokeText(gl.ch, 0, 0);
+      g.fillText(gl.ch, 0, 0);
+    }, d, d);
+  }
+  if (outer > 0) {
+    g.strokeStyle = m.outerColor;
+    g.lineWidth = (inner + outer) * 2;
+    each((gl) => g.strokeText(gl.ch, 0, 0));
+  }
+  if (inner > 0) {
+    g.strokeStyle = m.innerColor;
+    g.lineWidth = inner * 2;
+    each((gl) => g.strokeText(gl.ch, 0, 0));
+  }
+  if (m.fill2 && glyphs.some((gl) => gl.ch.trim())) {
+    // 위 → 아래 그라데이션 — 글 전체 상자에 걸친다 (글자마다 따로면 줄무늬가 된다).
+    // 채움만 따로 판에 그리고 그 모양 안(`source-in`)에 그라데이션을 부은 뒤 얹는다
+    const top = Math.min(...glyphs.map((gl) => gl.y - gl.size / 2)) - box.y;
+    const bot = Math.max(...glyphs.map((gl) => gl.y + gl.size / 2)) - box.y;
+    const tmp = makeCanvas(box.w, box.h);
+    const t = tmp.getContext("2d")!;
+    t.translate(-box.x, -box.y);
+    t.textAlign = "center";
+    t.textBaseline = "middle";
+    t.fillStyle = "#000";
+    for (const gl of glyphs) {
+      if (!gl.ch.trim()) continue;
+      t.save();
+      t.translate(gl.x, gl.y);
+      t.rotate((gl.rot * Math.PI) / 180);
+      t.transform(1, 0, skew, 1, 0, 0);
+      t.font = sfxFont(m, gl.size, gl.font);
+      t.fillText(gl.ch, 0, 0);
+      t.restore();
+    }
+    t.setTransform(1, 0, 0, 1, 0, 0);
+    t.globalCompositeOperation = "source-in";
+    const grad = t.createLinearGradient(0, top, 0, bot);
+    grad.addColorStop(0, m.fill);
+    grad.addColorStop(1, m.fill2);
+    t.fillStyle = grad;
+    t.fillRect(0, 0, tmp.width, tmp.height);
+    g.setTransform(1, 0, 0, 1, 0, 0);
+    g.drawImage(tmp, 0, 0);
+  } else {
+    g.fillStyle = m.fill;
+    each((gl) => g.fillText(gl.ch, 0, 0));
   }
   return { box, cv };
 }

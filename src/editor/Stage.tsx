@@ -7,7 +7,7 @@ import { boxInside, brushScale, centerOf, cornersOf, docToLayer, hitLayer, keepA
 import { bubbleText, clipOf, composite, fontOf, makeCanvas, strokeTo, textLayout, type Layer, type Stroke } from "./pixels";
 import {
   bboxOf, bendFrom, bendHandle, bendable, comicGroupId, distToEdge, hasTails, panelNumbers, panelPts, pointInPoly, rectPts, segHitsPoly, snapCands, snapTo, splitPoly, gapFor, tailGeo,
-  type Pt,
+  CAST_NEUTRAL, type Pt,
 } from "./comic";
 import { primaryOf, useEditor, type Doc } from "./store";
 import { usePrompt } from "../store/prompt";
@@ -78,6 +78,8 @@ export function Stage({ doc }: { doc: Doc }) {
     ti?: number;
     /** 말풍선을 눌렀다 놓기만 하면 글 고치기 (말풍선 도구) */
     tapEdit?: boolean;
+    /** 인물 점 — 직접 고른 인물(`cast`) · 넘겨받은 인물(`hchar`) · 넘겨받은 내레이션 자리(`hnote`) */
+    castKind?: "cast" | "hchar" | "hnote";
   } | null>(null);
   const rafRef = useRef(0);
   /** 선택 도구의 더블클릭 셈 — 바로 앞의 누르기 (pointerdown 의 기본 동작을 막으면 호환 dblclick 이 안 와서 직접 센다) */
@@ -197,13 +199,22 @@ export function Stage({ doc }: { doc: Doc }) {
     }
     return null;
   };
-  /** 누른 자리의 인물 점 — 그 컷과 몇 번째 인물인가 */
+  /** 누른 자리의 인물 점 — 그 컷과 몇 번째 인물인가. 넘겨받은 컷은 그 인물(`hchar`)·내레이션 자리(`hnote`) */
   const castAt = (p: { x: number; y: number }) => {
+    const near = (b: Rect, c: { x: number; y: number }) => Math.hypot(b.x + c.x * b.w - p.x, b.y + c.y * b.h - p.y) <= 12 / scale;
     for (const l of doc.layers) {
-      if (!l.panel?.gen?.cast.length || !l.on) continue;
+      if (!l.panel?.gen || !l.on) continue;
       const b = bboxOf(panelPts(l, l.panel.pts));
-      const i = l.panel.gen.cast.findIndex((c) => Math.hypot(b.x + c.x * b.w - p.x, b.y + c.y * b.h - p.y) <= 12 / scale);
-      if (i >= 0) return { panel: l, i };
+      const h = l.panel.gen.handed;
+      if (h) {
+        const ci = h.chars.findIndex((c) => near(b, c));
+        if (ci >= 0) return { panel: l, i: ci, kind: "hchar" as const };
+        const ni = doc.comic?.addon?.bubbles !== "editor" ? h.notes.findIndex((c) => near(b, c)) : -1;
+        if (ni >= 0) return { panel: l, i: ni, kind: "hnote" as const };
+        continue;
+      }
+      const i = l.panel.gen.cast.findIndex((c) => near(b, c));
+      if (i >= 0) return { panel: l, i, kind: "cast" as const };
     }
     return null;
   };
@@ -256,6 +267,19 @@ export function Stage({ doc }: { doc: Doc }) {
     return true;
   };
 
+  /** 고른 레이어의 크기·회전 손잡이를 눌렀나 — 눌렀으면 끌기를 시작하고 true (선택 도구 · 효과음 도구) */
+  const handleDown = (e: React.PointerEvent, p: { x: number; y: number }, l: Layer): boolean => {
+    const h = hitHandle(l, p);
+    if (h && "rotate" in h) {
+      const c = centerOf(l);
+      dragRef.current = { kind: "rotate", start: p, layer: l, rot0: l.rot, ang0: Math.atan2(p.y - c.y, p.x - c.x) };
+    } else if (h && "handle" in h) {
+      dragRef.current = { kind: "scale", start: p, layer: l, handle: h.handle };
+    } else return false;
+    (e.currentTarget as Element).setPointerCapture(e.pointerId);
+    return true;
+  };
+
   /* ── 누르기 ── */
   const down = (e: React.PointerEvent) => {
     const s = useEditor.getState();
@@ -277,7 +301,7 @@ export function Stage({ doc }: { doc: Doc }) {
     if ((tool === "select" || tool === "panel") && comic) {
       const hit = castAt(p);
       if (hit) {
-        dragRef.current = { kind: "cast", start: p, layer: hit.panel, ti: hit.i };
+        dragRef.current = { kind: "cast", start: p, layer: hit.panel, ti: hit.i, castKind: hit.kind };
         (e.currentTarget as Element).setPointerCapture(e.pointerId);
         return;
       }
@@ -321,6 +345,20 @@ export function Stage({ doc }: { doc: Doc }) {
       return;
     }
 
+    // ── 효과음 도구: 고른 효과음의 손잡이 → 크기·회전 · 효과음 → 고르고 옮기기 · 빈 자리 → 새 효과음 (설계 7번)
+    if (tool === "sfx" && comic) {
+      if (xformable?.sfx && handleDown(e, p, xformable)) return;
+      const hitS = topLayerAt(p, (l) => !!l.sfx);
+      if (hitS) {
+        if (!doc.sel.includes(hitS.id)) s.selectLayer(hitS.id);
+        dragRef.current = { kind: "move", start: p, layers: [hitS] };
+        (e.currentTarget as Element).setPointerCapture(e.pointerId);
+        return;
+      }
+      s.addSfx(p);
+      return;
+    }
+
     if (tool === "crop") {
       dragRef.current = { kind: "crop", start: p };
       s.setCrop({ x: p.x, y: p.y, w: 0, h: 0 });
@@ -344,6 +382,7 @@ export function Stage({ doc }: { doc: Doc }) {
       if (!l.on) return toast(t("editor.layerOff"), "warn");
       // ★글자 레이어에는 안 그린다 — 그리면 원문과 어긋난다. 아래와 합치면 보통 레이어가 된다
       if (l.text) return toast(t("editor.textNoPaint"), "warn");
+      if (l.sfx || l.bubble || l.panel) return toast(t("editor.vectorNoPaint"), "warn");
       // 페인트통 — 누른 자리와 이어진 같은 색을 채운다 (한 걸음)
       if (tool === "bucket") { s.fillAt(p); return; }
       const b = tool === "eraser" ? useUi.getState().editorBrush.eraser : useUi.getState().editorBrush.brush;
@@ -367,26 +406,21 @@ export function Stage({ doc }: { doc: Doc }) {
     const dbl = !!last && now - last.t < 400 && Math.hypot(e.clientX - last.x, e.clientY - last.y) < 6;
     const multi = e.ctrlKey || e.metaKey;
     if (bubbleDown(e, p, dbl)) return;
-    if (xformable) {
-      const h = hitHandle(xformable, p);
-      if (h && "rotate" in h) {
-        const c = centerOf(xformable);
-        dragRef.current = { kind: "rotate", start: p, layer: xformable, rot0: xformable.rot, ang0: Math.atan2(p.y - c.y, p.x - c.x) };
-        (e.currentTarget as Element).setPointerCapture(e.pointerId);
-        return;
-      }
-      if (h && "handle" in h) {
-        dragRef.current = { kind: "scale", start: p, layer: xformable, handle: h.handle };
-        (e.currentTarget as Element).setPointerCapture(e.pointerId);
-        return;
-      }
-    }
+    if (xformable && handleDown(e, p, xformable)) return;
     const hit = topLayerAt(p);
     if (dbl && hit?.text) {
       dblRef.current = null;
       s.setTool("text");
       s.selectLayer(hit.id);
       s.beginTextEdit(hit.id);
+      return;
+    }
+    // 효과음을 더블클릭하면 효과음 도구로 바꾸고 기둥의 글 칸에 커서를 둔다
+    if (dbl && hit?.sfx) {
+      dblRef.current = null;
+      s.setTool("sfx");
+      s.selectLayer(hit.id);
+      setTimeout(() => document.querySelector<HTMLInputElement>("[data-editor-sfx-text]")?.focus({ preventScroll: true }), 0);
       return;
     }
     // 말풍선을 더블클릭하면 그 자리에서 글을 고친다 (글자 레이어와 같은 조작, 설계 6번)
@@ -497,7 +531,16 @@ export function Stage({ doc }: { doc: Doc }) {
         const b = bboxOf(panelPts(l, l.panel.pts));
         const x = Math.min(0.95, Math.max(0.05, (p.x - b.x) / Math.max(1, b.w)));
         const y = Math.min(0.95, Math.max(0.05, (p.y - b.y) / Math.max(1, b.h)));
-        const cast = (l.panel.gen?.cast ?? []).map((c, i) => (i === d.ti ? { ...c, x, y } : c));
+        const cur = useEditor.getState().doc()?.layers.find((q) => q.id === l.id)?.panel?.gen ?? l.panel.gen;
+        if (d.castKind === "hchar" && cur?.handed) {
+          s.setHanded(l.id, { chars: cur.handed.chars.map((c, i) => (i === d.ti ? { ...c, x, y } : c)) }, true);
+          return;
+        }
+        if (d.castKind === "hnote" && cur?.handed) {
+          s.setHanded(l.id, { notes: cur.handed.notes.map((c, i) => (i === d.ti ? { ...c, x, y } : c)) }, true);
+          return;
+        }
+        const cast = (cur?.cast ?? []).map((c, i) => (i === d.ti ? { ...c, x, y } : c));
         s.setPanelGen(l.id, { cast }, true);
         return;
       }
@@ -556,7 +599,7 @@ export function Stage({ doc }: { doc: Doc }) {
         let w = sx ? Math.max(1, Math.abs(ux - ox)) : l.w;
         let h = sy ? Math.max(1, Math.abs(uy - oy)) : l.h;
         // ★글자 레이어는 언제나 비율대로 — 상자를 늘리는 것이 곧 글꼴 크기라(놓을 때 `settleText` 가 다시 굽는다) 한쪽만 늘릴 수 없다
-        if (l.text || (ratioLock && sx && sy)) {
+        if (l.text || l.sfx || (ratioLock && sx && sy)) {
           const kk = !sx ? h / l.h : !sy ? w / l.w : Math.max(w / l.w, h / l.h);
           w = l.w * kk;
           h = l.h * kk;
@@ -571,10 +614,14 @@ export function Stage({ doc }: { doc: Doc }) {
       return;
     }
     if (strokeRef.current && p) return strokeAt(p);
-    if ((tool === "select" || tool === "bubble") && p) {
-      const bh = single?.bubble ? hitBubbleHandle(single, p) : null;
+    if ((tool === "select" || tool === "bubble" || tool === "sfx") && p) {
+      const bh = single?.bubble && tool !== "sfx" ? hitBubbleHandle(single, p) : null;
       if (bh) return setHoverCur(bh.box ? resizeCursor(0, bh.box) : "move");
       if (tool === "bubble") return setHoverCur(topLayerAt(p, (l) => !!l.bubble) ? "move" : null);
+      if (tool === "sfx") {
+        const hs = xformable?.sfx ? hitHandle(xformable, p) : null;
+        return setHoverCur(hs ? ("rotate" in hs ? ROTATE_CURSOR : resizeCursor(xformable!.rot, hs.handle)) : topLayerAt(p, (l) => !!l.sfx) ? "move" : null);
+      }
       const h = xformable ? hitHandle(xformable, p) : null;
       setHoverCur(h ? ("rotate" in h ? ROTATE_CURSOR : resizeCursor(xformable!.rot, h.handle)) : topLayerAt(p) ? "move" : null);
     }
@@ -590,6 +637,7 @@ export function Stage({ doc }: { doc: Doc }) {
       }
       // 글자 레이어를 늘렸으면 — 늘린 만큼 글꼴 크기를 바꿔 다시 굽는다 (픽셀 확대를 남기지 않는다)
       if (d.kind === "scale" && d.marked && d.layer?.text) useEditor.getState().settleText(d.layer.id);
+      if (d.kind === "scale" && d.marked && d.layer?.sfx) useEditor.getState().settleSfx(d.layer.id);
       if (d.kind === "marquee") setMarquee(null);
       const st = useEditor.getState();
       if (d.kind === "cut") {
@@ -653,7 +701,7 @@ export function Stage({ doc }: { doc: Doc }) {
   const cursorStyle =
     tool === "pan" ? (movable ? "move" : "default")
       : tool === "crop" || tool === "bucket" || tool === "panel" ? "crosshair"
-        : tool === "bubble" ? hoverCur ?? "copy"
+        : tool === "bubble" || tool === "sfx" ? hoverCur ?? "copy"
         : tool === "text" ? "text"
           : tool === "brush" || tool === "eraser" ? "none"
             : hoverCur ?? "default";
@@ -710,7 +758,7 @@ export function Stage({ doc }: { doc: Doc }) {
             <rect data-editor-marquee x={marquee.x} y={marquee.y} width={marquee.w} height={marquee.h} fill="rgba(255,255,255,.06)" stroke="var(--accent-ink)" strokeWidth={line} strokeDasharray={`${4 / scale} ${3 / scale}`} />
           )}
           {/* 고른 레이어의 상자와 손잡이 — 선택 도구에서 하나만 골랐을 때 */}
-          {tool === "select" && xformable && !crop && (() => {
+          {(tool === "select" || (tool === "sfx" && !!xformable?.sfx)) && xformable && !crop && (() => {
             const cs = cornersOf(xformable);
             const h = handlesOf(xformable);
             return (
@@ -863,14 +911,28 @@ function ComicOverlay({
   const ws = useWs((w) => w.current) ?? "";
   const group = comicGroupId(doc.id);
   const running = runningPendingId(group);
-  // ★인물 점의 번호는 **페이지 흐름 순서**다 — 컷을 읽는 차례대로, 컷 안에서는 고른 차례대로 이어 센다 (사용자 결정 2026-09-23)
+  // ★인물 점의 번호는 **페이지 흐름 순서**다 — 컷을 읽는 차례대로, 컷 안에서는 고른 차례대로 이어 센다 (사용자 결정 2026-09-23).
+  //   넘겨받은 컷은 콘티의 흐름 번호를 그대로 쓰고, 직접 고른 인물은 그 뒤에서 이어 센다 (설계 10-2)
   const ordered = [...panels].sort((a, b) => (nums.get(a.id) ?? 0) - (nums.get(b.id) ?? 0));
+  const nai = page.addon?.bubbles !== "editor";
   let flow = 0;
-  const dots = ordered.flatMap((l) => {
+  type Mark = { key: string; n: number; x: number; y: number; color: string; name: string; square?: boolean; peek?: string; note?: boolean };
+  const dots: Mark[] = ordered.flatMap((l) => {
     const b = bboxOf(panelPts(l, l.panel!.pts));
+    const at = (c: { x: number; y: number }) => ({ x: b.x + c.x * b.w, y: b.y + c.y * b.h });
+    const h = l.panel!.gen?.handed;
+    if (h) {
+      const out: Mark[] = [
+        ...h.chars.map((c, i) => ({ key: `${l.id}:h${i}`, n: c.no, ...at(c), color: c.color, name: c.name, peek: nai && c.lines.length ? c.lines.join(" / ") : undefined })),
+        ...(nai ? h.notes.map((c, i) => ({ key: `${l.id}:n${i}`, n: c.no, ...at(c), color: CAST_NEUTRAL, name: t("editor.narration"), square: true, peek: c.text || undefined, note: true })) : []),
+        ...(h.empty ? [{ key: `${l.id}:e`, n: h.empty, ...at({ x: 0.5, y: 0.5 }), color: CAST_NEUTRAL, name: t("editor.handedEmpty"), square: true }] : []),
+      ];
+      flow = Math.max(flow, ...out.map((m) => m.n));
+      return out;
+    }
     return (l.panel!.gen?.cast ?? []).map((c) => {
       const ci = chars.findIndex((x) => x.id === c.id);
-      return { key: `${l.id}:${c.id}`, n: ++flow, x: b.x + c.x * b.w, y: b.y + c.y * b.h, color: ci >= 0 ? CAST_COLORS[ci % CAST_COLORS.length] : "#78859a", name: ci >= 0 ? chars[ci].name || `#${ci + 1}` : "?" };
+      return { key: `${l.id}:${c.id}`, n: ++flow, ...at(c), color: ci >= 0 ? CAST_COLORS[ci % CAST_COLORS.length] : CAST_NEUTRAL, name: ci >= 0 ? chars[ci].name || `#${ci + 1}` : "?" };
     });
   });
   return (
@@ -936,10 +998,14 @@ function ComicOverlay({
       })}
       {/* 인물 점 — 만화 제작기 콘티와 같은 양식 (인물 색 동그라미 + 번호 + 이름), 생김새는 편집기 목업이 기준 (설계 10-2) */}
       {dots.map((c) => (
-        <g key={c.key} data-editor-cast-dot={c.n} transform={`translate(${c.x},${c.y})`}>
-          <circle r={11.5 * k} fill={c.color} stroke="#fff" strokeWidth={1.8 * k} />
+        <g key={c.key} data-editor-cast-dot={c.n} data-square={c.square ? "" : undefined} transform={`translate(${c.x},${c.y})`}>
+          {c.square
+            ? <rect x={-11 * k} y={-11 * k} width={22 * k} height={22 * k} rx={5.5 * k} fill={c.color} stroke="#fff" strokeWidth={1.8 * k} />
+            : <circle r={11.5 * k} fill={c.color} stroke="#fff" strokeWidth={1.8 * k} />}
           <text textAnchor="middle" y={4.2 * k} fontSize={11.5 * k} fontWeight={600} fill="#fff" style={{ fontFamily: "var(--font-sans)" }}>{c.n}</text>
-          <text textAnchor="middle" y={25 * k} fontSize={10.5 * k} fontWeight={600} fill="#263749" stroke="#fff" strokeWidth={2.8 * k} paintOrder="stroke" style={{ fontFamily: "var(--font-sans)" }}>{c.name}</text>
+          <text textAnchor="middle" y={25 * k} fontSize={10.5 * k} fontWeight={600} fill={c.square ? "#526980" : "#263749"} stroke="#fff" strokeWidth={2.8 * k} paintOrder="stroke" style={{ fontFamily: "var(--font-sans)" }}>{c.name}</text>
+          {/* NAI 가 말풍선 담당일 때 — 무슨 대사를 넣었는지만 (자리는 NAI 가 정한다): 인물은 점 위에 점선 말풍선, 내레이션은 사각형 아래 (목업 ⑧) */}
+          {c.peek && <LinePeek text={c.peek} k={k} below={!!c.note} />}
         </g>
       ))}
       {/* 자르기선 (끄는 중) + 놓으면 생길 두 컷 */}
@@ -972,6 +1038,26 @@ function ComicOverlay({
           </g>
         );
       })()}
+    </g>
+  );
+}
+
+/** NAI 담당일 때의 대사 미리보기 — 점선 둥근 상자 (목업 `linePeek`). 인물은 점 위에 꼬리를 점 쪽으로, 내레이션은 사각형 아래 */
+function LinePeek({ text, k, below }: { text: string; k: number; below: boolean }) {
+  const s = text.length > 28 ? `${text.slice(0, 27)}…` : text;
+  const w = ([...s].length * 10 + 14) * k;
+  const h = 17 * k;
+  const top = below ? 31 * k : -17 * k - h - 5 * k;
+  return (
+    <g data-editor-line-peek>
+      <rect x={-w / 2} y={top} width={w} height={h} rx={8.5 * k} fill="#fff" stroke="#526980" strokeWidth={k} strokeDasharray={`${2.5 * k} ${2 * k}`} />
+      {!below && (
+        <>
+          <path d={`M${-4 * k} ${top + h - 0.5 * k}L0 ${top + h + 5 * k}L${4 * k} ${top + h - 0.5 * k}`} fill="#fff" stroke="#526980" strokeWidth={k} strokeDasharray={`${2.5 * k} ${2 * k}`} />
+          <path d={`M${-3.2 * k} ${top + h - k}L${3.2 * k} ${top + h - k}`} stroke="#fff" strokeWidth={1.6 * k} />
+        </>
+      )}
+      <text x={0} y={top + 12 * k} textAnchor="middle" fontSize={10 * k} fill="#263749" style={{ fontFamily: "var(--font-sans)" }}>{s}</text>
     </g>
   );
 }

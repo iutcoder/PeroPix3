@@ -202,6 +202,13 @@ type Persisted = {
     font: string; size: number; color: string; bold: boolean; vertical: boolean;
     pad: number; lineGap: number; stroke: number; line: string; fill: string;
   };
+  /** 만화 페이지 효과음 도구의 마지막 값 — 새 효과음의 스타일·크기(A4 보통 폭 기준)·글, 문구 모음의 분류·언어 (`editor/sfx`) */
+  editorSfx: {
+    style: "impact" | "speed" | "shake" | "sweet" | "horror";
+    size: number; text: string;
+    cat: "general" | "action" | "emotion" | "adult" | "mine";
+    lang: "ko" | "ja" | "en";
+  };
   /** 이미지 편집의 **캔버스 밖 배경** — `dark`·`light`·`checker` 또는 `#rrggbb`. 투명 그림을 열면 안팎이 같은 색이라
    *  영역이 안 보이므로 바깥만 따로 바꾼다. 문서가 아니라 보기 설정이라 여기 산다 (사용자 지시 2026-09-22) */
   editorBg: string;
@@ -290,6 +297,7 @@ const DEFAULTS: Persisted = {
   editorBrush: { brush: { size: 24, hard: 0.8, opacity: 100, color: "#ff5a6e" }, eraser: { size: 40, hard: 0.8, opacity: 100 }, bucket: { tolerance: 32 } },
   editorText: { font: FONTS[0].stack, size: 48, color: "#ffffff", bold: false, align: "left" },
   editorBubble: { kind: "speech", font: FONTS[0].stack, size: 40, color: "#111111", bold: false, vertical: false, pad: 18, lineGap: 1.25, stroke: 2.5, line: "#111111", fill: "#ffffff" },
+  editorSfx: { style: "impact", size: 150, text: "쾅", cat: "general", lang: "ko" },
   editorBg: "dark",
   laneSide: "bottom",
   laneWidth: 420,
@@ -374,6 +382,7 @@ type S = Persisted & {
   setEditorBrush: (which: "brush" | "eraser" | "bucket", v: Partial<Persisted["editorBrush"]["brush"] & Persisted["editorBrush"]["bucket"]>) => void;
   setEditorText: (v: Partial<Persisted["editorText"]>) => void;
   setEditorBubble: (v: Partial<Persisted["editorBubble"]>) => void;
+  setEditorSfx: (v: Partial<Persisted["editorSfx"]>) => void;
   setEditorBg: (v: string) => void;
   setStreamPreview: (v: boolean) => void;
   setFocusNewPending: (v: boolean) => void;
@@ -579,6 +588,10 @@ export const useUi = create<S>((set, get) => ({
     set({ editorBubble: { ...get().editorBubble, ...v } });
     get().commitLayout();
   },
+  setEditorSfx: (v) => {
+    set({ editorSfx: { ...get().editorSfx, ...v } });
+    get().commitLayout();
+  },
   setEditorBg: (v) => {
     set({ editorBg: v });
     get().commitLayout();
@@ -651,7 +664,7 @@ export const useUi = create<S>((set, get) => ({
       laneHeight, artistH, artistOpen, artistColor, artistAlways, font, textScale, importPick, aiWidth, aiCollapsed,
       notifyDone, notifySound, notifyVolume, perSlot, curated, agentAuto, agentAskHard,
       tagSuggest, artistPrefix, weightHl, fmView, streamPreview, focusNewPending, enhanceLast, maskBrush, convertLast, editLast, editorBrush, editorText,
-      editorBubble, editorBg, sizeLast, laneSide, laneWidth, laneHeadH, view } = get();
+      editorBubble, editorSfx, editorBg, sizeLast, laneSide, laneWidth, laneHeadH, view } = get();
     try {
       localStorage.setItem(
         KEY,
@@ -693,6 +706,7 @@ export const useUi = create<S>((set, get) => ({
           editorBrush,
           editorText,
           editorBubble,
+          editorSfx,
           editorBg,
           sizeLast,
           laneSide,

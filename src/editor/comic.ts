@@ -24,7 +24,55 @@ export type ComicPage = {
   color: string;
   /** 안내선을 보이나 */
   guides: boolean;
+  /** 플러그인이 깐 콘티 (애드온 띠에 뜬다, 설계 10-1). 직접 만든 페이지에는 없다 */
+  addon?: ComicAddon;
 };
+
+/* ── 플러그인 연동 (설계 10번) ─────────────────────────────────── */
+
+/** 플러그인 프로젝트의 생성 옵션 — 넘겨받은 컷은 지금 워크스페이스 값이 아니라 이것으로 생성한다 (설계 10-2 「화풍·생성 옵션은 플러그인 프로젝트의 것」) */
+export type HandedGen = { model?: string; steps?: number; cfg?: number; cfg_rescale?: number; sampler?: string; quality_preset?: string; uc_preset?: string };
+/** 이 캔버스에 콘티를 깐 플러그인 — 애드온 띠(깐 플러그인 · 프로젝트와 페이지 · 모드 · 말풍선 담당)가 이것을 읽는다 */
+export type ComicAddon = { plugin: string; name: string; label: string; mode: "page" | "cut"; bubbles: "editor" | "nai"; source?: unknown; gen?: HandedGen };
+/** 넘겨받은 인물 — 번호는 콘티의 흐름 번호 그대로, 자리는 **컷 안 비율**(사선 보정 뒤). `lines` 는 NAI 담당일 때 그 인물 슬롯에 실린 대사 */
+export type HandedChar = { no: number; name: string; color: string; prompt: string; uc: string; x: number; y: number; lines: string[] };
+/** 넘겨받은 내레이션 슬롯 (NAI 담당일 때만) — 따로 좌표를 갖는 캐릭터 슬롯이다 */
+export type HandedNote = { no: number; text: string; prompt: string; x: number; y: number };
+/** 넘겨받은 프롬프트 — 컷 프롬프트·인물 대신 이것으로 생성한다 (설계 10-2 「컷 모드의 프롬프트 나누기」). `empty` 는 인물 없는 컷의 번호 */
+export type Handed = { summary: string; base: string; uc: string; chars: HandedChar[]; notes: HandedNote[]; empty?: number | null };
+
+/** 인물 없는 칸·내레이션 — 콘티와 같은 중립색 (`plugins/manga-maker/web/app.js` 의 `CAST_NEUTRAL`) */
+export const CAST_NEUTRAL = "#78859a";
+
+/** 컷 다각형 → 플러그인 콘티의 컷 틀 (`Region.frame`) — 네 꼭짓점이고 위 변이 기울었으면 사선 (오른쪽이 올라가면 slant-up) */
+export function frameOf(poly: Pt[]): "rectangle" | "slant-up" | "slant-down" {
+  if (poly.length !== 4) return "rectangle";
+  const b = bboxOf(poly);
+  if (b.h <= 0) return "rectangle";
+  const top = [...poly].sort((a, c) => a[1] - c[1]).slice(0, 2).sort((a, c) => a[0] - c[0]);
+  const d = (top[1][1] - top[0][1]) / b.h;
+  return d < -0.03 ? "slant-up" : d > 0.03 ? "slant-down" : "rectangle";
+}
+
+/** 플러그인이 정한 컷(페이지 전체에 대한 0~1 다각형)을 이 캔버스에 놓는다.
+ *  · 페이지 그림이 있으면(페이지 모드) 그림이 곧 캔버스라 **그대로** 곱한다.
+ *  · 없으면(컷 모드) 기본 틀 안에 넣고, 이웃한 변(페이지 가장자리가 아닌 변)만 간격의 반씩 들인다 (템플릿과 같은 규칙) */
+export function placeOwn(pts: Pt[], page: Pick<ComicPage, "frame" | "gapX" | "gapY">, size: Size, withImage: boolean): Pt[] {
+  if (withImage) return pts.map(([x, y]) => [x * size.w, y * size.h] as Pt);
+  const f = page.frame;
+  const b = bboxOf(pts);
+  const E = 0.01;
+  const inset = (v: number, lo: number, hi: number, gap: number) => {
+    // 그 점이 상자의 어느 변 쪽인가 — 페이지 가장자리에 붙은 변은 안 들인다
+    if (Math.abs(v - lo) < 1e-9 && lo > E) return gap / 2;
+    if (Math.abs(v - hi) < 1e-9 && hi < 1 - E) return -gap / 2;
+    return 0;
+  };
+  return pts.map(([x, y]) => [
+    f.x + x * f.w + inset(x, b.x, b.x + b.w, page.gapX),
+    f.y + y * f.h + inset(y, b.y, b.y + b.h, page.gapY),
+  ] as Pt);
+}
 
 /** 판형 — 세로형 만화 원고 (mm). 웹 게시 세로는 픽셀로 정한다 */
 export const PAPERS = {
@@ -104,8 +152,9 @@ export type PanelMeta = { pts: Pt[]; noBorder: boolean; gen?: PanelGen };
 export type CutCast = { id: string; x: number; y: number };
 /** 그 컷에서 뽑은 그림 — 워크스페이스 파일 (`ws` 의 `file`). 파일이라 지워지지 않는다 */
 export type CutTake = { ws: string; file: string };
-/** 컷 하나가 곧 씬 하나다 — 컷 프롬프트(씬 칸과 같은 블록 하나) · 나올 인물 · 크게 · 뽑은 후보 */
-export type PanelGen = { blocks: Block[]; cast: CutCast[]; big?: boolean; takes: CutTake[] };
+/** 컷 하나가 곧 씬 하나다 — 컷 프롬프트(씬 칸과 같은 블록 하나) · 나올 인물 · 크게 · 뽑은 후보.
+ *  `handed` 가 있으면 플러그인이 나눠 준 프롬프트로 생성한다 (컷 프롬프트·인물 대신, 설계 10-2) */
+export type PanelGen = { blocks: Block[]; cast: CutCast[]; big?: boolean; takes: CutTake[]; handed?: Handed };
 
 /** Opus 무료 한도 — `lib/anlas.ts` 의 `FREE_PIXELS` 와 같은 값 (공홈 `eZ`). 순수 계산이라 여기 둔다 */
 const FREE_PX = 1048576;
@@ -143,7 +192,7 @@ export function castSpot(i: number, n: number): { x: number; y: number } {
 }
 
 /** 컷 그림의 캐릭터 좌표 — 컷 안 비율 그대로 (생성 그림이 곧 컷 상자 비율이다). NAI 좌표 범위 안으로 붙든다 */
-export const castCenter = (c: CutCast) => ({ x: Math.min(0.95, Math.max(0.05, c.x)), y: Math.min(0.95, Math.max(0.05, c.y)) });
+export const castCenter = (c: { x: number; y: number }) => ({ x: Math.min(0.95, Math.max(0.05, c.x)), y: Math.min(0.95, Math.max(0.05, c.y)) });
 
 /** 만화 캔버스의 컷 생성 묶음 id — 큐의 씬 그룹 자리에 들어간다. 도착한 그림을 이 열쇠로 그 캔버스의 그 컷(`cell_id`)에 넣는다 */
 export const comicGroupId = (docId: string) => `comic_${docId}`;
@@ -565,18 +614,19 @@ export function wrapLines(value: string, maxW: number, measure: (s: string) => n
 
 /* ── 레이어 차례 ─────────────────────────────────────────────── */
 
-type Stackable = { id: string; panel?: PanelMeta; bubble?: BubbleMeta; clip?: string; x: number; y: number; w: number; h: number };
+type Stackable = { id: string; panel?: PanelMeta; bubble?: BubbleMeta; sfx?: unknown; clip?: string; x: number; y: number; w: number; h: number };
 
-/** 만화 페이지의 레이어 차례 — **아래부터** 그 밖의 레이어(용지 등) → 컷마다 [그 컷에 든 그림들, 컷 테두리] → 말풍선.
- *  컷 테두리가 그 컷의 그림 위에 오고 말풍선이 맨 위에 온다. 레이어 목록도 이 묶음(말풍선 · 컷 · 그 밖)으로 보인다 (설계 4번).
- *  같은 묶음 안의 차례는 지킨다 — 목록에서 끌어 바꾼 것이 남는다 */
+/** 만화 페이지의 레이어 차례 — **아래부터** 그 밖의 레이어(용지 등) → 컷마다 [그 컷에 든 그림들, 컷 테두리] → 효과음 → 말풍선.
+ *  컷 테두리가 그 컷의 그림 위에 오고, 효과음은 컷 테두리 위(컷 밖으로 삐져나가는 것이 흔하다), 말풍선이 맨 위에 온다.
+ *  레이어 목록도 이 묶음(말풍선 · 효과음 · 컷 · 그 밖)으로 보인다 (설계 4번). 같은 묶음 안의 차례는 지킨다 — 목록에서 끌어 바꾼 것이 남는다 */
 export function comicStack<T extends Stackable>(layers: T[]): T[] {
   const panels = layers.filter((l) => l.panel);
   const ids = new Set(panels.map((p) => p.id));
-  const inPanel = (l: T) => !l.panel && !l.bubble && !!l.clip && ids.has(l.clip);
-  const base = layers.filter((l) => !l.panel && !l.bubble && !inPanel(l));
+  const inPanel = (l: T) => !l.panel && !l.bubble && !l.sfx && !!l.clip && ids.has(l.clip);
+  const base = layers.filter((l) => !l.panel && !l.bubble && !l.sfx && !inPanel(l));
+  const sfx = layers.filter((l) => l.sfx);
   const bubbles = layers.filter((l) => l.bubble);
-  return [...base, ...panels.flatMap((p) => [...layers.filter((l) => inPanel(l) && l.clip === p.id), p]), ...bubbles];
+  return [...base, ...panels.flatMap((p) => [...layers.filter((l) => inPanel(l) && l.clip === p.id), p]), ...sfx, ...bubbles];
 }
 
 /** 컷 번호 — 읽는 차례대로 1부터 (컷 레이어 id → 번호) */

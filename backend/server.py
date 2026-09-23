@@ -51,6 +51,7 @@ from pydantic import BaseModel
 import censor
 import files
 import tagger
+import comicfonts
 import tagindex
 import imgutil
 import keep
@@ -150,6 +151,7 @@ if _OLD_ROOT.exists() and not WS_ROOT.exists():
 CONFIG_PATH = DATA_DIR / "config.json"
 
 DATA_DIR.mkdir(parents=True, exist_ok=True)
+comicfonts.init(DATA_DIR)
 store = Store(WS_ROOT)
 # ★카드는 워크스페이스 밖에 있다 — 어느 워크스페이스에서 만들어도 전부에서 보인다
 cards = Cards(DATA_DIR / "cards")
@@ -3010,6 +3012,29 @@ async def tagger_download():
     return tagger.start_download()
 
 
+# ── 만화 글꼴 — 처음 쓸 때 받는다 (설계 `docs/comic-editor-design.md` 9-3, `comicfonts.py`) ──
+
+@app.get("/api/comic-fonts")
+async def comic_fonts_status():
+    """받아 둔 판·글꼴 목록 · 받는 중인가 (진행 바이트 포함)"""
+    return comicfonts.status()
+
+
+@app.post("/api/comic-fonts/ensure")
+async def comic_fonts_ensure():
+    """없거나 판이 올랐으면 백그라운드로 받는다 — 만화 페이지 캔버스가 있을 때 화면이 부른다"""
+    return comicfonts.ensure()
+
+
+@app.get("/api/comic-fonts/file/{rel:path}")
+async def comic_fonts_file(rel: str):
+    p = comicfonts.file_path(rel)
+    if p is None:
+        raise HTTPException(404, "없는 글꼴입니다")
+    kind = {".otf": "font/otf", ".ttf": "font/ttf", ".woff2": "font/woff2", ".woff": "font/woff"}.get(p.suffix.lower(), "application/octet-stream")
+    return FileResponse(p, media_type=kind, headers={"Cache-Control": "max-age=86400"})
+
+
 @app.post("/api/tagger/run")
 def tagger_run(body: TaggerRun):
     """태그 뽑기. ★`def` 다 — ONNX 추론이 수 초를 쥔다 (censor 와 같은 규칙).
@@ -3311,6 +3336,126 @@ def edit_save(body: EditSave):
         n += 1
     dst.write_bytes(packed)
     return _edit_out(dst)
+
+
+class EditPages(BaseModel):
+    """만화 페이지 여러 장을 **한 번에** 내보낸다 (설계 11번). 화면이 캔버스마다 구운 PNG 를 이름 차례대로 보낸다.
+    ★메타데이터는 한 장 저장과 같은 이유로 언제나 민다. ★덮어쓰지 않는다 — 이름이 겹치면 묶음 이름에 `_2`·`_3` 을 붙인다."""
+
+    images: list[str] = []
+    #: 묶음 이름 — 낱장은 `<이름>_01.png` …, ZIP·PDF 는 `<이름>.zip` · `<이름>.pdf`
+    base: str = "page"
+    #: png · webp · zip(안은 PNG) · pdf
+    fmt: str = "png"
+    dest: str = ""
+
+
+def _edit_folder(dest: str) -> Path:
+    """저장 폴더 — 절대 경로면 그대로, 아니면 아웃풋 루트 안 (한 장 저장과 같은 규칙)"""
+    if not dest:
+        raise HTTPException(400, "저장할 폴더를 골라 주세요.")
+    p = Path(dest)
+    if p.is_absolute():
+        folder = p
+    else:
+        try:
+            folder = files.under(WS_ROOT, dest)
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+    folder.mkdir(parents=True, exist_ok=True)
+    return folder
+
+
+@app.post("/api/edit/export-pages")
+def edit_export_pages(body: EditPages):
+    if not body.images:
+        raise HTTPException(400, "내보낼 페이지가 없습니다")
+    fmt = str(body.fmt).lower()
+    if fmt not in ("png", "webp", "zip", "pdf"):
+        raise HTTPException(400, f"모르는 형식입니다: {body.fmt}")
+    base = safe_name(Path(body.base or "page").stem) or "page"
+    folder = _edit_folder(body.dest)
+    pages: list[bytes] = []
+    for i, img in enumerate(body.images):
+        raw = img.split(",", 1)[-1]
+        try:
+            pages.append(base64.b64decode(raw))
+        except (binascii.Error, ValueError) as e:
+            raise HTTPException(400, f"{i + 1}쪽 그림을 못 읽었습니다: {e}")
+    n = len(pages)
+    width = max(2, len(str(n)))
+    names = lambda stem, ext: [f"{stem}_{str(k + 1).zfill(width)}{ext}" for k in range(n)]  # noqa: E731
+    # 묶음 이름 — 하나라도 겹치면 통째로 다음 번호로 (덮어쓰지 않는다, 낱장 사이에 옛 파일이 끼지 않게)
+    def free(check) -> str:
+        stem, k = base, 2
+        while check(stem):
+            stem = f"{base}_{k}"
+            k += 1
+        return stem
+
+    try:
+        if fmt in ("png", "webp"):
+            kind = "WEBP" if fmt == "webp" else "PNG"
+            ext = "." + fmt
+            stem = free(lambda st: any((folder / nm).exists() for nm in names(st, ext)))
+            out = []
+            for data, nm in zip(pages, names(stem, ext)):
+                (folder / nm).write_bytes(meta.strip(data, kind))
+                out.append(folder / nm)
+        elif fmt == "zip":
+            import zipfile
+
+            stem = free(lambda st: (folder / f"{st}.zip").exists())
+            dst = folder / f"{stem}.zip"
+            with zipfile.ZipFile(dst, "w", zipfile.ZIP_DEFLATED) as z:
+                for data, nm in zip(pages, names(stem, ".png")):
+                    z.writestr(nm, meta.strip(data, "PNG"))
+            out = [dst]
+        else:
+            stem = free(lambda st: (folder / f"{st}.pdf").exists())
+            dst = folder / f"{stem}.pdf"
+            ims = []
+            for data in pages:
+                im = Image.open(io.BytesIO(data))
+                # PDF 에는 알파가 없다 — 흰 종이 위에 얹는다
+                bg = Image.new("RGB", im.size, (255, 255, 255))
+                bg.paste(im.convert("RGBA"), mask=im.convert("RGBA").split()[-1])
+                ims.append(bg)
+            ims[0].save(dst, "PDF", save_all=True, append_images=ims[1:], resolution=200.0)
+            out = [dst]
+    except HTTPException:
+        raise
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(400, f"내보내지 못했습니다: {e}")
+    return {"files": [_edit_out(q)["file"] for q in out], "dir": str(folder)}
+
+
+# ── 만화 효과음 — 사용자가 더한 문구 (설계 7번: 앱 번들 문구 모음 + `data/` 아래 내 문구) ──
+SFX_PHRASES = DATA_DIR / "sfx-phrases.json"
+
+
+class SfxPhrases(BaseModel):
+    items: list[dict] = []
+
+
+@app.get("/api/edit/sfx-phrases")
+def sfx_phrases():
+    if not SFX_PHRASES.is_file():
+        return {"items": []}
+    try:
+        return {"items": json.loads(SFX_PHRASES.read_text("utf-8")).get("items", [])}
+    except Exception as e:  # noqa: BLE001
+        print(f"[효과음 문구] 못 읽음: {e}")
+        return {"items": []}
+
+
+@app.put("/api/edit/sfx-phrases")
+def sfx_phrases_put(body: SfxPhrases):
+    items = [{"text": str(x.get("text", ""))[:60]} for x in body.items if str(x.get("text", "")).strip()][:500]
+    tmp = SFX_PHRASES.with_suffix(".tmp")
+    tmp.write_text(json.dumps({"items": items}, ensure_ascii=False, indent=2), "utf-8")
+    tmp.replace(SFX_PHRASES)
+    return {"items": items}
 
 
 # ── 이미지 편집 — 열어 둔 캔버스를 재실행 뒤에도 남긴다 (사용자 지시 2026-09-22) ──

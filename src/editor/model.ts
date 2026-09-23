@@ -3,6 +3,7 @@
  *  ★여기 있는 것은 전부 `node --experimental-strip-types src/editor/model.test.ts` 로 판정한다 (사용자 지시 2026-09-22). */
 
 import type { BubbleMeta, CutTake, PanelMeta } from "./comic";
+import type { SfxMeta } from "./sfx";
 
 export type Size = { w: number; h: number };
 export type Rect = { x: number; y: number; w: number; h: number };
@@ -43,6 +44,8 @@ export type LayerMeta = Xform & {
   panel?: PanelMeta;
   /** 만화 페이지의 말풍선 — 몸통·꼬리·글을 원문으로 들고 픽셀은 그것에서 굽는다 (`comic.ts`) */
   bubble?: BubbleMeta;
+  /** 만화 페이지의 효과음 — 글·글꼴·외곽선·흔들림을 원문으로 들고 픽셀은 그것에서 굽는다 (`sfx.ts`) */
+  sfx?: SfxMeta;
   /** 이 그림이 든 컷의 레이어 id — 합성·합치기·저장이 그 컷 모양으로 자른다 */
   clip?: string;
   /** 컷 생성으로 뽑아 넣은 그림 — 어느 파일인가 (후보 줄에서 지금 든 것을 가리킨다). 미저장 그림은 `null` */

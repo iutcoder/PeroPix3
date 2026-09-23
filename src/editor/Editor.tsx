@@ -15,6 +15,9 @@ import { sendToEditor } from "./sendTo";
 import { NewCanvasDialog } from "./dialogs";
 import { BubbleKindIcon, LayoutThumb } from "./comicUi";
 import { BUBBLE_KINDS, LAYOUTS, type BubbleKind } from "./comic";
+import { SFX_STYLES, type SfxStyleId } from "./sfx";
+import { ensureComicFonts, stackOf, useComicFonts } from "./comicFonts";
+import { AddonBand, DrawerPanel, DrawerRail, useComicDrawers } from "./ComicAddon";
 
 /** 이미지 편집 모드 (사용자 지시 2026-09-22, 목업 `docs/image-editor-mockup.html`).
  *
@@ -33,6 +36,15 @@ export default function Editor() {
   const { zone, over } = useImageDrop((items) => void sendToEditor(items));
   /** 새 캔버스 창 (이미지 / 만화 페이지) */
   const [newOpen, setNewOpen] = useState(false);
+  // ★만화 글꼴은 만화 페이지 캔버스가 있을 때 처음 받는다 (설계 9-3) — 만화를 안 쓰면 안 받는다
+  const hasComic = s.docs.some((d) => !!d.comic);
+  useEffect(() => {
+    if (hasComic) void ensureComicFonts();
+  }, [hasComic]);
+  /** 플러그인 서랍 (만화 페이지에만) — 열린 서랍 하나 (설계 10-1) */
+  const drawers = useComicDrawers();
+  const [drawerKey, setDrawerKey] = useState<string | null>(null);
+  const drawer = doc?.comic ? drawers.find((d) => d.key === drawerKey) ?? null : null;
 
   /* ── 단축키 ── */
   useEffect(() => {
@@ -57,9 +69,9 @@ export default function Editor() {
       }
       // ★Del — 고른 레이어를 지운다 (사용자 지시 2026-09-22). 되돌리기가 있어 묻지 않는다 (삭제 단추와 같다)
       if (e.key === "Delete" && st.layer()) { e.preventDefault(); void st.removeLayer(); return; }
-      // 컷(K)·말풍선(U)은 만화 페이지에만 있다
+      // 컷(K)·말풍선(U)·효과음(F)은 만화 페이지에만 있다
       const comic = !!st.doc()?.comic;
-      const tools: Record<string, Tool> = { KeyV: "select", KeyB: "brush", KeyE: "eraser", KeyG: "bucket", KeyT: "text", KeyC: "crop", KeyH: "pan", ...(comic ? { KeyK: "panel" as Tool, KeyU: "bubble" as Tool } : {}) };
+      const tools: Record<string, Tool> = { KeyV: "select", KeyB: "brush", KeyE: "eraser", KeyG: "bucket", KeyT: "text", KeyC: "crop", KeyH: "pan", ...(comic ? { KeyK: "panel" as Tool, KeyU: "bubble" as Tool, KeyF: "sfx" as Tool } : {}) };
       const tool = tools[e.code];
       if (tool) { e.preventDefault(); st.setTool(tool); }
     };
@@ -145,6 +157,7 @@ export default function Editor() {
           <div style={{ flex: 1, minHeight: 0, display: "flex", gap: "var(--sp-4)" }}>
             <ToolStrip />
             <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", gap: "var(--sp-2)" }}>
+              {doc.comic?.addon && <AddonBand doc={doc} />}
               <Stage doc={doc} />
               <ImageActions
                 url=""
@@ -174,6 +187,8 @@ export default function Editor() {
               />
             </div>
             <Side doc={doc} />
+            {drawer && <DrawerPanel drawer={drawer} onClose={() => setDrawerKey(null)} />}
+            {doc.comic && drawers.length > 0 && <DrawerRail drawers={drawers} open={drawer?.key ?? null} onOpen={setDrawerKey} />}
           </div>
         </>
       )}
@@ -192,7 +207,7 @@ const dropTrappedFocus = (e: React.PointerEvent) => {
   if (a && a !== document.body && a.matches("input, textarea, select, [contenteditable=true]")) a.blur();
 };
 
-type ToolKey = "editor.toolSelect" | "editor.toolBrush" | "editor.toolEraser" | "editor.toolBucket" | "editor.toolText" | "editor.toolCrop" | "editor.toolPan" | "editor.toolPanel" | "editor.toolBubble";
+type ToolKey = "editor.toolSelect" | "editor.toolBrush" | "editor.toolEraser" | "editor.toolBucket" | "editor.toolText" | "editor.toolCrop" | "editor.toolPan" | "editor.toolPanel" | "editor.toolBubble" | "editor.toolSfx";
 const TOOLS: { id: Tool; icon: React.ReactNode; key: ToolKey }[] = [
   { id: "select", icon: Icon.cursor, key: "editor.toolSelect" },
   { id: "brush", icon: Icon.brush, key: "editor.toolBrush" },
@@ -206,6 +221,7 @@ const TOOLS: { id: Tool; icon: React.ReactNode; key: ToolKey }[] = [
 const COMIC_TOOLS: { id: Tool; icon: React.ReactNode; key: ToolKey }[] = [
   { id: "panel", icon: Icon.panel, key: "editor.toolPanel" },
   { id: "bubble", icon: Icon.bubble, key: "editor.toolBubble" },
+  { id: "sfx", icon: Icon.sfx, key: "editor.toolSfx" },
 ];
 
 /** 왼쪽 도구 띠 — 새 자리다 (다른 모드에는 없다). 아래에 되돌리기·다시 실행 */
@@ -335,6 +351,7 @@ function ToolOptions() {
       {/* 만화 페이지 — 컷 도구 · 말풍선 도구 (고른 말풍선이 있으면 어느 도구든) */}
       {tool === "panel" && doc.comic && <PanelOptions />}
       {(tool === "bubble" || !!sel?.bubble) && doc.comic && <BubbleOptions />}
+      {(tool === "sfx" || !!sel?.sfx) && doc.comic && !sel?.bubble && <SfxOptions />}
       {/* 글자 옵션 — 글자 도구일 때, 그리고 **글자 레이어를 골라 두었을 때** (어느 도구든, 사용자 지시 2026-09-22) */}
       {(tool === "text" || !!sel?.text) && (
         <>
@@ -564,8 +581,7 @@ function BubbleOptions() {
         ))}
       </span>
       <select data-editor-bubble-font value={cur.font} onChange={(e) => set({ font: e.target.value })} style={{ ...box, width: 120, padding: "1px 6px" }}>
-        {FONTS.map((f) => <option key={f.id} value={f.stack}>{f.label}</option>)}
-        <option value="serif">Serif</option>
+        <FontOptions prefer="text" current={cur.font} />
       </select>
       <input
         type="number"
@@ -591,6 +607,114 @@ function BubbleOptions() {
       <input type="color" data-editor-bubble-line value={cur.line} onChange={(e) => set({ line: e.target.value })} style={colorBox} data-tip={t("editor.lineColor")} />
       <input type="color" data-editor-bubble-fill value={cur.fill} onChange={(e) => set({ fill: e.target.value })} style={colorBox} data-tip={t("editor.fillColor")} />
       <input type="color" data-editor-bubble-color value={cur.color} onChange={(e) => set({ color: e.target.value })} style={colorBox} data-tip={t("editor.textColor")} />
+    </>
+  );
+}
+
+/** 글꼴 고르기의 항목 — 앱 글꼴 넷 + 받아 둔 만화 글꼴 (말풍선은 식자 글꼴이 먼저, 효과음은 효과음 글꼴이 먼저).
+ *  ★지금 값이 목록에 없으면(아직 안 받은 만화 글꼴) 그 이름으로 한 줄 둔다 — 고른 값이 조용히 바뀌지 않게 */
+function FontOptions({ prefer, current }: { prefer: "text" | "sfx"; current: string }) {
+  const t = useI18n((s) => s.t);
+  const fonts = useComicFonts((s) => s.status?.fonts ?? NO_FONTS);
+  const loaded = useComicFonts((s) => s.loaded);
+  const mine = [...fonts].sort((a, b) => (a.category === prefer ? 0 : 1) - (b.category === prefer ? 0 : 1));
+  const all = [...FONTS.map((f) => f.stack), ...mine.map(stackOf), "serif"];
+  return (
+    <>
+      {!all.includes(current) && <option value={current}>{current.replace(/'/g, "")}</option>}
+      <optgroup label={t("editor.fontsApp")}>
+        {FONTS.map((f) => <option key={f.id} value={f.stack}>{f.label}</option>)}
+        <option value="serif">Serif</option>
+      </optgroup>
+      {mine.length > 0 && (
+        <optgroup label={loaded ? t("editor.fontsComic") : t("editor.fontsComicLoading")}>
+          {mine.map((f) => <option key={f.id} value={stackOf(f)}>{f.label}</option>)}
+        </optgroup>
+      )}
+    </>
+  );
+}
+const NO_FONTS: never[] = [];
+
+const SFX_STYLE_KEY: Record<SfxStyleId, "editor.sfxImpact" | "editor.sfxSpeed" | "editor.sfxShake" | "editor.sfxSweet" | "editor.sfxHorror"> = {
+  impact: "editor.sfxImpact", speed: "editor.sfxSpeed", shake: "editor.sfxShake", sweet: "editor.sfxSweet", horror: "editor.sfxHorror",
+};
+
+/** 효과음 도구의 옵션 줄 — 스타일 · 글꼴 · 크기 · 채움(그라데이션) · 안쪽 테 · 바깥 테 (설계 7번).
+ *  ★새 효과음의 기본값이면서, 효과음을 골라 두었으면 **그 효과음에 곧바로 걸린다** (말풍선 도구와 같은 규칙).
+ *  크기는 고른 효과음이면 그것의 px, 아니면 A4 보통 폭 기준의 기본 크기다 */
+function SfxOptions() {
+  const t = useI18n((s) => s.t);
+  const s = useEditor();
+  const ui = useUi((st) => st.editorSfx);
+  const setUi = useUi((st) => st.setEditorSfx);
+  const sel = s.layer();
+  const m = sel?.sfx ?? null;
+  const curStyle = m ? m.style : ui.style;
+  const set = (p: Record<string, unknown>, live = false) => {
+    if (m && sel) s.patchSfx(sel.id, p, live);
+  };
+  return (
+    <>
+      <span style={{ display: "inline-flex", border: "1px solid var(--line)", borderRadius: "var(--r-2)", overflow: "hidden" }}>
+        {SFX_STYLES.map((k, i) => (
+          <button
+            key={k}
+            data-editor-sfx-style={k}
+            onMouseDown={dropFocus}
+            onClick={() => {
+              setUi({ style: k });
+              if (m && sel) s.styleSfx(sel.id, k);
+            }}
+            style={{
+              height: 24, padding: "0 8px", borderLeft: i ? "1px solid var(--line)" : 0,
+              background: curStyle === k ? "var(--accent-bg)" : "var(--panel)",
+              color: curStyle === k ? "var(--ink)" : "var(--ink-faint)",
+              boxShadow: curStyle === k ? "inset 0 0 0 1px var(--accent)" : undefined,
+            }}
+          >
+            {t(SFX_STYLE_KEY[k])}
+          </button>
+        ))}
+      </span>
+      {m && (
+        <select data-editor-sfx-font value={m.font} onChange={(e) => set({ font: e.target.value })} style={{ ...box, width: 130, padding: "1px 6px" }}>
+          <FontOptions prefer="sfx" current={m.font} />
+        </select>
+      )}
+      <input
+        type="number"
+        data-editor-sfx-size
+        min={8}
+        max={2000}
+        value={Math.round(m ? m.size : ui.size)}
+        onChange={(e) => {
+          const v = Math.max(8, Math.min(2000, Math.round(Number(e.target.value) || 8)));
+          if (m) set({ size: v });
+          else setUi({ size: v });
+        }}
+        data-tip={t("editor.size")}
+        style={{ ...box, width: 58, textAlign: "right", fontVariantNumeric: "tabular-nums", padding: "1px 6px" }}
+      />
+      {m && (
+        <>
+          <Opt label={t("editor.sfxFill")}>
+            <input type="color" data-editor-sfx-fill value={m.fill} onChange={(e) => set({ fill: e.target.value })} style={colorBox} />
+            <button data-editor-sfx-grad onMouseDown={dropFocus} onClick={() => set({ fill2: m.fill2 ? null : "#888888" })} style={{ ...box, ...(m.fill2 ? on : {}), display: "grid", padding: "3px 6px" }} data-tip={t("editor.sfxGradient")}>
+              {Icon.gradient}
+            </button>
+            {m.fill2 && <input type="color" data-editor-sfx-fill2 value={m.fill2} onChange={(e) => set({ fill2: e.target.value })} style={colorBox} />}
+          </Opt>
+          <Opt label={t("editor.sfxInner")}>
+            <input type="range" data-editor-sfx-inner min={0} max={30} value={Math.round(m.inner * 100)} onPointerDown={() => s.markBefore()} onChange={(e) => set({ inner: Number(e.target.value) / 100 }, true)} style={{ width: 60 }} />
+            <input type="color" data-editor-sfx-inner-color value={m.innerColor} onChange={(e) => set({ innerColor: e.target.value })} style={colorBox} />
+          </Opt>
+          <Opt label={t("editor.sfxOuter")}>
+            <input type="range" data-editor-sfx-outer min={0} max={20} value={Math.round(m.outer * 100)} onPointerDown={() => s.markBefore()} onChange={(e) => set({ outer: Number(e.target.value) / 100 }, true)} style={{ width: 60 }} />
+            <input type="color" data-editor-sfx-outer-color value={m.outerColor} onChange={(e) => set({ outerColor: e.target.value })} style={colorBox} />
+          </Opt>
+        </>
+      )}
     </>
   );
 }

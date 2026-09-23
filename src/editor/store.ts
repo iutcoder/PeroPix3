@@ -18,20 +18,34 @@ import {
   redoHist, rotate90 as rot90, saveNameOf, scaleXform, textLayerName, undoHist,
   type Adjust, type Anchor, type Fill, type Hist, type Rect, type TextMeta,
 } from "./model";
-import { bakeBubble, bakePanel, bakeStroke, bucketFill, clipOf, cloneCanvas, exportDataUrl, fillAround, fitBubble, makeCanvas, mergeInto, rebakeText, renderText, type Layer, type Stroke } from "./pixels";
+import { bakeBubble, bakePanel, bakeSfx, bakeStroke, bucketFill, clipOf, cloneCanvas, exportDataUrl, fillAround, fitBubble, makeCanvas, mergeInto, rebakeText, renderText, type Layer, type Stroke } from "./pixels";
+import { newSfx, withStyle, type SfxMeta, type SfxStyleId } from "./sfx";
 import {
-  bboxOf, comicStack, coverRect, defaultTail, gapFor, hasTails, newPage, panelPts, splitPoly, templatePanels, toPanel,
-  type BubbleMeta, type ComicPage, type CutTake, type Dir, type PanelGen, type Pt, type Tail,
+  bboxOf, comicStack, coverRect, defaultTail, gapFor, hasTails, newPage, panelPts, placeOwn, splitPoly, templatePanels, toPanel,
+  type BubbleMeta, type ComicAddon, type ComicPage, type CutTake, type Dir, type Handed, type PanelGen, type Pt, type Tail,
 } from "./comic";
 import { loadItem, saveImage } from "./io";
 import { loadDocs, scheduleFlush } from "./persist";
+import { whenFontsLoad } from "./comicFonts";
 
-export type Tool = "select" | "brush" | "eraser" | "bucket" | "text" | "crop" | "pan" | "panel" | "bubble";
+export type Tool = "select" | "brush" | "eraser" | "bucket" | "text" | "crop" | "pan" | "panel" | "bubble" | "sfx";
 
 type Snap = { w: number; h: number; layers: Layer[]; sel: string[]; comic?: ComicPage };
 
 /** 새 캔버스 — 만화 페이지면 `comic` 에 읽는 방향과 첫 배치 (설계 3번 · 목업 ②) */
 export type NewDocOpts = { w: number; h: number; comic?: { dir: Dir; layout: string } };
+
+/** 콘티 한 장 — 플러그인이 준 것을 `comicBridge` 가 읽어 넘긴다 (그림은 이미 캔버스로 읽혀 있다).
+ *  `fit` 이면 컷마다 `match`(이 캔버스의 컷 id), `own` 이면 `pts`(페이지 전체 0~1) */
+export type ContiPage = {
+  name?: string;
+  label?: string;
+  source?: unknown;
+  image?: { cv: HTMLCanvasElement; name: string; take: CutTake } | null;
+  layout: "fit" | "own";
+  panels: { match?: string; pts?: Pt[]; handed: Handed }[];
+  bubbles: { panel: number; kind: "speech" | "narration"; text: string; u: number; v: number; tail?: { u: number; v: number } | null }[];
+};
 
 export type Doc = {
   id: string;
@@ -161,8 +175,22 @@ type S = {
   addBubble: (at: { x: number; y: number }) => void;
   /** 말풍선의 원문을 고치고 다시 굽는다. `live` 면 이력 없이 (끄는 중) */
   patchBubble: (id: string, p: Partial<BubbleMeta>, live?: boolean) => void;
+  /** 효과음을 그 자리에 만든다 (지금 스타일·문구, 설계 7번) */
+  addSfx: (at: { x: number; y: number }) => void;
+  /** 효과음의 원문을 고치고 다시 굽는다 (가운데는 그 자리). `live` 면 이력 없이 (슬라이더를 끄는 중) */
+  patchSfx: (id: string, p: Partial<SfxMeta>, live?: boolean) => void;
+  /** 고른 효과음에 스타일을 건다 (글·크기·흔들림 씨앗은 그대로) */
+  styleSfx: (id: string, style: SfxStyleId) => void;
+  /** 손잡이로 늘린 효과음 — 늘린 비율을 **글자 크기**로 옮기고 다시 굽는다 (글자 레이어의 `settleText` 와 같다) */
+  settleSfx: (id: string) => void;
+  /** 글꼴을 새로 실었다 — 모든 캔버스의 말풍선·효과음을 다시 굽는다 (이력 없이, `comicFonts`) */
+  refreshGlyphs: () => void;
   /** 고른 것들을 함께 옮긴다 (끄는 중, 이력 없이) — 말풍선은 몸통만 옮기고 **꼬리 끝은 제자리**다 (설계 9-1) */
   dragLayers: (start: Layer[], dx: number, dy: number) => void;
+  /** 플러그인이 짠 콘티를 깐다 (설계 10-2) — 첫 장은 그 캔버스에 **한 걸음으로**, 나머지 장은 새 만화 캔버스로. 깐 캔버스 id 들 */
+  applyConti: (docId: string, pages: ContiPage[], addon: ComicAddon) => string[];
+  /** 넘겨받은 프롬프트를 고친다 (인물 점을 끌거나 칸을 고칠 때). `live` 면 이력 없이 */
+  setHanded: (panelId: string, p: Partial<Handed>, live?: boolean) => void;
 
   /** 합성해 저장한다. 성공하면 저장된 자리 */
   save: () => Promise<{ file: string; name: string } | null>;
@@ -223,6 +251,13 @@ export const useEditor = create<S>((set, get) => {
     const { box, cv } = bakeBubble(fb, hideText);
     return { ...l, bubble: fb, cv, sw: cv.width, sh: cv.height, x: box.x, y: box.y, w: box.w, h: box.h };
   };
+  /** 효과음 원문 → 레이어 (가운데를 지키고 상자·픽셀을 새로). 돌림·뒤집기는 레이어 변형이라 그대로 둔다 */
+  const withSfx = (l: Layer, m: SfxMeta): Layer => {
+    const { cv } = bakeSfx(m);
+    const cx = l.x + l.w / 2;
+    const cy = l.y + l.h / 2;
+    return { ...l, sfx: m, cv, sw: cv.width, sh: cv.height, w: cv.width, h: cv.height, x: cx - cv.width / 2, y: cy - cv.height / 2 };
+  };
   /** 말풍선을 옮기고 늘린다 — 몸통은 그대로 옮기고, 꼬리 끝은 `tails` 를 주면 그 값 (끌어 옮길 때는 제자리) */
   const shiftBubble = (b: BubbleMeta, dx: number, dy: number, k = 1, tails?: Tail[]): BubbleMeta => ({
     ...b,
@@ -242,8 +277,102 @@ export const useEditor = create<S>((set, get) => {
     };
     return {
       comic,
-      layers: layers.map((l) => (l.panel ? rebakePanel(l, comic) : l.bubble ? withBubble(l, shiftBubble(l.bubble, dx, dy, k)) : l)),
+      // 효과음은 이미 상자가 옮겨졌다 — 크기가 바뀌었으면 글자 크기로 다시 굽는다 (픽셀을 늘리지 않는다)
+      layers: layers.map((l) => (l.panel ? rebakePanel(l, comic) : l.bubble ? withBubble(l, shiftBubble(l.bubble, dx, dy, k)) : l.sfx && k !== 1 ? withSfx(l, { ...l.sfx, size: l.sfx.size * k }) : l)),
     };
+  };
+  /** 새 만화 페이지 — 흰 용지 한 장 + 첫 배치의 컷들 */
+  const makeComicDoc = (w: number, h: number, dir: Dir, layout: string, name: string): Doc => {
+    const comic = newPage({ w, h }, dir);
+    const paperCv = makeCanvas(w, h);
+    const g = paperCv.getContext("2d")!;
+    g.fillStyle = "#ffffff";
+    g.fillRect(0, 0, w, h);
+    const layers: Layer[] = [mkLayer(paperCv, t("editor.paper"), { x: 0, y: 0, w, h })];
+    for (const poly of templatePanels(comic, layout)) layers.push(mkPanel({ layers }, poly, comic));
+    return { id: newId("d"), name, w, h, layers, sel: [], src: null, hist: emptyHist(), dirty: false, view: { fit: true, zoom: 1 }, comic };
+  };
+  /** 콘티 한 장을 그 문서에 깐 결과 (한 걸음에 쓸 레이어·크기·페이지 값) — 설계 10-2.
+   *  · 페이지 그림이 있으면 **캔버스를 그 그림 크기로** 바꾸고(있던 것은 같은 비율로 옮긴다) 그림을 용지 위 바탕으로 깐다.
+   *  · `fit` 은 있던 컷에 넘겨받은 프롬프트만 얹고(든 그림은 그대로), `own` 은 있던 컷을 거두고(든 그림은 컷 밖으로) 플러그인의 컷을 편다.
+   *  · 말풍선은 **더한다** (편집기 담당일 때만 온다). 크기는 A4 보통 폭을 기준으로 캔버스 폭에 맞춘다 */
+  const contiOnto = (d: Doc, pg: ContiPage, addon: ComicAddon): Partial<Doc> => {
+    let w = d.w;
+    let h = d.h;
+    let comic: ComicPage = { ...(d.comic ?? newPage({ w, h }, "rtl")) };
+    let layers = d.layers;
+    if (pg.image) {
+      const W = pg.image.cv.width;
+      const H = pg.image.cv.height;
+      const sx = W / d.w;
+      const sy = H / d.h;
+      const k = (sx + sy) / 2;
+      comic = { ...comic, frame: { x: comic.frame.x * sx, y: comic.frame.y * sy, w: comic.frame.w * sx, h: comic.frame.h * sy }, gapX: comic.gapX * sx, gapY: comic.gapY * sy, border: Math.max(1, comic.border * k) };
+      const pc = comic;
+      layers = layers.map((l) => {
+        if (l.bubble) {
+          const b = l.bubble;
+          return withBubble(l, {
+            ...b, size: b.size * k, pad: b.pad * k,
+            body: { x: b.body.x * sx, y: b.body.y * sy, w: b.body.w * k, h: b.body.h * k },
+            tails: b.tails.map((q) => ({ ...q, x: q.x * sx, y: q.y * sy, w: q.w * k, bend: q.bend * k })),
+          });
+        }
+        const moved = { ...l, ...scaleXform(l, sx, sy) };
+        if (l.panel) return rebakePanel(moved, pc);
+        if (l.sfx) return withSfx(moved, { ...l.sfx, size: l.sfx.size * k });
+        return moved;
+      });
+      w = W;
+      h = H;
+      const bg: Layer = { ...mkLayer(pg.image.cv, pg.image.name, { x: 0, y: 0, w: W, h: H }), take: pg.image.take };
+      const at = layers.findIndex((l) => !l.panel && !l.bubble && !l.sfx && !l.clip);
+      layers = [...layers.slice(0, at + 1), bg, ...layers.slice(at + 1)];
+    }
+    const size = { w, h };
+    const ids: string[] = [];
+    if (pg.layout === "own") {
+      // 있던 컷은 거두고 그 안의 그림은 컷 밖으로 (지우지 않는다 — `applyLayout` 과 같다)
+      layers = layers.filter((l) => !l.panel).map((l) => (l.clip ? { ...l, clip: undefined } : l));
+      for (const p of pg.panels) {
+        if (!p.pts || p.pts.length < 3) { ids.push(""); continue; }
+        const made = mkPanel({ layers }, placeOwn(p.pts, comic, size, !!pg.image), comic);
+        made.panel = { ...made.panel!, gen: { blocks: [], cast: [], takes: [], handed: p.handed } };
+        layers = [...layers, made];
+        ids.push(made.id);
+      }
+    } else {
+      layers = layers.map((l) => {
+        const hit = pg.panels.find((p) => p.match === l.id);
+        if (!hit || !l.panel) return l;
+        return { ...l, panel: { ...l.panel, gen: { blocks: [], cast: [], takes: [], ...l.panel.gen, handed: hit.handed } } };
+      });
+      for (const p of pg.panels) ids.push(p.match && layers.some((l) => l.id === p.match && l.panel) ? p.match : "");
+    }
+    // 말풍선 — 편집기가 말풍선 담당일 때만 온다. 자리는 그 컷 상자 안 비율
+    const ui = useUi.getState().editorBubble;
+    const scale = w / 1654;
+    for (const b of pg.bubbles) {
+      const pid = ids[b.panel];
+      const p = pid ? layers.find((l) => l.id === pid) : null;
+      if (!p?.panel || !b.text.trim()) continue;
+      const box = bboxOf(panelPts(p, p.panel.pts));
+      const kind = b.kind === "narration" ? "narration" : "speech";
+      const at = { x: box.x + b.u * box.w, y: box.y + b.v * box.h };
+      const base: BubbleMeta = {
+        kind, value: b.text, font: ui.font, size: Math.max(8, ui.size * scale), color: ui.color, bold: ui.bold, align: "center",
+        vertical: ui.vertical, fit: "text", pad: ui.pad * scale, lineGap: ui.lineGap, stroke: Math.max(0.5, ui.stroke * scale), line: ui.line, fill: ui.fill,
+        body: { x: at.x, y: at.y, w: 0, h: 0 }, tails: [],
+      };
+      const fitted = fitBubble(base);
+      const body = { ...fitted.body, x: at.x - fitted.body.w / 2, y: at.y - fitted.body.h / 2 };
+      const tails: Tail[] = kind === "speech" && b.tail
+        ? [{ x: box.x + b.tail.u * box.w, y: box.y + b.tail.v * box.h, w: Math.max(8, base.size * 0.55), bend: 0 }]
+        : [];
+      const l0 = mkLayer(makeCanvas(1, 1), textLayerName(b.text, t("editor.bubbleN", { n: 1 })), { x: 0, y: 0, w: 1, h: 1 });
+      layers = [...layers, withBubble(l0, { ...fitted, body, tails })];
+    }
+    return { w, h, layers, sel: [], comic: { ...comic, addon: { ...addon, ...(pg.label ? { label: pg.label } : {}), ...(pg.source !== undefined ? { source: pg.source } : {}) } } };
   };
   /** 레이어들을 뺀 목록과 그 뒤의 선택 — 고른 것이 빠졌으면 빠진 자리(맨 아래 것)의 이웃 하나, 아니면 고른 것 그대로 */
   const without = (d: Doc, ids: string[]): Partial<Doc> | null => {
@@ -352,20 +481,9 @@ export const useEditor = create<S>((set, get) => {
         return;
       }
       // ★만화 페이지 — 흰 용지 한 장 + 첫 배치의 컷들 (설계 3번 · 5번). 안내선은 화면에만 있다
-      const comic = newPage({ w, h }, o.comic.dir);
-      const paperCv = makeCanvas(w, h);
-      const g = paperCv.getContext("2d")!;
-      g.fillStyle = "#ffffff";
-      g.fillRect(0, 0, w, h);
-      const layers: Layer[] = [mkLayer(paperCv, t("editor.paper"), { x: 0, y: 0, w, h })];
-      for (const poly of templatePanels(comic, o.comic.layout)) layers.push(mkPanel({ layers }, poly, comic));
-      const name = nextName(names, (n) => t("editor.pageN", { n }));
-      const doc: Doc = {
-        id: newId("d"), name, w, h, layers, sel: [], src: null, hist: emptyHist(), dirty: false,
-        view: { fit: true, zoom: 1 }, comic,
-      };
+      const doc = makeComicDoc(w, h, o.comic.dir, o.comic.layout, nextName(names, (n) => t("editor.pageN", { n })));
       // 컷이 있으면 말풍선 도구, 빈 페이지면 컷 도구로 시작한다
-      set((s) => ({ docs: [...s.docs, doc], cur: doc.id, crop: null, textEdit: null, tool: layers.length > 1 ? "select" : "panel" }));
+      set((s) => ({ docs: [...s.docs, doc], cur: doc.id, crop: null, textEdit: null, tool: doc.layers.length > 1 ? "select" : "panel" }));
     },
 
     async closeDoc(id) {
@@ -466,7 +584,7 @@ export const useEditor = create<S>((set, get) => {
         if (top.panel || top.bubble || below.panel || below.bubble) return null;
         // ★합친 결과는 보통 레이어다 — 아래가 글자 레이어였어도 원문을 떼어 낸다 (남기면 다음 고치기가 합친 것을 지운다).
         //   위가 컷에 든 그림이면 그 컷 모양으로 잘라 넣는다
-        const merged: Layer = { ...below, text: undefined, cv: mergeInto(below, top, top.clip !== below.clip ? clipOf(d.layers, top) : null) };
+        const merged: Layer = { ...below, text: undefined, sfx: undefined, cv: mergeInto(below, top, top.clip !== below.clip ? clipOf(d.layers, top) : null) };
         const layers = d.layers.filter((_, k) => k !== i).map((x) => (x.id === below.id ? merged : x));
         return { layers, sel: [below.id] };
       });
@@ -808,6 +926,79 @@ export const useEditor = create<S>((set, get) => {
       if (live) patchDoc(d.id, { layers, dirty: true });
       else commitDoc(d, () => ({ layers }));
     },
+    addSfx(at) {
+      const ui = useUi.getState().editorSfx;
+      commit((d) => {
+        // 크기는 A4 보통(폭 1654)에서의 값을 캔버스 폭에 맞춘다
+        const size = Math.max(8, Math.round(ui.size * (d.w / 1654)));
+        const m = newSfx(ui.text || "쾅", size, ui.style, Math.floor(Math.random() * 1e9) + 1);
+        const { cv } = bakeSfx(m);
+        const l: Layer = {
+          ...mkLayer(cv, nextName(d.layers.map((x) => x.name), (n) => t("editor.sfxN", { n })), { x: at.x - cv.width / 2, y: at.y - cv.height / 2, w: cv.width, h: cv.height }),
+          name: textLayerName(m.value, t("editor.sfxN", { n: 1 })),
+          sfx: m,
+        };
+        return { layers: [...d.layers, l], sel: [l.id] };
+      });
+    },
+    patchSfx(id, p, live = false) {
+      const d = get().docs.find((x) => x.layers.some((l) => l.id === id));
+      const l = d?.layers.find((x) => x.id === id);
+      if (!d || !l?.sfx) return;
+      const next = withSfx(l, { ...l.sfx, ...p, ...(p.style === undefined && Object.keys(p).some((k) => k !== "value" && k !== "seed" && k !== "size") ? { style: "custom" as const } : {}) });
+      const named = "value" in p ? { ...next, name: textLayerName(next.sfx!.value, l.name) } : next;
+      const layers = d.layers.map((x) => (x.id === id ? named : x));
+      if (live) patchDoc(d.id, { layers, dirty: true });
+      else commitDoc(d, () => ({ layers }));
+    },
+    styleSfx(id, style) {
+      const l = get().docs.flatMap((d) => d.layers).find((x) => x.id === id);
+      if (!l?.sfx) return;
+      get().patchSfx(id, withStyle(l.sfx, style));
+    },
+    settleSfx(id) {
+      const d = get().docs.find((x) => x.layers.some((l) => l.id === id));
+      const l = d?.layers.find((x) => x.id === id);
+      if (!d || !l?.sfx || (l.w === l.sw && l.h === l.sh)) return;
+      const k = (l.w / l.sw + l.h / l.sh) / 2;
+      const next = withSfx(l, { ...l.sfx, size: Math.max(4, l.sfx.size * k) });
+      patchDoc(d.id, { layers: d.layers.map((x) => (x.id === id ? next : x)), dirty: true });
+    },
+    applyConti(docId, pages, addon) {
+      const d = get().docs.find((x) => x.id === docId);
+      if (!d?.comic || !pages.length) return [];
+      get().endTextEdit(true);
+      commitDoc(d, (dd) => contiOnto(dd, pages[0], addon));
+      const made: Doc[] = [];
+      pages.slice(1).forEach((pg, i) => {
+        const nd = makeComicDoc(d.w, d.h, d.comic!.dir, "blank", pg.name || `${d.name}_${String(i + 2).padStart(2, "0")}`);
+        const next = contiOnto(nd, pg, addon);
+        const layers = comicStack(next.layers ?? nd.layers);
+        made.push({ ...nd, ...next, layers, dirty: true });
+      });
+      if (made.length) set((s) => ({ docs: [...s.docs, ...made] }));
+      return [docId, ...made.map((x) => x.id)];
+    },
+    setHanded(panelId, p, live = false) {
+      const d = get().docs.find((x) => x.layers.some((l) => l.id === panelId && l.panel?.gen?.handed));
+      if (!d) return;
+      const layers = d.layers.map((l) =>
+        l.id === panelId && l.panel?.gen?.handed ? { ...l, panel: { ...l.panel, gen: { ...l.panel.gen, handed: { ...l.panel.gen.handed, ...p } } } } : l,
+      );
+      if (live) patchDoc(d.id, { layers, dirty: true });
+      else commitDoc(d, () => ({ layers }));
+    },
+    refreshGlyphs() {
+      const te = get().textEdit;
+      set((s) => ({
+        docs: s.docs.map((d) =>
+          d.layers.some((l) => l.bubble || l.sfx)
+            ? { ...d, layers: d.layers.map((l) => (l.bubble ? withBubble(l, l.bubble, te?.id === l.id) : l.sfx ? withSfx(l, l.sfx) : l)) }
+            : d,
+        ),
+        rev: s.rev + 1,
+      }));
+    },
     dragLayers(start, dx, dy) {
       const d = docOf(get());
       if (!d) return;
@@ -858,6 +1049,9 @@ export const useEditor = create<S>((set, get) => {
     },
   };
 });
+
+// ★만화 글꼴을 다 실으면 말풍선·효과음을 다시 굽는다 — 그동안은 앱 글꼴로 그려져 있었다 (설계 9-3)
+whenFontsLoad(() => useEditor.getState().refreshGlyphs());
 
 // ★캔버스가 바뀌면 남긴다 — 다 읽은 뒤부터 (`persist.ts` 머리)
 useEditor.subscribe((s, prev) => {
