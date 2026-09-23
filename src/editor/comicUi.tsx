@@ -1,6 +1,10 @@
 /** 만화 페이지의 작은 그림 부품 — 말풍선 종류 아이콘 · 첫 배치 미리보기. 도형은 굽는 것과 **같은 셈**(`comic.ts`)이다 */
 import { bubbleShape, newPage, templatePanels, type BubbleKind } from "./comic";
 
+/** 인물 색 — 만화 제작기 콘티와 **같은 고정값**이다 (`plugins/manga-maker/web/app.js` 의 `CAST_COLORS`).
+ *  같은 인물은 어느 컷에서나 같은 색 (지금 탭의 캐릭터 카드 차례로 고른다). 흰 지면에 그리는 자리라 테마를 안 따른다 */
+export const CAST_COLORS = ["#3b7bac", "#c77d43", "#4d8f5b", "#a4508b", "#b4514a", "#3f7f86", "#8a7a3f", "#6d6aa8"];
+
 /** 말풍선 종류 아이콘 — 옵션 줄의 종류 고르기와 레이어 목록의 썸네일이 쓴다 */
 export function BubbleKindIcon({ kind, w = 24, h = 16, ink = "currentColor" }: { kind: BubbleKind; w?: number; h?: number; ink?: string }) {
   const narration = kind === "narration";

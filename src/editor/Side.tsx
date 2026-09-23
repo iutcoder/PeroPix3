@@ -5,7 +5,7 @@ import { EditableName } from "../components/EditableName";
 import { DropLine } from "../components/DropLine";
 import { FolderOpenButton } from "../components/FolderOpenButton";
 import { Help } from "../components/Tip";
-import { api } from "../lib/backend";
+import { api, backendUrl } from "../lib/backend";
 import { moveTo } from "../lib/moveTo";
 import { useReorder } from "../lib/useReorder";
 import { useFiles } from "../store/files";
@@ -16,8 +16,15 @@ import { NO_ADJUST, hasAdjust, withRatio } from "./model";
 import { thumbOf, type Layer } from "./pixels";
 import { primaryOf, saveName, useEditor, whereOf, type Doc } from "./store";
 import { CanvasSizeDialog, ImageSizeDialog } from "./dialogs";
-import { BubbleKindIcon } from "./comicUi";
-import { bendable, defaultTail, hasTails, panelNumbers, panelPts, pointInPoly, type BubbleMeta } from "./comic";
+import { BubbleKindIcon, CAST_COLORS } from "./comicUi";
+import { bendable, castSpot, comicGroupId, defaultTail, hasTails, panelNumbers, panelPts, pointInPoly, type BubbleMeta, type PanelGen } from "./comic";
+import { cutCost, generateCuts, pickTake, sizeOf } from "./cutGen";
+import { BlockList } from "../blocks/BlockList";
+import { slotBlock, slotBlocksOf } from "../lib/blocks";
+import { thumbUrlOf } from "../lib/imgUrl";
+import { usePrompt } from "../store/prompt";
+import { useQueue } from "../store/queue";
+import { useWs } from "../store/workspace";
 
 /** 오른쪽 기둥 — 레이어 · 변형 · 보정 · 캔버스 · 저장 위치. 검열의 오른쪽 기둥과 같은 조각(`Sec`·`Line`·`box`)으로 그린다 */
 export function Side({ doc }: { doc: Doc }) {
@@ -506,6 +513,7 @@ function ComicSections({ doc, sel }: { doc: Doc; sel: Layer }) {
             {t("editor.noBorder")}
           </button>
         </Line>
+        <CutSection doc={doc} panel={sel} />
       </Sec>
     );
   }
@@ -626,5 +634,119 @@ function PageSection({ doc }: { doc: Doc }) {
         </button>
       </Line>
     </Sec>
+  );
+}
+
+/** 컷 생성 칸 — 후보 · 컷 프롬프트 · 인물 · 장 수 · 크게 · 이 컷 생성 · 빈 컷 전부 생성 (설계 8번 · 목업 ⑤).
+ *  ★컷 프롬프트는 씬 칸과 **같은 블록 목록**(`BlockList` 의 `single`)이다 — 블록을 그리는 자리는 앱에 하나다.
+ *  ★후보는 이 칸의 맨 위다 (사용자 결정 2026-09-23: 무대 위 컷 아래에 띄우면 이웃 컷을 가린다) */
+function CutSection({ doc, panel }: { doc: Doc; panel: Layer }) {
+  const t = useI18n((s) => s.t);
+  const s = useEditor();
+  const chars = usePrompt((p) => p.chars);
+  const tabName = useWs((w) => w.activeTabOf()?.name ?? "");
+  const pending = useQueue((q) => q.pending);
+  const [count, setCount] = useState(1);
+  const [base, setBase] = useState("");
+  useEffect(() => {
+    void backendUrl().then(setBase);
+  }, []);
+  const g: PanelGen = { blocks: [], cast: [], takes: [], ...panel.panel!.gen };
+  const blk = slotBlock(g.blocks, `cut-${panel.id}`);
+  const size = sizeOf(panel);
+  const cost = cutCost([panel], count);
+  const cur = doc.layers.find((l) => l.clip === panel.id && l.take)?.take ?? null;
+  const group = comicGroupId(doc.id);
+  // 빈 컷 — 그림도 없고 대기도 없는 컷 (「빈 컷 전부 생성」이 도는 것)
+  const empty = doc.layers.filter(
+    (l) => l.panel && l.on && !doc.layers.some((x) => x.clip === l.id) && !pending.some((q) => q.groupId === group && q.cellId === l.id),
+  );
+  const emptyCost = cutCost(empty, 1);
+  const toggleCast = (id: string) => {
+    const has = g.cast.some((c) => c.id === id);
+    const next = has ? g.cast.filter((c) => c.id !== id) : [...g.cast, { id, ...castSpot(g.cast.length, g.cast.length + 1) }];
+    // 새로 들면 고르게 다시 놓는다 (한 명 → 가운데, 둘 → 좌우) — 이미 끌어 둔 자리는 뺄 때만 그대로
+    s.setPanelGen(panel.id, { cast: has ? next : next.map((c, i) => (g.cast.some((x) => x.id === c.id) ? c : { ...c, ...castSpot(i, next.length) })) });
+  };
+  const costText = (c: { total: number; free: boolean }) => t("editor.cutCost", { a: c.free ? 0 : c.total });
+  return (
+    <div data-editor-cut style={{ display: "flex", flexDirection: "column", gap: "var(--sp-3)", marginTop: "var(--sp-2)" }}>
+      <span style={{ fontSize: "var(--text-2xs)", color: "var(--ink-faint)" }}>{t("editor.cutUses", { tab: tabName })}</span>
+      {g.takes.length > 0 && base && (
+        <div data-editor-cut-takes style={{ display: "flex", flexWrap: "wrap", gap: "var(--sp-2)" }}>
+          {g.takes.map((tk) => {
+            const on2 = !!cur && cur.ws === tk.ws && cur.file === tk.file;
+            return (
+              <button
+                key={tk.file}
+                data-editor-cut-take={tk.file}
+                data-on={on2 ? "" : undefined}
+                onMouseDown={dropFocus}
+                onClick={() => void pickTake(doc.id, panel.id, tk)}
+                style={{ width: 58, height: 44, padding: 0, borderRadius: "var(--r-1)", overflow: "hidden", border: on2 ? "2px solid var(--accent)" : "1px solid var(--line)", background: "var(--bg)" }}
+              >
+                <img src={thumbUrlOf(base, tk.ws, tk.file)} alt="" draggable={false} style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }} />
+              </button>
+            );
+          })}
+        </div>
+      )}
+      <div data-editor-cut-prompt>
+        <BlockList single fill id={`cut-${panel.id}`} blocks={[blk]} onChange={(b) => s.setPanelGen(panel.id, { blocks: slotBlocksOf(b[0] ?? blk) })} libZone={`cut-${panel.id}`} />
+      </div>
+      <div style={{ display: "flex", flexDirection: "column", gap: "var(--sp-2)" }}>
+        <span style={{ fontSize: "var(--text-2xs)", color: "var(--ink-faint)" }}>{t("editor.cutCast")}</span>
+        {!chars.length && <Hint>{t("editor.cutNoChars")}</Hint>}
+        <div style={{ display: "flex", flexWrap: "wrap", gap: "var(--sp-2)" }}>
+          {chars.map((ch, i) => {
+            const at = g.cast.findIndex((c) => c.id === ch.id);
+            return (
+              <button
+                key={ch.id}
+                data-editor-cut-cast={ch.id}
+                data-on={at >= 0 ? "" : undefined}
+                onMouseDown={dropFocus}
+                onClick={() => toggleCast(ch.id)}
+                style={{ ...box, ...(at >= 0 ? on : {}), display: "inline-flex", alignItems: "center", gap: 6, padding: "2px 10px 2px 6px" }}
+              >
+                <span style={{ width: 12, height: 12, borderRadius: "50%", background: at >= 0 ? CAST_COLORS[i % CAST_COLORS.length] : "var(--line)", flexShrink: 0 }} />
+                {ch.name || `#${i + 1}`}
+              </button>
+            );
+          })}
+        </div>
+      </div>
+      <Line label={t("editor.cutCount")}>
+        <span style={{ display: "inline-flex", gap: 2 }}>
+          {[1, 2, 3, 4].map((n) => (
+            <button key={n} data-editor-cut-count={n} onMouseDown={dropFocus} onClick={() => setCount(n)} style={{ ...box, ...(count === n ? on : {}), padding: "2px 9px" }}>{n}</button>
+          ))}
+        </span>
+        <span style={{ flex: 1 }} />
+        <button data-editor-cut-big data-tip={t("editor.cutBigHint")} onMouseDown={dropFocus} onClick={() => s.setPanelGen(panel.id, { big: !g.big })} style={{ ...box, ...(g.big ? on : {}), padding: "2px 8px" }}>
+          {t("editor.cutBig")}
+        </button>
+      </Line>
+      <button
+        data-editor-cut-gen
+        disabled={cost.overLimit}
+        onClick={() => void generateCuts(doc, [panel.id], count)}
+        style={{ width: "100%", padding: "var(--sp-2) 0", borderRadius: "var(--r-2)", border: "1px solid var(--accent)", background: "var(--accent)", color: "#fff", fontSize: "var(--text-xs)", fontWeight: "var(--w-semi)", opacity: cost.overLimit ? 0.5 : 1 }}
+      >
+        {t("editor.cutGen")}
+        <small style={{ fontWeight: "var(--w-normal)", opacity: 0.85, marginLeft: 6 }}>{size.w} × {size.h} · {costText(cost)}</small>
+      </button>
+      {cost.overLimit && <Hint>{t("editor.cutOver")}</Hint>}
+      <button
+        data-editor-cut-gen-empty
+        disabled={!empty.length || emptyCost.overLimit}
+        onClick={() => void generateCuts(doc, empty.map((l) => l.id), 1)}
+        style={{ ...box, width: "100%", display: "inline-flex", alignItems: "center", justifyContent: "center", gap: 6, padding: "var(--sp-2) 0" }}
+      >
+        {t("editor.cutGenEmpty")}
+        <span style={{ minWidth: 16, height: 16, padding: "0 4px", borderRadius: 8, background: "var(--line)", fontSize: 10, display: "grid", placeItems: "center" }}>{empty.length}</span>
+        {empty.length > 0 && <small style={{ color: "var(--ink-faint)" }}>{costText(emptyCost)}</small>}
+      </button>
+    </div>
   );
 }

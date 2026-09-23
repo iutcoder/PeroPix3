@@ -642,6 +642,20 @@ async function legacyAction(action: string, args: Record<string, any>): Promise<
   }
 }
 
+/** 도착한 그림을 **먼저** 보는 자리 — 이미지 편집의 만화 캔버스가 제 컷에 뽑은 그림을 받는다 (설계 8번 「넣기」).
+ *  ★편집기는 지연 로드라(`App.tsx` 의 `lazy`) 큐가 편집기를 부르지 않는다 — 편집기가 실릴 때 여기에 매단다.
+ *  ★보는 것만 한다. 레코드·대기 칸은 평소대로 아래가 처리한다 */
+export const imageTaps = new Set<(m: Record<string, any>) => void>();
+const tap = (m: Record<string, any>) => {
+  for (const f of imageTaps) {
+    try {
+      f(m);
+    } catch (e) {
+      console.warn("[queue] 그림 받는 자리가 실패했다", e);
+    }
+  }
+};
+
 function handle(m: Record<string, any>, set: Setter, get: () => S) {
   switch (m.type) {
     case "connected": {
@@ -660,6 +674,7 @@ function handle(m: Record<string, any>, set: Setter, get: () => S) {
     //   ★그래도 **자리는 같다**: 씬 줄의 그 씬 칸에 「미저장」 칸으로 들어간다
     //     (v2 `index.html:12146` — 미저장도 저장된 것과 같은 슬롯 카드다).
     case "image_preview": {
+      tap(m);
       // ★다른 워크스페이스의 미저장 그림은 이 화면의 미리보기에 넣지 않는다 — 대기 칸만 지운다
       //   (`render` 의 ★★주와 같은 까닭, 사용자 실측 2026-09-02)
       if (m.workspace && m.workspace !== useWs.getState().current) {
@@ -719,6 +734,7 @@ function handle(m: Record<string, any>, set: Setter, get: () => S) {
       );
       break;
     case "image":
+      tap(m);
       render(m, set, get);
       bump(String(m.account ?? ""), "ok");
       takeProgress(m.progress, set);

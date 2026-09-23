@@ -6,10 +6,14 @@ import { canPan, centerPan, clampPan, drawSize, keepCenter, stepZoom, zoomFrom, 
 import { boxInside, brushScale, centerOf, cornersOf, docToLayer, hitLayer, keepAnchor, normRect, rad, rectFrom, resizeCursor, type Rect } from "./model";
 import { bubbleText, clipOf, composite, fontOf, makeCanvas, strokeTo, textLayout, type Layer, type Stroke } from "./pixels";
 import {
-  bendFrom, bendHandle, bendable, distToEdge, hasTails, panelNumbers, panelPts, pointInPoly, rectPts, segHitsPoly, snapCands, snapTo, splitPoly, gapFor, tailGeo,
+  bboxOf, bendFrom, bendHandle, bendable, comicGroupId, distToEdge, hasTails, panelNumbers, panelPts, pointInPoly, rectPts, segHitsPoly, snapCands, snapTo, splitPoly, gapFor, tailGeo,
   type Pt,
 } from "./comic";
 import { primaryOf, useEditor, type Doc } from "./store";
+import { usePrompt } from "../store/prompt";
+import { runningPendingId, stepKey, useQueue } from "../store/queue";
+import { useWs } from "../store/workspace";
+import { CAST_COLORS } from "./comicUi";
 
 /** 무대 — 캔버스 한 장을 합성해 보여 주고, 도구에 따라 **누르고 끄는 것**을 받는다.
  *
@@ -54,7 +58,7 @@ export function Stage({ doc }: { doc: Doc }) {
   const strokeRef = useRef<{ st: Stroke; last: { x: number; y: number } | null; layer: Layer } | null>(null);
   /** 손잡이를 끄는 중 */
   const dragRef = useRef<{
-    kind: "move" | "scale" | "rotate" | "crop" | "pan" | "marquee" | "vertex" | "cut" | "body" | "tip" | "bend";
+    kind: "move" | "scale" | "rotate" | "crop" | "pan" | "marquee" | "vertex" | "cut" | "body" | "tip" | "bend" | "cast";
     start: { x: number; y: number };
     layer?: Layer;
     /** 함께 옮기는 것들 (끌기 시작 때의 자리) */
@@ -193,6 +197,16 @@ export function Stage({ doc }: { doc: Doc }) {
     }
     return null;
   };
+  /** 누른 자리의 인물 점 — 그 컷과 몇 번째 인물인가 */
+  const castAt = (p: { x: number; y: number }) => {
+    for (const l of doc.layers) {
+      if (!l.panel?.gen?.cast.length || !l.on) continue;
+      const b = bboxOf(panelPts(l, l.panel.pts));
+      const i = l.panel.gen.cast.findIndex((c) => Math.hypot(b.x + c.x * b.w - p.x, b.y + c.y * b.h - p.y) <= 12 / scale);
+      if (i >= 0) return { panel: l, i };
+    }
+    return null;
+  };
   /** 말풍선 손잡이 — 몸통 여덟 · 꼬리 끝(큰 것) · 휨(작은 것) (설계 6번 · 목업 ④) */
   const bubbleHandles = (l: Layer) => {
     const b = l.bubble!;
@@ -258,6 +272,16 @@ export function Stage({ doc }: { doc: Doc }) {
     e.preventDefault();
     (document.activeElement as HTMLElement | null)?.blur?.();
     if (tool === "pan") return;
+
+    // ── 인물 점 (선택·컷 도구) — 끌어서 그 컷 안의 자리를 정한다 (만화 제작기의 인물 점과 같은 조작, 설계 8번)
+    if ((tool === "select" || tool === "panel") && comic) {
+      const hit = castAt(p);
+      if (hit) {
+        dragRef.current = { kind: "cast", start: p, layer: hit.panel, ti: hit.i };
+        (e.currentTarget as Element).setPointerCapture(e.pointerId);
+        return;
+      }
+    }
 
     // ── 컷 도구: 고른 컷의 꼭짓점 → 꼭짓점 끌기 · 그 밖은 끌기 — 선이 컷을 지나면 자르기선(바깥에서 시작해도 된다),
     //    컷에 안 닿으면 새 컷 상자 (설계 5번 · 목업 ③). 컷 안을 짧게 누르면 그 컷을 고른다
@@ -466,6 +490,15 @@ export function Stage({ doc }: { doc: Doc }) {
       if (d.kind === "move") {
         // 고른 것 전부를 함께 — 각자 끌기 시작 때의 자리에서 같은 만큼 (말풍선은 꼬리 끝을 제자리에 둔다, `dragLayers`)
         s.dragLayers(d.layers ?? [], p.x - d.start.x, p.y - d.start.y);
+        return;
+      }
+      if (d.kind === "cast" && d.ti !== undefined && l.panel) {
+        // 컷 상자 안 비율로 — 생성 그림이 곧 컷 비율이라 그대로 NAI 좌표가 된다
+        const b = bboxOf(panelPts(l, l.panel.pts));
+        const x = Math.min(0.95, Math.max(0.05, (p.x - b.x) / Math.max(1, b.w)));
+        const y = Math.min(0.95, Math.max(0.05, (p.y - b.y) / Math.max(1, b.h)));
+        const cast = (l.panel.gen?.cast ?? []).map((c, i) => (i === d.ti ? { ...c, x, y } : c));
+        s.setPanelGen(l.id, { cast }, true);
         return;
       }
       if (d.kind === "vertex" && d.poly0 && d.vi !== undefined && l.panel && comic) {
@@ -807,6 +840,7 @@ function ComicOverlay({
   bubbleHandles: (l: Layer) => { box8: { sx: number; sy: number; p: { x: number; y: number } }[]; tails: { i: number; tip: { x: number; y: number }; bend: Pt | null }[] };
   editingId: string | null;
 }) {
+  const t = useI18n((st) => st.t);
   const page = doc.comic!;
   const k = 1 / scale;
   const nums = panelNumbers(doc.layers, page.dir, doc.h);
@@ -821,8 +855,47 @@ function ComicOverlay({
     : null;
   const pts = (poly: Pt[]) => poly.map((q) => `${q[0]},${q[1]}`).join(" ");
   const bub = single?.bubble && (tool === "select" || tool === "bubble") && single.id !== editingId ? single : null;
+  // ── 컷 생성: 인물 점 · 대기 · 생성 중 (설계 8번 · 목업 ⑤)
+  const chars = usePrompt((p) => p.chars);
+  const pending = useQueue((q) => q.pending);
+  const steps = useQueue((q) => q.steps);
+  useQueue((q) => q.progress);
+  const ws = useWs((w) => w.current) ?? "";
+  const group = comicGroupId(doc.id);
+  const running = runningPendingId(group);
+  // ★인물 점의 번호는 **페이지 흐름 순서**다 — 컷을 읽는 차례대로, 컷 안에서는 고른 차례대로 이어 센다 (사용자 결정 2026-09-23)
+  const ordered = [...panels].sort((a, b) => (nums.get(a.id) ?? 0) - (nums.get(b.id) ?? 0));
+  let flow = 0;
+  const dots = ordered.flatMap((l) => {
+    const b = bboxOf(panelPts(l, l.panel!.pts));
+    return (l.panel!.gen?.cast ?? []).map((c) => {
+      const ci = chars.findIndex((x) => x.id === c.id);
+      return { key: `${l.id}:${c.id}`, n: ++flow, x: b.x + c.x * b.w, y: b.y + c.y * b.h, color: ci >= 0 ? CAST_COLORS[ci % CAST_COLORS.length] : "#78859a", name: ci >= 0 ? chars[ci].name || `#${ci + 1}` : "?" };
+    });
+  });
   return (
     <g data-editor-comic style={{ pointerEvents: "none" }}>
+      {/* 대기 · 생성 중 — 그 컷 안에 (씬 칸의 대기 칸과 같은 말). 그리는 중인 그림이 오면 컷 모양으로 잘라 보여 준다 */}
+      <defs>
+        {panels.map((l) => <clipPath key={l.id} id={`cutclip-${l.id}`}><polygon points={pts(panelPts(l, l.panel!.pts))} /></clipPath>)}
+      </defs>
+      {panels.map((l) => {
+        const mine = pending.filter((q) => q.groupId === group && q.cellId === l.id && q.workspace === ws);
+        if (!mine.length) return null;
+        const poly = panelPts(l, l.panel!.pts);
+        const b = bboxOf(poly);
+        const isRun = mine.some((q) => q.id === running);
+        const step = steps[stepKey(ws, l.id)];
+        return (
+          <g key={`pend-${l.id}`} data-editor-cut-state={isRun ? "running" : "queued"} data-panel={l.id}>
+            <polygon points={pts(poly)} fill={isRun ? "rgba(236,238,244,.72)" : "rgba(246,246,248,.6)"} />
+            {isRun && step && <image href={step} x={b.x} y={b.y} width={b.w} height={b.h} preserveAspectRatio="xMidYMid slice" clipPath={`url(#cutclip-${l.id})`} opacity={0.85} />}
+            <text x={b.x + b.w / 2} y={b.y + b.h / 2} textAnchor="middle" fontSize={13 * k} fontWeight={600} fill={isRun ? "#2f6fa8" : "#6a6a74"} stroke="#fff" strokeWidth={3 * k} paintOrder="stroke" style={{ fontFamily: "var(--font-sans)" }}>
+              {isRun ? t("editor.cutRunning") : `${t("editor.cutQueued")}${mine.length > 1 ? ` · ${mine.length}` : ""}`}
+            </text>
+          </g>
+        );
+      })}
       {page.guides && (
         <rect data-editor-guides x={f.x} y={f.y} width={f.w} height={f.h} fill="none" stroke="#35a8d8" strokeWidth={k} strokeDasharray={`${4 * k} ${3 * k}`} opacity={0.75} />
       )}
@@ -861,6 +934,14 @@ function ComicOverlay({
           </text>
         );
       })}
+      {/* 인물 점 — 만화 제작기 콘티와 같은 양식 (인물 색 동그라미 + 번호 + 이름), 생김새는 편집기 목업이 기준 (설계 10-2) */}
+      {dots.map((c) => (
+        <g key={c.key} data-editor-cast-dot={c.n} transform={`translate(${c.x},${c.y})`}>
+          <circle r={11.5 * k} fill={c.color} stroke="#fff" strokeWidth={1.8 * k} />
+          <text textAnchor="middle" y={4.2 * k} fontSize={11.5 * k} fontWeight={600} fill="#fff" style={{ fontFamily: "var(--font-sans)" }}>{c.n}</text>
+          <text textAnchor="middle" y={25 * k} fontSize={10.5 * k} fontWeight={600} fill="#263749" stroke="#fff" strokeWidth={2.8 * k} paintOrder="stroke" style={{ fontFamily: "var(--font-sans)" }}>{c.name}</text>
+        </g>
+      ))}
       {/* 자르기선 (끄는 중) + 놓으면 생길 두 컷 */}
       {cutLine && cutLine.ids.length > 0 && (
         <g data-editor-cutline>

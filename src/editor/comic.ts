@@ -3,6 +3,7 @@
  *  픽셀로 굽는 것은 `pixels.ts` 의 `bakePanel`·`bakeBubble`, 상태는 `store.ts` 다.
  *  ★판정: `node --experimental-strip-types src/editor/comic.test.ts` */
 import type { Rect, Size, TextStyle } from "./model";
+import type { Block } from "../lib/blocks";
 
 export type Pt = [number, number];
 export type Dir = "rtl" | "ltr";
@@ -95,7 +96,58 @@ export const rectPts = (r: Rect): Pt[] => [[r.x, r.y], [r.x + r.w, r.y], [r.x + 
 
 /** 컷 레이어가 드는 것 — 꼭짓점은 **레이어 상자 안의 비율**(0~1)이다. 그래서 선택 도구로 옮기고 늘려도 모양이 따라간다.
  *  테두리 두께·색은 페이지 값(`ComicPage`)이고 컷은 「테두리 없음」만 따로 든다 */
-export type PanelMeta = { pts: Pt[]; noBorder: boolean };
+export type PanelMeta = { pts: Pt[]; noBorder: boolean; gen?: PanelGen };
+
+/* ── 컷 생성 (설계 8번) ─────────────────────────────────────────── */
+
+/** 이 컷에 나올 인물 — 지금 탭의 캐릭터 카드 id 와 **컷 안의 자리**(컷 상자 안 비율 0~1) */
+export type CutCast = { id: string; x: number; y: number };
+/** 그 컷에서 뽑은 그림 — 워크스페이스 파일 (`ws` 의 `file`). 파일이라 지워지지 않는다 */
+export type CutTake = { ws: string; file: string };
+/** 컷 하나가 곧 씬 하나다 — 컷 프롬프트(씬 칸과 같은 블록 하나) · 나올 인물 · 크게 · 뽑은 후보 */
+export type PanelGen = { blocks: Block[]; cast: CutCast[]; big?: boolean; takes: CutTake[] };
+
+/** Opus 무료 한도 — `lib/anlas.ts` 의 `FREE_PIXELS` 와 같은 값 (공홈 `eZ`). 순수 계산이라 여기 둔다 */
+const FREE_PX = 1048576;
+
+/** 컷 비율에 맞춘 생성 크기 — 64 배수. 기본은 **Opus 무료 한도 안**에서 가장 큰 판, 「크게」면 컷의 실제 픽셀 크기 (설계 8번).
+ *  비율이 극단적이어도 한 변이 64 아래로 가지 않는다 */
+export function cutSize(box: Size, big = false): Size {
+  const aspect = Math.max(0.05, Math.min(20, box.w / Math.max(1, box.h)));
+  const a64 = (v: number) => Math.max(64, Math.round(v / 64) * 64);
+  let best: Size = { w: 64, h: 64 };
+  let bestErr = Infinity;
+  for (let w = 64; w <= 4096; w += 64) {
+    const h = Math.min(a64(w / aspect), Math.floor(FREE_PX / w / 64) * 64);
+    if (h < 64) break;
+    const err = Math.abs(Math.log(w / h / aspect));
+    const area = w * h;
+    // 비율이 3% 안이면 넓은 판을, 아니면 비율이 가까운 판을
+    const better = err < 0.03 && bestErr < 0.03 ? area > best.w * best.h : err < bestErr - 1e-9 || (Math.abs(err - bestErr) < 1e-9 && area > best.w * best.h);
+    if (better) {
+      best = { w, h };
+      bestErr = err;
+    }
+  }
+  // 「크게」 — 컷의 실제 픽셀 크기 (인쇄 판처럼 컷이 무료 판보다 클 때 뜻이 있다). 무료 판보다 작으면 무료 판 그대로
+  if (big) {
+    const real = { w: a64(box.w), h: a64(box.h) };
+    if (real.w * real.h > best.w * best.h) return real;
+  }
+  return best;
+}
+
+/** 인물 자리의 기본값 — 컷 안에 고르게 (한 명은 가운데, 여럿은 가로로 나란히) */
+export function castSpot(i: number, n: number): { x: number; y: number } {
+  return { x: n <= 1 ? 0.5 : 0.2 + (0.6 * i) / (n - 1), y: 0.55 };
+}
+
+/** 컷 그림의 캐릭터 좌표 — 컷 안 비율 그대로 (생성 그림이 곧 컷 상자 비율이다). NAI 좌표 범위 안으로 붙든다 */
+export const castCenter = (c: CutCast) => ({ x: Math.min(0.95, Math.max(0.05, c.x)), y: Math.min(0.95, Math.max(0.05, c.y)) });
+
+/** 만화 캔버스의 컷 생성 묶음 id — 큐의 씬 그룹 자리에 들어간다. 도착한 그림을 이 열쇠로 그 캔버스의 그 컷(`cell_id`)에 넣는다 */
+export const comicGroupId = (docId: string) => `comic_${docId}`;
+export const docOfGroup = (groupId: string | null | undefined) => (groupId && groupId.startsWith("comic_") ? groupId.slice(6) : null);
 
 export function bboxOf(pts: Pt[]): Rect {
   const xs = pts.map((p) => p[0]);

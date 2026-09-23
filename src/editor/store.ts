@@ -21,7 +21,7 @@ import {
 import { bakeBubble, bakePanel, bakeStroke, bucketFill, clipOf, cloneCanvas, exportDataUrl, fillAround, fitBubble, makeCanvas, mergeInto, rebakeText, renderText, type Layer, type Stroke } from "./pixels";
 import {
   bboxOf, comicStack, coverRect, defaultTail, gapFor, hasTails, newPage, panelPts, splitPoly, templatePanels, toPanel,
-  type BubbleMeta, type ComicPage, type Dir, type Pt, type Tail,
+  type BubbleMeta, type ComicPage, type CutTake, type Dir, type PanelGen, type Pt, type Tail,
 } from "./comic";
 import { loadItem, saveImage } from "./io";
 import { loadDocs, scheduleFlush } from "./persist";
@@ -152,6 +152,11 @@ type S = {
   setPanelBorder: (id: string, noBorder: boolean) => void;
   /** 그림을 컷에 넣는다 (컷을 가득 채우게) · `null` 이면 컷에서 뺀다 */
   setClip: (id: string, panel: string | null) => void;
+  /** 컷 생성 설정(컷 프롬프트·인물·크게)을 고친다. `live` 면 이력 없이 (인물 점을 끄는 중) */
+  setPanelGen: (id: string, p: Partial<PanelGen>, live?: boolean) => void;
+  /** 뽑은 그림을 그 컷에 넣는다 — 그 컷에서 뽑아 넣은 그림(`take` 가 있는 레이어)을 갈아 끼우고, 없으면 새로 (컷을 가득 채우게).
+   *  저장된 그림이면 후보에도 남긴다. 어느 캔버스든 찾는다 (한 걸음) */
+  placeTake: (docId: string, panelId: string, take: CutTake | null, cv: HTMLCanvasElement, name: string) => void;
   /** 말풍선을 그 자리에 만들고 곧바로 글을 고친다 */
   addBubble: (at: { x: number; y: number }) => void;
   /** 말풍선의 원문을 고치고 다시 굽는다. `live` 면 이력 없이 (끄는 중) */
@@ -745,6 +750,31 @@ export const useEditor = create<S>((set, get) => {
         // 컷을 가득 채우게 (가운데 맞춤) — 원본 비율은 지킨다
         const at = coverRect(bboxOf(panelPts(p, p.panel.pts)), { w: l.w, h: l.h });
         return { layers: d.layers.map((x) => (x.id === id ? { ...x, ...at, clip: panel } : x)) };
+      });
+    },
+    setPanelGen(id, p, live = false) {
+      const d = get().docs.find((x) => x.layers.some((l) => l.id === id && l.panel));
+      if (!d) return;
+      const layers = d.layers.map((l) =>
+        l.id === id && l.panel ? { ...l, panel: { ...l.panel, gen: { blocks: [], cast: [], takes: [], ...l.panel.gen, ...p } } } : l,
+      );
+      if (live) patchDoc(d.id, { layers, dirty: true });
+      else commitDoc(d, () => ({ layers }));
+    },
+    placeTake(docId, panelId, take, cv, name) {
+      const d = get().docs.find((x) => x.id === docId);
+      const p = d?.layers.find((l) => l.id === panelId && l.panel);
+      if (!d || !p?.panel) return;
+      commitDoc(d, (dd) => {
+        const at = coverRect(bboxOf(panelPts(p, p.panel!.pts)), { w: cv.width, h: cv.height });
+        const old = dd.layers.find((l) => l.clip === panelId && l.take !== undefined);
+        const layer: Layer = { ...mkLayer(cv, name, at), clip: panelId, take };
+        const g = { blocks: [], cast: [], takes: [], ...p.panel!.gen };
+        const takes = take && !g.takes.some((x) => x.ws === take.ws && x.file === take.file) ? [...g.takes, take] : g.takes;
+        const layers = (old ? dd.layers.map((l) => (l.id === old.id ? { ...layer, id: old.id } : l)) : [...dd.layers, layer]).map((l) =>
+          l.id === panelId && l.panel ? { ...l, panel: { ...l.panel, gen: { ...g, takes } } } : l,
+        );
+        return { layers };
       });
     },
     addBubble(at) {

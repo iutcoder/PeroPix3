@@ -2,7 +2,7 @@
  *  픽셀을 만지는 것은 `pixels.ts`, 상태는 `store.ts`, 화면은 `Editor.tsx`·`Stage.tsx`·`Side.tsx` 다.
  *  ★여기 있는 것은 전부 `node --experimental-strip-types src/editor/model.test.ts` 로 판정한다 (사용자 지시 2026-09-22). */
 
-import type { BubbleMeta, PanelMeta } from "./comic";
+import type { BubbleMeta, CutTake, PanelMeta } from "./comic";
 
 export type Size = { w: number; h: number };
 export type Rect = { x: number; y: number; w: number; h: number };
@@ -45,6 +45,8 @@ export type LayerMeta = Xform & {
   bubble?: BubbleMeta;
   /** 이 그림이 든 컷의 레이어 id — 합성·합치기·저장이 그 컷 모양으로 자른다 */
   clip?: string;
+  /** 컷 생성으로 뽑아 넣은 그림 — 어느 파일인가 (후보 줄에서 지금 든 것을 가리킨다). 미저장 그림은 `null` */
+  take?: CutTake | null;
 };
 
 /** 글자를 어떻게 앉히나 — 줄마다 잰 폭을 받아 상자 크기와 줄의 x 를 정한다 (재는 것은 캔버스가, 셈은 여기가) */
