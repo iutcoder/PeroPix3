@@ -4,6 +4,7 @@
 
 import type { BubbleMeta, CutTake, PanelMeta } from "./comic";
 import type { SfxMeta } from "./sfx";
+import type { Fx } from "./fx";
 
 export type Size = { w: number; h: number };
 export type Rect = { x: number; y: number; w: number; h: number };
@@ -36,6 +37,8 @@ export type LayerMeta = Xform & {
   /** 0~100 */
   opacity: number;
   adj: Adjust;
+  /** 효과 프리셋 (`fx.ts`) — 보정처럼 언제나 걸리고 저장·합치기 때 굽힌다. 없으면 효과 없음 */
+  fx?: Fx | null;
   /** 원본 픽셀 크기 */
   sw: number;
   sh: number;

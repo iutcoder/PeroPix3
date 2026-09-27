@@ -4,7 +4,7 @@ import { toast } from "../store/toast";
 import { useUi } from "../store/ui";
 import { canPan, centerPan, clampPan, drawSize, keepCenter, stepZoom, zoomFrom, ZOOM_MAX, ZOOM_MIN, type Pan, type Size } from "../lib/zoomView";
 import { boxInside, brushScale, centerOf, cornersOf, docToLayer, hitLayer, keepAnchor, normRect, rad, rectFrom, resizeCursor, type Rect } from "./model";
-import { bubbleText, clipOf, composite, fontOf, makeCanvas, strokeTo, textLayout, type Layer, type Stroke } from "./pixels";
+import { bubbleText, clipOf, composite, fontOf, makeCanvas, onFxReady, strokeTo, textLayout, type Layer, type Stroke } from "./pixels";
 import {
   bboxOf, bendFrom, bendHandle, bendable, comicGroupId, distToEdge, hasTails, panelNumbers, panelPts, pointInPoly, rectPts, segHitsPoly, snapCands, snapTo, splitPoly, gapFor, tailGeo,
   CAST_NEUTRAL, type Pt,
@@ -122,11 +122,13 @@ export function Stage({ doc }: { doc: Doc }) {
     // 글자 레이어는 고치는 동안 합성에서 뺀다 (말풍선은 글을 뺀 채로 구워 두므로 그대로 그린다)
     const te = s.textEdit;
     const skip = te && d.layers.find((l) => l.id === te.id)?.text ? te.id : null;
-    composite(d, cv, kk, { sel: primaryOf(d), stroke: st, skip });
+    // ★효과는 워커가 셈하는 동안 앞의 결과로 그리고(`live`), 다 되면 다시 그린다 (`onFxReady`)
+    composite(d, cv, kk, { sel: primaryOf(d), stroke: st, skip, live: true });
   }, []);
   useEffect(() => {
     paint();
   }, [doc, rev, fitted.w, fitted.h, textEdit, paint]);
+  useEffect(() => onFxReady(paint), [paint]);
 
   /* ── 좌표 ── */
   const toDoc = (e: { clientX: number; clientY: number }) => {

@@ -20,6 +20,7 @@ import {
 } from "./model";
 import { bakeBubble, bakePanel, bakeSfx, bakeStroke, bucketFill, clipOf, cloneCanvas, exportDataUrl, fillAround, fitBubble, makeCanvas, mergeInto, rebakeText, renderText, type Layer, type Stroke } from "./pixels";
 import { newSfx, withStyle, type SfxMeta, type SfxStyleId } from "./sfx";
+import type { Fx } from "./fx";
 import {
   bboxOf, comicStack, coverRect, defaultTail, gapFor, hasTails, newPage, panelPts, placeOwn, splitPoly, templatePanels, toPanel,
   type BubbleMeta, type ComicAddon, type ComicPage, type CutTake, type Dir, type Handed, type PanelGen, type Pt, type Tail,
@@ -99,6 +100,8 @@ type S = {
   setAdjust: (p: Partial<Adjust>, live?: boolean) => void;
   /** 고른 레이어의 보정을 전부 0 으로 (한 걸음) */
   resetAdjust: () => void;
+  /** 고른 레이어의 효과 — `null` 이면 뗀다. 보정과 같은 규칙이다 (`live` 면 이력을 안 적는다) */
+  setFx: (fx: Fx | null, live?: boolean) => void;
   setRatioLock: (v: boolean) => void;
   setView: (v: Partial<Doc["view"]>) => void;
 
@@ -517,6 +520,11 @@ export const useEditor = create<S>((set, get) => {
       const l = get().layer();
       if (!l || !hasAdjust(l.adj)) return;
       get().patchLayer(l.id, { adj: NO_ADJUST });
+    },
+    setFx(fx, live = false) {
+      const l = get().layer();
+      if (!l) return;
+      get().patchLayer(l.id, { fx }, live);
     },
     setRatioLock: (v) => set({ ratioLock: v }),
     setView(v) {

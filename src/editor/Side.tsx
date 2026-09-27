@@ -13,7 +13,8 @@ import { toast } from "../store/toast";
 import { useUi } from "../store/ui";
 import { Hint, Line, Sec, box, dropFocus, num, on } from "../panels/censor/ui";
 import { NO_ADJUST, hasAdjust, withRatio } from "./model";
-import { thumbOf, type Layer } from "./pixels";
+import { fxThumb, thumbOf, type Layer } from "./pixels";
+import { FX_AMT, FX_KINDS, FX_SEEDED, newSeed, type FxKind } from "./fx";
 import { primaryOf, saveName, useEditor, whereOf, type Doc } from "./store";
 import { CanvasSizeDialog, ExportPagesDialog, ImageSizeDialog } from "./dialogs";
 import { BubbleKindIcon, CAST_COLORS } from "./comicUi";
@@ -200,6 +201,9 @@ export function Side({ doc }: { doc: Doc }) {
         </div>
         )}
 
+        {/* ── 효과 — 보정과 같은 규칙이다 (레이어의 속성, 언제나 걸림) ── */}
+        {!(sel && !many && (sel.panel || sel.bubble)) && <FxSection sel={sel} many={many} n={doc.sel.length} />}
+
         {/* ── 페이지 (만화 페이지만) ── */}
         {doc.comic && <PageSection doc={doc} onExport={() => setDlg("pages")} />}
 
@@ -304,6 +308,101 @@ export function Side({ doc }: { doc: Doc }) {
  *  ★잔상(`DragGhost`)은 **안 그린다** (사용자 지적 2026-09-22: 커서를 따라오는 줄이 놓일 자리를 가려 어디에 놓이는지 알 수 없었다).
  *    끌리는 줄은 제자리에서 흐려지고, 놓일 자리는 끼움선 하나로 말한다 (포토샵의 레이어 판과 같다).
  *  ★줄은 눌러서 고르는 자리이기도 해서 `tapSafe` 로 잡는다 — 문턱을 넘기 전에는 클릭(고르기)·더블클릭(이름 고치기)이 산다 */
+/** 효과 이름 — ★키를 이어 만들지 않는다 (지침 「i18n 키를 문자열로 이어 만들지 않는다」) */
+const FX_LABEL = {
+  glitch: "editor.fxGlitch",
+  crt: "editor.fxCrt",
+  vhs: "editor.fxVhs",
+  chroma: "editor.fxChroma",
+  film: "editor.fxFilm",
+  bloom: "editor.fxBloom",
+  halftone: "editor.fxHalftone",
+  pixel: "editor.fxPixel",
+  vignette: "editor.fxVignette",
+} as const satisfies Record<FxKind, string>;
+/** 효과 칸의 미리보기 크기 (화면 크기의 두 배로 굽는다) */
+const FX_TILE = { w: 168, h: 112 };
+
+/** 효과 — 칸마다 고른 레이어에 그 효과를 입힌 작은 그림이 뜨고, 누르면 걸린다. 걸린 뒤에는 강도와 (무작위가 드는 것은) 다시 섞기.
+ *  떼는 것은 보정과 같이 머리의 「초기화」다 (아홉 칸이 3×3 으로 맞아떨어진다) */
+function FxSection({ sel, many, n }: { sel: Layer | null; many: boolean; n: number }) {
+  const t = useI18n((st) => st.t);
+  const s = useEditor();
+  const fx = sel && !many ? (sel.fx ?? null) : null;
+  const pick = (k: FxKind) => {
+    if (fx?.kind === k) return;
+    s.setFx({ kind: k, amt: fx?.amt || FX_AMT, seed: fx?.seed ?? newSeed() });
+  };
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: "var(--sp-2)" }}>
+      <span style={{ display: "flex", alignItems: "center", gap: "var(--sp-2)", fontSize: "var(--text-xs)", fontWeight: "var(--w-semi)", color: "var(--ink-soft)" }}>
+        {t("editor.fx")}
+        <Help tip={t("editor.fxHint")} />
+        <span style={{ flex: 1 }} />
+        <button data-editor-fx-reset disabled={!fx} onClick={() => s.setFx(null)} style={{ ...box, padding: "1px 8px", fontSize: "var(--text-3xs)", color: "var(--ink-faint)" }}>
+          {t("editor.reset")}
+        </button>
+      </span>
+      {!sel && <Hint>{t("editor.noLayer")}</Hint>}
+      {sel && many && <Hint>{t("editor.selectedN", { n })}</Hint>}
+      {sel && !many && (
+        <>
+          <div data-editor-fx-grid style={{ display: "grid", gridTemplateColumns: "repeat(3, minmax(0, 1fr))", gap: "var(--sp-2)" }}>
+            {FX_KINDS.map((k) => {
+              const cur = fx?.kind === k;
+              return (
+                <button
+                  key={k}
+                  data-editor-fx={k}
+                  data-on={cur ? "" : undefined}
+                  onMouseDown={dropFocus}
+                  onClick={() => pick(k)}
+                  style={{ ...box, ...(cur ? on : {}), padding: 3, display: "flex", flexDirection: "column", alignItems: "stretch", gap: 3 }}
+                >
+                  <img
+                    src={fxThumb(sel.cv, k, FX_TILE.w, FX_TILE.h)}
+                    draggable={false}
+                    style={{ display: "block", width: "100%", aspectRatio: `${FX_TILE.w} / ${FX_TILE.h}`, objectFit: "cover", borderRadius: 3, background: "var(--bg)" }}
+                  />
+                  <span style={{ fontSize: "var(--text-3xs)", textAlign: "center", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", color: cur ? "var(--ink)" : "var(--ink-soft)" }}>
+                    {t(FX_LABEL[k])}
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+          {fx && (
+            <Line label={t("editor.fxAmount")}>
+              <input
+                type="range"
+                data-editor-fx-amount
+                min={0}
+                max={100}
+                value={fx.amt}
+                onPointerDown={() => s.markBefore()}
+                onChange={(e) => s.setFx({ ...fx, amt: Number(e.target.value) }, true)}
+                style={{ flex: 1, minWidth: 0 }}
+              />
+              <span style={num}>{fx.amt}</span>
+              {FX_SEEDED.includes(fx.kind) && (
+                <button
+                  data-editor-fx-reseed
+                  data-tip={t("editor.fxReseed")}
+                  onMouseDown={dropFocus}
+                  onClick={() => s.setFx({ ...fx, seed: newSeed() })}
+                  style={{ ...box, display: "grid", padding: "3px 6px" }}
+                >
+                  {Icon.dice}
+                </button>
+              )}
+            </Line>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
 function LayerList({ doc }: { doc: Doc }) {
   const t = useI18n((s) => s.t);
   const s = useEditor();

@@ -6,6 +6,7 @@
 import { centerOf, filterOf, floodFill, hexRgb, layoutText, rad, textBaseline, type LayerMeta, type Rect, type Size, type TextMeta, type Xform } from "./model";
 import { bodyFor, bubbleBounds, bubbleShape, panelPts, wrapLines, type BubbleMeta, type ComicPage, type PanelMeta, type Pt } from "./comic";
 import { SFX_FALLBACK, layoutSfx, primaryFamily, sfxBounds, type Glyph, type SfxMeta } from "./sfx";
+import { FX_AMT, applyFx, fxKey, type Fx, type FxKind } from "./fx";
 
 export type Layer = LayerMeta & { cv: HTMLCanvasElement };
 
@@ -50,9 +51,127 @@ function applyXform(ctx: CanvasRenderingContext2D, l: Xform) {
   ctx.scale(l.flipH ? -1 : 1, l.flipV ? -1 : 1);
 }
 
-/** 레이어 하나를 문서 좌표계의 `ctx` 에 그린다 (불투명도·보정·긋는 중인 획까지).
- *  ★보정(`l.adj`)은 레이어의 속성이라 **언제나** 건다 — 합치기·저장이 이 함수를 거치므로 그때 픽셀에 굽힌다 */
-export function drawLayer(ctx: CanvasRenderingContext2D, l: Layer, opt?: { stroke?: Stroke | null; clip?: Pt[] | null }) {
+/* ── 효과 ───────────────────────────────────────────────────────── */
+
+/** 효과를 입힌 사본 — 원본 캔버스마다 최근 몇 벌을 들고 있다 (같은 캔버스를 두 레이어가 나눠 쓸 수 있다) */
+const fxDone = new WeakMap<HTMLCanvasElement, Map<string, HTMLCanvasElement>>();
+/** 캔버스마다 가장 최근에 다 된 것 — 새 것이 셈 중일 때 대신 보여 준다 */
+const fxLast = new WeakMap<HTMLCanvasElement, HTMLCanvasElement>();
+/** 워커에 맡길 차례를 기다리는 것 (캔버스마다 가장 최근 것 하나만) · 맡겨 둔 캔버스 */
+const fxWant = new WeakMap<HTMLCanvasElement, Fx>();
+const fxBusy = new WeakSet<HTMLCanvasElement>();
+const fxListeners = new Set<() => void>();
+/** 워커가 효과를 다 셈하면 불린다 — 무대가 다시 그린다 */
+export function onFxReady(f: () => void): () => void {
+  fxListeners.add(f);
+  return () => void fxListeners.delete(f);
+}
+const FX_KEEP = 3;
+let worker: Worker | null = null;
+let workerBroken = false;
+let nextJob = 1;
+const jobs = new Map<number, (buf: ArrayBuffer) => void>();
+
+function fxWorker(): Worker | null {
+  if (worker || workerBroken) return worker;
+  try {
+    worker = new Worker(new URL("./fxWorker.ts", import.meta.url), { type: "module" });
+    worker.onmessage = (e: MessageEvent<{ id: number; data: ArrayBuffer }>) => {
+      const done = jobs.get(e.data.id);
+      jobs.delete(e.data.id);
+      done?.(e.data.data);
+    };
+    // ★워커가 죽으면 그 자리에서 셈한다 (느려도 그림은 맞다)
+    worker.onerror = () => {
+      workerBroken = true;
+      worker = null;
+      jobs.clear();
+      fxListeners.forEach((f) => f());
+    };
+  } catch {
+    workerBroken = true;
+    worker = null;
+  }
+  return worker;
+}
+
+function keepFx(cv: HTMLCanvasElement, key: string, out: HTMLCanvasElement) {
+  let m = fxDone.get(cv);
+  if (!m) fxDone.set(cv, (m = new Map()));
+  m.delete(key);
+  m.set(key, out);
+  while (m.size > FX_KEEP) m.delete(m.keys().next().value!);
+  fxLast.set(cv, out);
+}
+
+function fxCanvasOf(w: number, h: number, data: Uint8ClampedArray): HTMLCanvasElement {
+  const out = makeCanvas(w, h);
+  out.getContext("2d")!.putImageData(new ImageData(new Uint8ClampedArray(data.buffer as ArrayBuffer, data.byteOffset, data.length), w, h), 0, 0);
+  return out;
+}
+
+function pumpFx(cv: HTMLCanvasElement, wk: Worker) {
+  if (fxBusy.has(cv)) return;
+  const fx = fxWant.get(cv);
+  if (!fx) return;
+  fxWant.delete(cv);
+  fxBusy.add(cv);
+  const data = cv.getContext("2d")!.getImageData(0, 0, cv.width, cv.height).data;
+  const id = nextJob++;
+  jobs.set(id, (buf) => {
+    fxBusy.delete(cv);
+    keepFx(cv, fxKey(fx), fxCanvasOf(cv.width, cv.height, new Uint8ClampedArray(buf)));
+    pumpFx(cv, wk);
+    fxListeners.forEach((f) => f());
+  });
+  wk.postMessage({ id, data: data.buffer, w: cv.width, h: cv.height, fx }, [data.buffer]);
+}
+
+/** 레이어 픽셀에 효과를 입힌 것. `live`(무대)면 워커에 맡기고 다 될 때까지 앞의 결과(없으면 원본)를 준다 —
+ *  ★저장·합치기·미리보기는 `live` 없이 불러 **그 자리에서** 셈한 정확한 것을 받는다 */
+export function withFx(cv: HTMLCanvasElement, fx: Fx | null | undefined, live = false): HTMLCanvasElement {
+  if (!fx || fx.amt <= 0) return cv;
+  const key = fxKey(fx);
+  const hit = fxDone.get(cv)?.get(key);
+  if (hit) {
+    fxLast.set(cv, hit);
+    return hit;
+  }
+  const wk = live ? fxWorker() : null;
+  if (!wk) {
+    const data = cv.getContext("2d")!.getImageData(0, 0, cv.width, cv.height).data;
+    const out = fxCanvasOf(cv.width, cv.height, applyFx(data, cv.width, cv.height, fx));
+    keepFx(cv, key, out);
+    return out;
+  }
+  fxWant.set(cv, fx);
+  pumpFx(cv, wk);
+  return fxLast.get(cv) ?? cv;
+}
+
+/** 효과 칸의 작은 미리보기 — 레이어를 칸 크기로 줄여 입힌다 (크기에 매인 값이 짧은 변에 비례하므로 모양이 같다) */
+const fxThumbs = new WeakMap<HTMLCanvasElement, Map<string, string>>();
+export function fxThumb(cv: HTMLCanvasElement, kind: FxKind | null, w: number, h: number): string {
+  const key = `${kind}:${w}x${h}`;
+  let m = fxThumbs.get(cv);
+  if (!m) fxThumbs.set(cv, (m = new Map()));
+  const had = m.get(key);
+  if (had) return had;
+  const k = Math.max(w / cv.width, h / cv.height);
+  const small = makeCanvas(w, h);
+  const g = small.getContext("2d")!;
+  g.drawImage(cv, (w - cv.width * k) / 2, (h - cv.height * k) / 2, cv.width * k, cv.height * k);
+  const out = kind ? fxCanvasOf(w, h, applyFx(g.getImageData(0, 0, w, h).data, w, h, { kind, amt: FX_AMT, seed: 7 })) : small;
+  const url = out.toDataURL("image/png");
+  m.set(key, url);
+  return url;
+}
+
+/** 레이어 하나를 문서 좌표계의 `ctx` 에 그린다 (불투명도·보정·효과·긋는 중인 획까지).
+ *  ★보정(`l.adj`)·효과(`l.fx`)는 레이어의 속성이라 **언제나** 건다 — 합치기·저장이 이 함수를 거치므로 그때 픽셀에 굽힌다.
+ *    효과를 먼저 입히고 보정(CSS 필터)은 그 위에 건다. 긋는 중인 획은 놓은 뒤에 효과가 입혀진다 */
+export function drawLayer(ctx: CanvasRenderingContext2D, l: Layer, opt?: { stroke?: Stroke | null; clip?: Pt[] | null; live?: boolean }) {
+  const px = withFx(l.cv, l.fx, opt?.live);
   ctx.save();
   // ★컷에 든 그림 — 그 컷 모양(문서 좌표)으로 자른다. 변형을 걸기 **전에** 건다 (컷은 문서 좌표다)
   if (opt?.clip?.length) {
@@ -68,14 +187,14 @@ export function drawLayer(ctx: CanvasRenderingContext2D, l: Layer, opt?: { strok
   const st = opt?.stroke;
   if (st?.erase) {
     // ★지우개는 **레이어 안에서만** 지워야 한다 — 미리보기도 사본에서 지워서 그린다
-    const tmp = cloneCanvas(l.cv);
+    const tmp = cloneCanvas(px);
     const g = tmp.getContext("2d")!;
     g.globalCompositeOperation = "destination-out";
     g.globalAlpha = st.alpha;
     g.drawImage(st.cv, 0, 0);
     ctx.drawImage(tmp, -l.w / 2, -l.h / 2, l.w, l.h);
   } else {
-    ctx.drawImage(l.cv, -l.w / 2, -l.h / 2, l.w, l.h);
+    ctx.drawImage(px, -l.w / 2, -l.h / 2, l.w, l.h);
     if (st) {
       ctx.globalAlpha = (l.opacity / 100) * st.alpha;
       ctx.drawImage(st.cv, -l.w / 2, -l.h / 2, l.w, l.h);
@@ -90,7 +209,7 @@ export function composite(
   doc: Size & { layers: Layer[] },
   out: HTMLCanvasElement,
   scale = 1,
-  opt?: { sel?: string | null; stroke?: Stroke | null; skip?: string | null },
+  opt?: { sel?: string | null; stroke?: Stroke | null; skip?: string | null; live?: boolean },
 ) {
   const w = Math.max(1, Math.round(doc.w * scale));
   const h = Math.max(1, Math.round(doc.h * scale));
@@ -105,7 +224,7 @@ export function composite(
   ctx.scale(w / doc.w, h / doc.h);
   for (const l of doc.layers) {
     if (!l.on || l.id === opt?.skip) continue;
-    drawLayer(ctx, l, { stroke: l.id === opt?.sel ? opt?.stroke : null, clip: clipOf(doc.layers, l) });
+    drawLayer(ctx, l, { stroke: l.id === opt?.sel ? opt?.stroke : null, clip: clipOf(doc.layers, l), live: opt?.live });
   }
   ctx.restore();
 }
