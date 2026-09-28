@@ -5,7 +5,7 @@ import { api, backendUrl } from "../lib/backend";
 import { fileMgrImg } from "../lib/imgUrl";
 import type { Dropped } from "../lib/dropImages";
 import type { LayerMeta } from "./model";
-import type { ComicPage } from "./comic";
+import type { ComicMeta } from "./comic";
 import { canvasFrom } from "./pixels";
 
 /** 바이트를 받는다 — `rel` 은 파일 관리의 그림 창구, `path` 는 떨군 파일 읽기, `data` 는 그대로 */
@@ -54,6 +54,8 @@ export type SaveReq = {
   dest?: string;
   rel?: string;
   path?: string;
+  /** 줄기 뒤에 붙는 것 — 기본은 `_edit`. 만화 캔버스의 페이지는 이름에 이미 페이지 번호가 있어 빈 값 (`1화_p01.png`) */
+  suffix?: string;
 };
 
 /** 합성 결과를 적는다. 돌려주는 `file` 은 루트 안이면 아웃풋 루트 기준 상대 경로, 밖이면 절대 경로 */
@@ -80,8 +82,11 @@ export type PersistDoc = {
   dirty: boolean;
   view: { fit: boolean; zoom: number };
   layers: PersistLayer[];
-  /** 만화 페이지 캔버스의 속성 (없으면 보통 캔버스) */
-  comic?: ComicPage;
+  /** 만화 캔버스의 속성 (없으면 보통 캔버스) */
+  comic?: ComicMeta;
+  /** 만화 캔버스에서 지금 보는 페이지 · 생성 버튼이 뽑을 컷 (보기 상태라 이력에는 없다) */
+  page?: string;
+  cut?: string | null;
 };
 export type PersistState = { docs: PersistDoc[]; cur: string | null };
 

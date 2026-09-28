@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useI18n } from "../i18n";
+import { Icon } from "../components/Icon";
 import { toast } from "../store/toast";
 import { ask } from "../store/ask";
 import { useUi } from "../store/ui";
@@ -7,21 +8,23 @@ import { canPan, centerPan, clampPan, drawSize, keepCenter, stepZoom, zoomFrom, 
 import { boxInside, brushScale, centerOf, cornersOf, docToLayer, hitLayer, keepAnchor, normRect, rad, rectFrom, resizeCursor, type Rect } from "./model";
 import { bubbleText, clipOf, composite, fontOf, makeCanvas, onFxReady, strokeTo, textLayout, type Layer, type Stroke } from "./pixels";
 import {
-  bboxOf, bendFrom, bendHandle, bendable, comicGroupId, distToEdge, hasTails, panelNumbers, panelPts, pointInPoly, rectPts, segHitsPoly, snapCands, snapTo, splitPoly, gapFor, tailGeo,
+  bboxOf, bendFrom, bendHandle, bendable, castNumbers, comicGroupId, distToEdge, genOf, hasTails, pageLabel, panelNumbers, panelPts, pointInPoly, rectPts,
+  segHitsPoly, snapCands, snapTo, splitPoly, gapFor, tailGeo, WHO_BUBBLE, WHO_NARRATION,
   CAST_NEUTRAL, type Pt,
 } from "./comic";
-import { primaryOf, useEditor, type Doc } from "./store";
-import { usePrompt } from "../store/prompt";
+import { curCut, curPage, pageView, primaryOf, useEditor, type Doc } from "./store";
 import { runningPendingId, stepKey, useQueue } from "../store/queue";
 import { useWs } from "../store/workspace";
 import { CAST_COLORS } from "./comicUi";
 
-/** 무대 — 캔버스 한 장을 합성해 보여 주고, 도구에 따라 **누르고 끄는 것**을 받는다.
+/** 무대 — 캔버스를 합성해 보여 주고, 도구에 따라 **누르고 끄는 것**을 받는다.
  *
- *  세 겹이다: 합성 캔버스 · 조작 SVG(손잡이·자르기 상자·붓 커서) · 글 상자(글자를 고치는 동안). 검열 무대(`CensorStage`)와 같은 뼈대다.
+ *  두 층이다: 이 **호스트**(판 재기 · 배율 · 끌어 보기 · 휠 · 바깥 누르기)와 **페이지**(`PageView` — 합성 캔버스 · 조작 SVG · 글 상자).
+ *  보통 캔버스는 페이지가 하나이고, ★★만화 캔버스는 페이지 여럿이 **위에서 아래로** 쌓인다 (사용자 지시 2026-09-28:
+ *  대부분의 환경에서 아래로 스크롤하며 본다). 맨 아래에 「+ 페이지」가 페이지 폭으로 선다. 휠이 곧 위아래 스크롤이다.
  *  ★★획을 긋는 동안은 리액트를 안 거친다 — `strokeRef` 에 모아 두고 프레임마다 `paint()` 가 스토어를 `getState()` 로
  *    읽어 그린다. 손을 떼면 `endStroke` 가 한 걸음 적는다.
- *  ★배율·자리 계산은 전부 `lib/zoomView` (검열·생성 쪽과 같은 함수). `fit` 이면 판 안에 맞추고(작은 그림은
+ *  ★배율·자리 계산은 전부 `lib/zoomView` (검열·생성 쪽과 같은 함수). `fit` 이면 판 안에 **한 페이지**를 맞추고(작은 그림은
  *    안 키운다), 배율을 정하면 넘치는 만큼 끌어 본다.
  *  ★붓 값은 `useUi.editorBrush` — 브러시와 지우개가 **따로** 기억된다 (사용자 지시 2026-09-22). */
 /** 회전 손잡이 위의 커서 — CSS 에 회전 커서가 없어 SVG(굽은 화살표, 검은 테두리에 흰 선)를 그려 넣는다. 가운데가 핫스팟 */
@@ -31,65 +34,34 @@ const ROTATE_CURSOR = `url("data:image/svg+xml,${encodeURIComponent(
   + "<path d='M19 12a7 7 0 1 1-2.05-4.95M17 3v4.2h-4.2' stroke='#fff' stroke-width='1.6'/></svg>",
 )}") 11 11, auto`;
 
+/** 만화 캔버스의 페이지 쌓기 — 페이지 머리(`p.01`) 자리 · 페이지 사이 · 「+ 페이지」 높이 (화면 px, 배율과 무관) */
+const LB = 22;
+const GAP = 26;
+const ADD_H = 40;
+
 export function Stage({ doc }: { doc: Doc }) {
   const t = useI18n((s) => s.t);
-  const tool = useEditor((s) => s.tool);
-  const ratioLock = useEditor((s) => s.ratioLock);
-  const crop = useEditor((s) => s.crop);
-  const rev = useEditor((s) => s.rev);
-  const textEdit = useEditor((s) => s.textEdit);
-  const brushes = useUi((s) => s.editorBrush);
-  const brush = tool === "eraser" ? brushes.eraser : brushes.brush;
   const bg = useUi((s) => s.editorBg);
+  const tool = useEditor((s) => s.tool);
+  const reveal = useEditor((s) => s.reveal);
+  const busyPage = useEditor((s) => s.contiBusy === doc.id);
   const hostRef = useRef<HTMLDivElement | null>(null);
-  const wrapRef = useRef<HTMLDivElement | null>(null);
-  const canvasRef = useRef<HTMLCanvasElement | null>(null);
-  const overlayRef = useRef<SVGSVGElement | null>(null);
   const [box, setBox] = useState<Size>({ w: 0, h: 0 });
-  /** 끌어 고르기 상자 (문서 좌표, 캔버스 밖도 된다) */
-  const [marquee, setMarquee] = useState<Rect | null>(null);
-  /** 컷 도구 — 자르기선(끄는 중) · 새 컷 상자(빈 자리에서 끄는 중) */
-  const [cutLine, setCutLine] = useState<{ ids: string[]; a: { x: number; y: number }; b: { x: number; y: number } } | null>(null);
-  const [newRect, setNewRect] = useState<Rect | null>(null);
   const [pan, setPan] = useState<Pan>({ x: 0, y: 0 });
-  const [cursor, setCursor] = useState<{ x: number; y: number } | null>(null);
-  /** 선택 도구에서 커서 아래에 있는 것의 커서 모양 — 손잡이면 크기·회전 커서, 레이어면 move, 없으면 null (사용자 지시 2026-09-22) */
-  const [hoverCur, setHoverCur] = useState<string | null>(null);
-  /** 긋는 중 */
-  const strokeRef = useRef<{ st: Stroke; last: { x: number; y: number } | null; layer: Layer } | null>(null);
-  /** 손잡이를 끄는 중 */
-  const dragRef = useRef<{
-    kind: "move" | "scale" | "rotate" | "crop" | "pan" | "marquee" | "vertex" | "cut" | "body" | "tip" | "bend" | "cast";
-    start: { x: number; y: number };
-    layer?: Layer;
-    /** 함께 옮기는 것들 (끌기 시작 때의 자리) */
-    layers?: Layer[];
-    /** 끌어 고르기가 얹히는 바탕 — Ctrl 로 시작했으면 그때 골라 둔 것 */
-    base?: string[];
-    handle?: { sx: -1 | 0 | 1; sy: -1 | 0 | 1 };
-    pan0?: Pan;
-    rot0?: number;
-    ang0?: number;
-    /** 이력에 「끌기 전」을 적었나 — 처음 움직일 때 한 번 (클릭만 하고 놓으면 걸음이 안 생긴다) */
-    marked?: boolean;
-    /** 컷 꼭짓점 끌기 — 몇 번째 꼭짓점 · 끌기 전 다각형 */
-    vi?: number;
-    poly0?: Pt[];
-    /** 말풍선 꼬리 — 몇 번째 꼬리 */
-    ti?: number;
-    /** 말풍선을 눌렀다 놓기만 하면 글 고치기 (말풍선 도구) */
-    tapEdit?: boolean;
-    /** 인물 점 — 직접 고른 인물(`cast`) · 넘겨받은 인물(`hchar`) · 넘겨받은 내레이션 자리(`hnote`) */
-    castKind?: "cast" | "hchar" | "hnote";
-  } | null>(null);
-  const rafRef = useRef(0);
-  /** 선택 도구의 더블클릭 셈 — 바로 앞의 누르기 (pointerdown 의 기본 동작을 막으면 호환 dblclick 이 안 와서 직접 센다) */
-  const dblRef = useRef<{ t: number; x: number; y: number } | null>(null);
-
-  const k = zoomFrom(box, doc, doc.view.fit, doc.view.zoom);
+  const comic = doc.comic ?? null;
+  const pages = comic ? comic.pages : [null];
+  const n = pages.length;
+  /** 한 페이지를 맞출 자리 — 만화는 페이지 머리·여백을 뺀다 */
+  const fitBox = comic ? { w: Math.max(1, box.w - 24), h: Math.max(1, box.h - LB - 16) } : box;
+  const k = zoomFrom(fitBox, doc, doc.view.fit, doc.view.zoom);
   const fitK = doc.view.fit ? Math.min(k, 1) : k;
   const fitted = { w: Math.max(1, Math.floor(doc.w * fitK)), h: Math.max(1, Math.floor(doc.h * fitK)) };
-  const movable = !doc.view.fit && canPan(box, fitted);
+  /** 페이지 하나가 차지하는 높이 (머리 포함) · 쌓인 전체 크기 */
+  const slot = comic ? LB + fitted.h + GAP : 0;
+  const content: Size = comic ? { w: fitted.w, h: n * slot + ADD_H } : fitted;
+  const topOf = (i: number) => i * slot + (comic ? LB : 0);
+  const movable = comic ? canPan(box, content) : !doc.view.fit && canPan(box, fitted);
+  const scale = fitted.w / doc.w || 1;
 
   /* ── 판 재기 ── */
   useEffect(() => {
@@ -101,22 +73,291 @@ export function Stage({ doc }: { doc: Doc }) {
     fit();
     return () => ro.disconnect();
   }, []);
-  // 캔버스가 바뀌면 가운데에서 시작한다
+  /** 그 페이지의 머리가 판 위쪽에 오게 (만화) */
+  const panTo = useCallback(
+    (i: number) => setPan((p) => clampPan({ x: p.x, y: 12 - (topOf(i) - (comic ? LB : 0)) }, box, content)),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [box.w, box.h, content.w, content.h, slot],
+  );
+  // 캔버스가 바뀌면 가운데(만화는 지금 페이지)에서 시작한다
   useEffect(() => {
-    if (box.w && box.h) setPan(centerPan(box, fitted));
+    if (!box.w || !box.h) return;
+    if (!comic) return setPan(centerPan(box, fitted));
+    const c = centerPan(box, content);
+    const i = Math.max(0, comic.pages.indexOf(curPage(doc) ?? ""));
+    setPan(clampPan({ x: c.x, y: 12 - topOf(i) + LB }, box, content));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [doc.id, box.w, box.h]);
   useEffect(() => {
-    setPan((p) => clampPan(p, box, fitted));
-  }, [box.w, box.h, fitted.w, fitted.h]);
+    setPan((p) => clampPan(p, box, comic ? content : fitted));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [box.w, box.h, content.w, content.h, fitted.w, fitted.h]);
+  // ★페이지로 가라는 요청 — 「+ 페이지」 · 컷 줄의 페이지 고르기 · AI 콘티가 깐 페이지 (`useEditor.reveal`)
+  useEffect(() => {
+    if (!reveal || reveal.doc !== doc.id || !comic) return;
+    const i = comic.pages.indexOf(reveal.page);
+    if (i >= 0) panTo(i);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [reveal?.n]);
+
+  /* ── 휠: Ctrl 확대·축소 · Alt 붓 크기 (지금 도구의 것) · 만화는 그냥 휠이 위아래 스크롤 ── */
+  const viewRef = useRef({ box, content, fitted, comic: !!comic, fitBox });
+  viewRef.current = { box, content, fitted, comic: !!comic, fitBox };
+  useEffect(() => {
+    const el = hostRef.current;
+    if (!el) return;
+    const onWheel = (e: WheelEvent) => {
+      const v = viewRef.current;
+      if (e.ctrlKey || e.metaKey) {
+        e.preventDefault();
+        const s = useEditor.getState();
+        const d = s.doc();
+        if (!d) return;
+        const from = zoomFrom(v.fitBox, d, d.view.fit, d.view.zoom);
+        const fromK = d.view.fit ? Math.min(from, 1) : from;
+        const next = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, stepZoom(fromK, e.deltaY > 0 ? -1 : 1)));
+        const r = next / fromK;
+        const to = v.comic ? { w: v.content.w * r, h: (v.content.h - ADD_H) * r + ADD_H } : drawSize(d, next);
+        setPan((p) => keepCenter(p, v.box, v.comic ? v.content : drawSize(d, fromK), to));
+        s.setView({ fit: false, zoom: next });
+        return;
+      }
+      if (e.altKey) {
+        e.preventDefault();
+        const which = useEditor.getState().tool === "eraser" ? "eraser" : "brush";
+        const ui = useUi.getState();
+        const step = (e.shiftKey ? 10 : 1) * (e.deltaY < 0 ? 1 : -1);
+        ui.setEditorBrush(which, { size: Math.max(1, Math.min(400, ui.editorBrush[which].size + step)) });
+        return;
+      }
+      if (v.comic) {
+        e.preventDefault();
+        const dx = e.shiftKey ? e.deltaY : e.deltaX;
+        const dy = e.shiftKey ? 0 : e.deltaY;
+        setPan((p) => clampPan({ x: p.x - dx, y: p.y - dy }, v.box, v.content));
+      }
+    };
+    el.addEventListener("wheel", onWheel, { passive: false });
+    return () => el.removeEventListener("wheel", onWheel);
+  }, []);
+
+  /** 캔버스 **밖**(무대의 빈 바탕)을 눌러도 선택을 푼다 — 안의 빈 자리를 눌렀을 때와 같다 (사용자 지시 2026-09-22).
+   *  ★캔버스 위의 누르기도 여기까지 올라오므로 **바탕 자체**를 누른 것만 받는다.
+   *  ★끌어 고르기는 **캔버스 밖에서 시작해도 된다** (보통 캔버스) — 배경 레이어가 캔버스를 다 덮으므로 안에는 빈 자리가 없다.
+   *    뒤의 움직임·놓기는 조작 SVG 의 `move`·`up` 이 받도록 포인터를 거기에 잡아 둔다. 만화는 페이지가 여럿이라 선택만 푼다 */
+  const outsideRef = useRef<((e: React.PointerEvent) => void) | null>(null);
+  const downOutside = (e: React.PointerEvent) => {
+    if (e.target !== e.currentTarget || e.button !== 0) return;
+    if (e.button === 0 && tool === "pan" && movable) return startPan(e);
+    if (tool !== "select") return;
+    e.preventDefault();
+    const multi = e.ctrlKey || e.metaKey;
+    if (!multi && doc.sel.length) useEditor.getState().selectLayer(null);
+    if (!comic) outsideRef.current?.(e);
+  };
+  /** 끌어 보기 (가운데 단추 · 이동 도구) — 페이지가 넘길 때와 바탕을 누를 때 같은 것을 쓴다 */
+  const panDrag = useRef<{ x: number; y: number; p0: Pan } | null>(null);
+  const startPan = (e: React.PointerEvent) => {
+    e.preventDefault();
+    panDrag.current = { x: e.clientX, y: e.clientY, p0: pan };
+    hostRef.current?.setPointerCapture(e.pointerId);
+  };
+  const movePan = (e: { clientX: number; clientY: number }) => {
+    const d = panDrag.current;
+    if (!d) return false;
+    setPan(clampPan({ x: d.p0.x + (e.clientX - d.x), y: d.p0.y + (e.clientY - d.y) }, box, comic ? content : fitted));
+    return true;
+  };
+
+  /* ── 스크롤 막대 (만화) — 보이는 만큼 / 전체. 끌 수 있다 ── */
+  const barDrag = useRef<{ y: number; p0: number } | null>(null);
+  const seen = comic && content.h > box.h ? box.h / content.h : 1;
+  const barH = Math.max(28, box.h * seen);
+  const barTop = seen < 1 ? ((-pan.y) / Math.max(1, content.h - box.h)) * (box.h - barH) : 0;
+
+  const bgStyle: React.CSSProperties =
+    bg === "light" ? { background: "#4a4a55" }
+      : bg === "checker" ? { background: "conic-gradient(#8a8a94 25%, #5c5c66 0 50%, #8a8a94 0 75%, #5c5c66 0) 0 0/16px 16px" }
+        : bg.startsWith("#") ? { background: bg }
+          : { background: "var(--bg)" };
+
+  /** 보이는 페이지만 새로 그린다 — 화면 밖 페이지는 들어올 때 그린다 (페이지가 여럿이면 매 걸음 전부 굽기엔 무겁다) */
+  const visible = (i: number) => {
+    if (!comic) return true;
+    const top = pan.y + topOf(i);
+    return top + fitted.h > -200 && top < box.h + 200;
+  };
+  const cur = comic ? curPage(doc) : null;
+
+  return (
+    <div
+      ref={hostRef}
+      data-editor-stage
+      data-editor-pages={comic ? n : undefined}
+      onPointerDown={downOutside}
+      onPointerMove={(e) => void movePan(e)}
+      onPointerUp={() => { panDrag.current = null; }}
+      onPointerCancel={() => { panDrag.current = null; }}
+      style={{ flex: 1, minHeight: 0, position: "relative", overflow: "hidden", border: "1px solid var(--line)", borderRadius: "var(--r-3)", cursor: tool === "pan" && movable ? "move" : undefined, ...bgStyle }}
+    >
+      <div
+        style={{
+          position: "absolute",
+          left: 0,
+          top: 0,
+          width: content.w,
+          height: content.h,
+          transform: `translate(${pan.x}px, ${pan.y}px)`,
+          pointerEvents: "none",
+        }}
+      >
+        {pages.map((pid, i) => {
+          const view = pid ? pageView(doc, pid) : doc;
+          return (
+            <div key={pid ?? "one"} style={{ position: "absolute", left: 0, top: topOf(i), width: fitted.w, height: fitted.h, pointerEvents: "auto" }}>
+              {pid && (
+                <span
+                  data-editor-page-label={i + 1}
+                  data-on={pid === cur ? "" : undefined}
+                  style={{ position: "absolute", left: 0, top: -LB + 3, fontSize: "var(--text-3xs)", fontVariantNumeric: "tabular-nums", whiteSpace: "nowrap",
+                           color: pid === cur ? "#fff" : "rgba(255,255,255,.5)", fontWeight: pid === cur ? "var(--w-semi)" : "var(--w-normal)" }}
+                >
+                  {pageLabel(i)}
+                </span>
+              )}
+              <PageView
+                doc={view}
+                pid={pid}
+                fitted={fitted}
+                scale={scale}
+                visible={visible(i)}
+                movable={movable}
+                onPanStart={startPan}
+                outsideRef={i === 0 ? outsideRef : undefined}
+              />
+            </div>
+          );
+        })}
+        {comic && busyPage && (
+          <div
+            data-editor-page-busy
+            style={{ position: "absolute", left: 0, top: topOf(n) - LB, width: fitted.w, height: ADD_H, display: "flex", alignItems: "center", justifyContent: "center", gap: 8,
+                     borderRadius: "var(--r-2)", background: "rgba(244,244,247,.9)", color: "#7a7a86", fontSize: "var(--text-2xs)", pointerEvents: "auto" }}
+          >
+            <span className="busy-spin" style={{ width: 10, height: 10, borderRadius: "50%", border: "2px solid rgba(58,123,184,.25)", borderTopColor: "#3a7bb8" }} />
+            {t("editor.contiMaking")}
+          </div>
+        )}
+        {comic && !busyPage && (
+          <button
+            data-editor-page-add
+            onPointerDown={(e) => e.stopPropagation()}
+            onClick={() => {
+              const s = useEditor.getState();
+              const pid = s.addPage(comic.pages[comic.pages.length - 1]);
+              if (pid) s.revealPage(pid);
+            }}
+            style={{
+              position: "absolute", left: 0, top: topOf(n) - LB, width: fitted.w, height: ADD_H, pointerEvents: "auto",
+              display: "flex", alignItems: "center", justifyContent: "center", gap: 6,
+              border: "1.5px dashed rgba(255,255,255,.28)", borderRadius: "var(--r-2)", color: "rgba(255,255,255,.62)", fontSize: "var(--text-3xs)", background: "transparent",
+            }}
+          >
+            {Icon.plus}{t("editor.pageAdd")}
+          </button>
+        )}
+      </div>
+      {comic && seen < 1 && (
+        <span
+          data-editor-vbar
+          onPointerDown={(e) => {
+            e.stopPropagation();
+            e.preventDefault();
+            barDrag.current = { y: e.clientY, p0: pan.y };
+            (e.currentTarget as Element).setPointerCapture(e.pointerId);
+          }}
+          onPointerMove={(e) => {
+            const d = barDrag.current;
+            if (!d) return;
+            const dy = ((e.clientY - d.y) / Math.max(1, box.h - barH)) * (content.h - box.h);
+            setPan((p) => clampPan({ x: p.x, y: d.p0 - dy }, box, content));
+          }}
+          onPointerUp={() => { barDrag.current = null; }}
+          style={{ position: "absolute", right: 3, top: barTop, width: 6, height: barH, borderRadius: 3, background: "rgba(255,255,255,.26)", cursor: "default" }}
+        />
+      )}
+    </div>
+  );
+}
+
+/** 페이지 한 장 — 합성 캔버스 · 조작 SVG(손잡이·자르기 상자·붓 커서·만화 표시) · 글 상자(글자를 고치는 동안).
+ *  `doc` 은 **그 페이지만 담은 문서**(`pageView`)다 — 누르기 판정·손잡이·컷 번호가 저절로 그 페이지 것만 본다.
+ *  ★만화 캔버스에서 이 페이지를 누르면 먼저 지금 페이지가 이 페이지로 바뀐다 (새 글자·말풍선·효과음·컷이 여기에 든다). */
+function PageView({ doc, pid, fitted, scale, visible, movable, onPanStart, outsideRef }: {
+  doc: Doc;
+  pid: string | null;
+  fitted: Size;
+  scale: number;
+  visible: boolean;
+  movable: boolean;
+  onPanStart: (e: React.PointerEvent) => void;
+  outsideRef?: React.MutableRefObject<((e: React.PointerEvent) => void) | null>;
+}) {
+  const t = useI18n((s) => s.t);
+  const tool = useEditor((s) => s.tool);
+  const ratioLock = useEditor((s) => s.ratioLock);
+  const crop = useEditor((s) => s.crop);
+  const textEdit = useEditor((s) => s.textEdit);
+  const brushes = useUi((s) => s.editorBrush);
+  const brush = tool === "eraser" ? brushes.eraser : brushes.brush;
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const overlayRef = useRef<SVGSVGElement | null>(null);
+  /** 끌어 고르기 상자 (문서 좌표, 캔버스 밖도 된다) */
+  const [marquee, setMarquee] = useState<Rect | null>(null);
+  /** 컷 도구 — 자르기선(끄는 중) · 새 컷 상자(빈 자리에서 끄는 중) */
+  const [cutLine, setCutLine] = useState<{ ids: string[]; a: { x: number; y: number }; b: { x: number; y: number } } | null>(null);
+  const [newRect, setNewRect] = useState<Rect | null>(null);
+  const [cursor, setCursor] = useState<{ x: number; y: number } | null>(null);
+  /** 선택 도구에서 커서 아래에 있는 것의 커서 모양 — 손잡이면 크기·회전 커서, 레이어면 move, 없으면 null (사용자 지시 2026-09-22) */
+  const [hoverCur, setHoverCur] = useState<string | null>(null);
+  /** 긋는 중 */
+  const strokeRef = useRef<{ st: Stroke; last: { x: number; y: number } | null; layer: Layer } | null>(null);
+  /** 손잡이를 끄는 중 */
+  const dragRef = useRef<{
+    kind: "move" | "scale" | "rotate" | "crop" | "marquee" | "vertex" | "cut" | "body" | "tip" | "bend" | "cast";
+    start: { x: number; y: number };
+    layer?: Layer;
+    /** 함께 옮기는 것들 (끌기 시작 때의 자리) */
+    layers?: Layer[];
+    /** 끌어 고르기가 얹히는 바탕 — Ctrl 로 시작했으면 그때 골라 둔 것 */
+    base?: string[];
+    handle?: { sx: -1 | 0 | 1; sy: -1 | 0 | 1 };
+    rot0?: number;
+    ang0?: number;
+    /** 이력에 「끌기 전」을 적었나 — 처음 움직일 때 한 번 (클릭만 하고 놓으면 걸음이 안 생긴다) */
+    marked?: boolean;
+    /** 컷 꼭짓점 끌기 — 몇 번째 꼭짓점 · 끌기 전 다각형 */
+    vi?: number;
+    poly0?: Pt[];
+    /** 말풍선 꼬리 — 몇 번째 꼬리 */
+    ti?: number;
+    /** 인물 점 — 그 칸의 key */
+    key?: string;
+    /** 말풍선을 눌렀다 놓기만 하면 글 고치기 (말풍선 도구) */
+    tapEdit?: boolean;
+  } | null>(null);
+  const rafRef = useRef(0);
+  /** 선택 도구의 더블클릭 셈 — 바로 앞의 누르기 (pointerdown 의 기본 동작을 막으면 호환 dblclick 이 안 와서 직접 센다) */
+  const dblRef = useRef<{ t: number; x: number; y: number } | null>(null);
 
   /* ── 그리기 ── */
   const paint = useCallback(() => {
     const cv = canvasRef.current;
     if (!cv) return;
     const s = useEditor.getState();
-    const d = s.doc();
-    if (!d) return;
+    const full = s.doc();
+    if (!full) return;
+    const d = pid ? pageView(full, pid) : full;
     const dpr = Math.min(2, window.devicePixelRatio || 1);
     const kk = (cv.clientWidth / d.w) * dpr || 1;
     const st = strokeRef.current?.st ?? null;
@@ -125,11 +366,22 @@ export function Stage({ doc }: { doc: Doc }) {
     const skip = te && d.layers.find((l) => l.id === te.id)?.text ? te.id : null;
     // ★효과는 워커가 셈하는 동안 앞의 결과로 그리고(`live`), 다 되면 다시 그린다 (`onFxReady`)
     composite(d, cv, kk, { sel: primaryOf(d), stroke: st, skip, live: true });
-  }, []);
+  }, [pid]);
+  // ★페이지의 레이어가 **바뀌었을 때만** 다시 굽는다 — 다른 페이지를 고치는 동안 이 페이지는 그대로 둔다 (레이어는 불변이라 얕게 견준다)
+  const lastRef = useRef<{ layers: Layer[]; w: number; h: number; te: unknown; vis: boolean } | null>(null);
   useEffect(() => {
+    if (!visible) {
+      if (lastRef.current) lastRef.current.vis = false;
+      return;
+    }
+    const prev = lastRef.current;
+    const same = prev && prev.vis && prev.w === fitted.w && prev.h === fitted.h && prev.te === textEdit
+      && prev.layers.length === doc.layers.length && prev.layers.every((l, i) => l === doc.layers[i]);
+    if (same && !strokeRef.current) return;
+    lastRef.current = { layers: doc.layers, w: fitted.w, h: fitted.h, te: textEdit, vis: true };
     paint();
-  }, [doc, rev, fitted.w, fitted.h, textEdit, paint]);
-  useEffect(() => onFxReady(paint), [paint]);
+  }, [doc.layers, fitted.w, fitted.h, textEdit, paint, visible]);
+  useEffect(() => onFxReady(() => visible && paint()), [paint, visible]);
 
   /* ── 좌표 ── */
   const toDoc = (e: { clientX: number; clientY: number }) => {
@@ -138,7 +390,6 @@ export function Stage({ doc }: { doc: Doc }) {
     const r = el.getBoundingClientRect();
     return { x: ((e.clientX - r.left) / r.width) * doc.w, y: ((e.clientY - r.top) / r.height) * doc.h };
   };
-  const scale = fitted.w / doc.w || 1;
   /** 으뜸(마지막에 고른 것) — 글자 도구가 본다. 손잡이는 **하나만 골랐을 때**(`single`)만 */
   const sel = doc.layers.find((l) => l.id === primaryOf(doc)) ?? null;
   const single = doc.sel.length === 1 ? sel : null;
@@ -178,7 +429,7 @@ export function Stage({ doc }: { doc: Doc }) {
     }
     return null;
   };
-  /** 누른 자리가 그 레이어인가 — 만화 페이지는 셋이 다르다:
+  /** 누른 자리가 그 레이어인가 — 만화 캔버스는 셋이 다르다:
    *  컷은 **테두리 근처**만 (안쪽을 누르면 그 컷에 든 그림이 골라져야 한다) · 컷에 든 그림은 **컷 안**만 · 말풍선은 몸통과 꼬리 끝 */
   const hitAt = (l: Layer, p: { x: number; y: number }) => {
     if (l.panel) {
@@ -202,22 +453,13 @@ export function Stage({ doc }: { doc: Doc }) {
     }
     return null;
   };
-  /** 누른 자리의 인물 점 — 그 컷과 몇 번째 인물인가. 넘겨받은 컷은 그 인물(`hchar`)·내레이션 자리(`hnote`) */
+  /** 누른 자리의 인물 점 — 그 컷과 그 칸 (점 크기는 화면에서 늘 같다) */
   const castAt = (p: { x: number; y: number }) => {
-    const near = (b: Rect, c: { x: number; y: number }) => Math.hypot(b.x + c.x * b.w - p.x, b.y + c.y * b.h - p.y) <= 12 / scale;
     for (const l of doc.layers) {
-      if (!l.panel?.gen || !l.on) continue;
+      if (!l.panel || !l.on) continue;
       const b = bboxOf(panelPts(l, l.panel.pts));
-      const h = l.panel.gen.handed;
-      if (h) {
-        const ci = h.chars.findIndex((c) => near(b, c));
-        if (ci >= 0) return { panel: l, i: ci, kind: "hchar" as const };
-        const ni = doc.comic?.addon?.bubbles !== "editor" ? h.notes.findIndex((c) => near(b, c)) : -1;
-        if (ni >= 0) return { panel: l, i: ni, kind: "hnote" as const };
-        continue;
-      }
-      const i = l.panel.gen.cast.findIndex((c) => near(b, c));
-      if (i >= 0) return { panel: l, i, kind: "cast" as const };
+      const hit = genOf(l.panel).cast.find((c) => Math.hypot(b.x + c.x * b.w - p.x, b.y + c.y * b.h - p.y) <= 12 / scale);
+      if (hit) return { panel: l, key: hit.key };
     }
     return null;
   };
@@ -288,23 +530,26 @@ export function Stage({ doc }: { doc: Doc }) {
     const s = useEditor.getState();
     const p = toDoc(e);
     if (!p) return;
-    // ★가운데 단추·이동 도구는 끌기 — 넘칠 때만 끌 것이 있다
+    // ★가운데 단추·이동 도구는 끌어 보기 — 넘칠 때만 끌 것이 있다 (무대가 받는다)
     if ((e.button === 1 || (tool === "pan" && e.button === 0)) && movable) {
-      e.preventDefault();
-      dragRef.current = { kind: "pan", start: { x: e.clientX, y: e.clientY }, pan0: pan };
-      (e.currentTarget as Element).setPointerCapture(e.pointerId);
+      e.stopPropagation();
+      onPanStart(e);
       return;
     }
     if (e.button !== 0) return;
     e.preventDefault();
+    e.stopPropagation();
     (document.activeElement as HTMLElement | null)?.blur?.();
     if (tool === "pan") return;
+    // ★만화 캔버스 — 누른 페이지가 지금 페이지가 된다 (새 레이어가 여기 든다)
+    if (pid) s.setPage(pid);
 
-    // ── 인물 점 (선택·컷 도구) — 끌어서 그 컷 안의 자리를 정한다 (만화 제작기의 인물 점과 같은 조작, 설계 8번)
+    // ── 인물 점 (선택·컷 도구) — 끌어서 그 컷 안의 자리를 정한다 (설계 8-3)
     if ((tool === "select" || tool === "panel") && comic) {
       const hit = castAt(p);
       if (hit) {
-        dragRef.current = { kind: "cast", start: p, layer: hit.panel, ti: hit.i, castKind: hit.kind };
+        s.setCut(hit.panel.id);
+        dragRef.current = { kind: "cast", start: p, layer: hit.panel, key: hit.key };
         (e.currentTarget as Element).setPointerCapture(e.pointerId);
         return;
       }
@@ -380,7 +625,8 @@ export function Stage({ doc }: { doc: Doc }) {
     }
 
     if (tool === "brush" || tool === "eraser" || tool === "bucket") {
-      let l = s.layer();
+      // ★고른 레이어가 **이 페이지의 것**이어야 한다 — 다른 페이지의 레이어에 이 페이지 좌표로 그리지 않는다
+      let l = sel;
       if (!l) return toast(t("editor.noLayer"), "warn");
       // ★컷을 고른 채 그리면 그 컷의 「그리기」 레이어에 그린다 — 그 컷 그림 위, 컷 모양으로 잘린다 (사용자 결정 2026-09-28).
       //   처음 그을 때 생기고 골라진다. 지우개는 있는 것에서만 지운다 (컷 그림을 지우려면 그림 레이어를 고른다)
@@ -438,6 +684,12 @@ export function Stage({ doc }: { doc: Doc }) {
       setTimeout(() => document.querySelector<HTMLInputElement>("[data-editor-sfx-text]")?.focus({ preventScroll: true }), 0);
       return;
     }
+    // ★만화 캔버스 — 컷 안의 빈 자리(용지처럼 컷보다 아래 것)를 누르면 그 컷을 편다 (설계 8-1: 무대에서 컷을 눌러도 컷 번호를 누른 것과 같다).
+    //   컷에 든 그림을 누른 것이면 아래의 selectLayer 가 그 컷을 편다
+    if (comic && !multi) {
+      const cut = panelAt(p);
+      if (cut && (!hit || doc.layers.indexOf(hit) < doc.layers.indexOf(cut))) s.setCut(cut.id);
+    }
     // 말풍선을 더블클릭하면 그 자리에서 글을 고친다 (글자 레이어와 같은 조작, 설계 6번)
     if (dbl && hit?.bubble) {
       dblRef.current = null;
@@ -461,20 +713,16 @@ export function Stage({ doc }: { doc: Doc }) {
     dragRef.current = { kind: "marquee", start: p, base: multi ? doc.sel : [] };
     (e.currentTarget as Element).setPointerCapture(e.pointerId);
   };
-  /** 캔버스 **밖**(무대의 빈 바탕)을 눌러도 선택을 푼다 — 안의 빈 자리를 눌렀을 때와 같다 (사용자 지시 2026-09-22).
-   *  ★캔버스 위의 누르기도 여기까지 올라오므로 **바탕 자체**를 누른 것만 받는다.
-   *  ★끌어 고르기는 **캔버스 밖에서 시작해도 된다** — 배경 레이어가 캔버스를 다 덮으므로 안에는 빈 자리가 없다. 뒤의 움직임·놓기는
-   *    조작 SVG 의 `move`·`up` 이 받도록 포인터를 거기에 잡아 둔다 */
-  const downOutside = (e: React.PointerEvent) => {
-    if (e.target !== e.currentTarget || e.button !== 0 || tool !== "select") return;
-    e.preventDefault();
-    const multi = e.ctrlKey || e.metaKey;
-    if (!multi && doc.sel.length) useEditor.getState().selectLayer(null);
-    const p = toDoc(e);
-    if (!p) return;
-    dragRef.current = { kind: "marquee", start: p, base: multi ? doc.sel : [] };
-    overlayRef.current?.setPointerCapture(e.pointerId);
-  };
+  // ★캔버스 밖에서 시작하는 끌어 고르기 (보통 캔버스) — 무대가 부른다. 뒤의 움직임·놓기는 이 SVG 가 받는다
+  if (outsideRef) {
+    outsideRef.current = (e: React.PointerEvent) => {
+      const p = toDoc(e);
+      if (!p) return;
+      const multi = e.ctrlKey || e.metaKey;
+      dragRef.current = { kind: "marquee", start: p, base: multi ? doc.sel : [] };
+      overlayRef.current?.setPointerCapture(e.pointerId);
+    };
+  }
 
   const strokeAt = (p: { x: number; y: number }) => {
     const sr = strokeRef.current;
@@ -496,10 +744,6 @@ export function Stage({ doc }: { doc: Doc }) {
     const d = dragRef.current;
     const s = useEditor.getState();
     if (d) {
-      if (d.kind === "pan" && d.pan0) {
-        setPan(clampPan({ x: d.pan0.x + (e.clientX - d.start.x), y: d.pan0.y + (e.clientY - d.start.y) }, box, fitted));
-        return;
-      }
       if (!p) return;
       if (d.kind === "crop") {
         s.setCrop(normRect({ x: d.start.x, y: d.start.y, w: p.x - d.start.x, h: p.y - d.start.y }, doc));
@@ -541,22 +785,13 @@ export function Stage({ doc }: { doc: Doc }) {
         s.dragLayers(d.layers ?? [], p.x - d.start.x, p.y - d.start.y);
         return;
       }
-      if (d.kind === "cast" && d.ti !== undefined && l.panel) {
+      if (d.kind === "cast" && d.key && l.panel) {
         // 컷 상자 안 비율로 — 생성 그림이 곧 컷 비율이라 그대로 NAI 좌표가 된다
         const b = bboxOf(panelPts(l, l.panel.pts));
         const x = Math.min(0.95, Math.max(0.05, (p.x - b.x) / Math.max(1, b.w)));
         const y = Math.min(0.95, Math.max(0.05, (p.y - b.y) / Math.max(1, b.h)));
-        const cur = useEditor.getState().doc()?.layers.find((q) => q.id === l.id)?.panel?.gen ?? l.panel.gen;
-        if (d.castKind === "hchar" && cur?.handed) {
-          s.setHanded(l.id, { chars: cur.handed.chars.map((c, i) => (i === d.ti ? { ...c, x, y } : c)) }, true);
-          return;
-        }
-        if (d.castKind === "hnote" && cur?.handed) {
-          s.setHanded(l.id, { notes: cur.handed.notes.map((c, i) => (i === d.ti ? { ...c, x, y } : c)) }, true);
-          return;
-        }
-        const cast = (cur?.cast ?? []).map((c, i) => (i === d.ti ? { ...c, x, y } : c));
-        s.setPanelGen(l.id, { cast }, true);
+        const cur = genOf(useEditor.getState().doc()?.layers.find((q) => q.id === l.id)?.panel ?? l.panel);
+        s.setPanelGen(l.id, { cast: cur.cast.map((c) => (c.key === d.key ? { ...c, x, y } : c)) }, true);
         return;
       }
       if (d.kind === "vertex" && d.poly0 && d.vi !== undefined && l.panel && comic) {
@@ -629,7 +864,9 @@ export function Stage({ doc }: { doc: Doc }) {
       return;
     }
     if (strokeRef.current && p) return strokeAt(p);
-    if ((tool === "select" || tool === "bubble" || tool === "sfx") && p) {
+    if ((tool === "select" || tool === "bubble" || tool === "sfx" || tool === "panel") && p) {
+      if (comic && (tool === "select" || tool === "panel") && castAt(p)) return setHoverCur("grab");
+      if (tool === "panel") return setHoverCur(null);
       const bh = single?.bubble && tool !== "sfx" ? hitBubbleHandle(single, p) : null;
       if (bh) return setHoverCur(bh.box ? resizeCursor(0, bh.box) : "move");
       if (tool === "bubble") return setHoverCur(topLayerAt(p, (l) => !!l.bubble) ? "move" : null);
@@ -678,44 +915,10 @@ export function Stage({ doc }: { doc: Doc }) {
     useEditor.getState().endStroke(sr.st);
   };
 
-  /* ── 휠: Ctrl 확대·축소 · Alt 붓 크기 (지금 도구의 것) ── */
-  useEffect(() => {
-    const el = hostRef.current;
-    if (!el) return;
-    const onWheel = (e: WheelEvent) => {
-      if (e.ctrlKey || e.metaKey) {
-        e.preventDefault();
-        const s = useEditor.getState();
-        const d = s.doc();
-        if (!d) return;
-        const from = zoomFrom(box, d, d.view.fit, d.view.zoom);
-        const fromK = d.view.fit ? Math.min(from, 1) : from;
-        const next = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, stepZoom(fromK, e.deltaY > 0 ? -1 : 1)));
-        setPan((p) => keepCenter(p, box, drawSize(d, fromK), drawSize(d, next)));
-        s.setView({ fit: false, zoom: next });
-        return;
-      }
-      if (e.altKey) {
-        e.preventDefault();
-        const which = useEditor.getState().tool === "eraser" ? "eraser" : "brush";
-        const ui = useUi.getState();
-        const step = (e.shiftKey ? 10 : 1) * (e.deltaY < 0 ? 1 : -1);
-        ui.setEditorBrush(which, { size: Math.max(1, Math.min(400, ui.editorBrush[which].size + step)) });
-      }
-    };
-    el.addEventListener("wheel", onWheel, { passive: false });
-    return () => el.removeEventListener("wheel", onWheel);
-  }, [box]);
-
-  const bgStyle: React.CSSProperties =
-    bg === "light" ? { background: "#4a4a55" }
-      : bg === "checker" ? { background: "conic-gradient(#8a8a94 25%, #5c5c66 0 50%, #8a8a94 0 75%, #5c5c66 0) 0 0/16px 16px" }
-        : bg.startsWith("#") ? { background: bg }
-          : { background: "var(--bg)" };
-
   const cursorStyle =
     tool === "pan" ? (movable ? "move" : "default")
-      : tool === "crop" || tool === "bucket" || tool === "panel" ? "crosshair"
+      : tool === "crop" || tool === "bucket" ? "crosshair"
+        : tool === "panel" ? hoverCur ?? "crosshair"
         : tool === "bubble" || tool === "sfx" ? hoverCur ?? "copy"
         : tool === "text" ? "text"
           : tool === "brush" || tool === "eraser" ? "none"
@@ -726,98 +929,87 @@ export function Stage({ doc }: { doc: Doc }) {
 
   return (
     <div
-      ref={hostRef}
-      data-editor-stage
-      onPointerDown={downOutside}
-      style={{ flex: 1, minHeight: 0, position: "relative", overflow: "hidden", border: "1px solid var(--line)", borderRadius: "var(--r-3)", ...bgStyle }}
+      style={{
+        position: "absolute",
+        inset: 0,
+        lineHeight: 0,
+        userSelect: "none",
+        boxShadow: "0 0 0 1px rgba(255,255,255,.06), 0 10px 40px rgba(0,0,0,.55)",
+        // 캔버스의 투명한 자리 — 체커. 바깥 배경과 갈라 보이게 (사용자 지시 2026-09-22)
+        background: "conic-gradient(#2a2a32 25%, #222229 0 50%, #2a2a32 0 75%, #222229 0) 0 0/16px 16px",
+      }}
     >
-      <div
-        ref={wrapRef}
-        style={{
-          position: "absolute",
-          left: 0,
-          top: 0,
-          width: fitted.w,
-          height: fitted.h,
-          transform: `translate(${pan.x}px, ${pan.y}px)`,
-          lineHeight: 0,
-          userSelect: "none",
-          boxShadow: "0 0 0 1px rgba(255,255,255,.06), 0 10px 40px rgba(0,0,0,.55)",
-          // 캔버스의 투명한 자리 — 체커. 바깥 배경과 갈라 보이게 (사용자 지시 2026-09-22)
-          background: "conic-gradient(#2a2a32 25%, #222229 0 50%, #2a2a32 0 75%, #222229 0) 0 0/16px 16px",
-        }}
+      <canvas ref={canvasRef} data-editor-canvas data-page={pid ?? undefined} style={{ width: "100%", height: "100%", display: "block" }} />
+      <svg
+        ref={overlayRef}
+        data-editor-overlay
+        data-page={pid ?? undefined}
+        viewBox={`0 0 ${doc.w} ${doc.h}`}
+        style={{ position: "absolute", inset: 0, width: "100%", height: "100%", cursor: cursorStyle, touchAction: "none", overflow: "visible" }}
+        onPointerDown={down}
+        onPointerMove={move}
+        onPointerUp={up}
+        onPointerCancel={up}
+        onPointerLeave={() => setCursor(null)}
+        onContextMenu={(e) => e.preventDefault()}
       >
-        <canvas ref={canvasRef} data-editor-canvas style={{ width: "100%", height: "100%", display: "block" }} />
-        <svg
-          ref={overlayRef}
-          data-editor-overlay
-          viewBox={`0 0 ${doc.w} ${doc.h}`}
-          style={{ position: "absolute", inset: 0, width: "100%", height: "100%", cursor: cursorStyle, touchAction: "none", overflow: "visible" }}
-          onPointerDown={down}
-          onPointerMove={move}
-          onPointerUp={up}
-          onPointerCancel={up}
-          onPointerLeave={() => setCursor(null)}
-          onContextMenu={(e) => e.preventDefault()}
-        >
-          {/* 여럿을 골랐을 때 — 각 상자의 테두리만 (손잡이는 하나일 때만) */}
-          {tool === "select" && doc.sel.length > 1 && !crop && (
-            <g data-editor-multi>
-              {doc.layers.filter((l) => doc.sel.includes(l.id)).map((l) => (
-                <polygon key={l.id} points={cornersOf(l).map((c) => `${c.x},${c.y}`).join(" ")} fill="none" stroke="var(--accent-ink)" strokeWidth={line} />
+        {/* 여럿을 골랐을 때 — 각 상자의 테두리만 (손잡이는 하나일 때만) */}
+        {tool === "select" && doc.sel.length > 1 && !crop && (
+          <g data-editor-multi>
+            {doc.layers.filter((l) => doc.sel.includes(l.id)).map((l) => (
+              <polygon key={l.id} points={cornersOf(l).map((c) => `${c.x},${c.y}`).join(" ")} fill="none" stroke="var(--accent-ink)" strokeWidth={line} />
+            ))}
+          </g>
+        )}
+        {/* 끌어 고르기 상자 */}
+        {marquee && (marquee.w > 0 || marquee.h > 0) && (
+          <rect data-editor-marquee x={marquee.x} y={marquee.y} width={marquee.w} height={marquee.h} fill="rgba(255,255,255,.06)" stroke="var(--accent-ink)" strokeWidth={line} strokeDasharray={`${4 / scale} ${3 / scale}`} />
+        )}
+        {/* 고른 레이어의 상자와 손잡이 — 선택 도구에서 하나만 골랐을 때 */}
+        {(tool === "select" || (tool === "sfx" && !!xformable?.sfx)) && xformable && !crop && (() => {
+          const cs = cornersOf(xformable);
+          const h = handlesOf(xformable);
+          return (
+            <g data-editor-handles>
+              <polygon points={cs.map((c) => `${c.x},${c.y}`).join(" ")} fill="none" stroke="var(--accent-ink)" strokeWidth={line} />
+              <line x1={h.top.x} y1={h.top.y} x2={h.rot.x} y2={h.rot.y} stroke="var(--accent-ink)" strokeWidth={line} />
+              <circle cx={h.rot.x} cy={h.rot.y} r={hs * 0.7} fill="var(--bg)" stroke="var(--accent-ink)" strokeWidth={line} />
+              {h.list.map((x) => (
+                <rect key={`${x.sx},${x.sy}`} x={x.p.x - hs / 2} y={x.p.y - hs / 2} width={hs} height={hs} rx={1.5 / scale} fill="var(--bg)" stroke="var(--accent-ink)" strokeWidth={line} />
               ))}
             </g>
-          )}
-          {/* 끌어 고르기 상자 */}
-          {marquee && (marquee.w > 0 || marquee.h > 0) && (
-            <rect data-editor-marquee x={marquee.x} y={marquee.y} width={marquee.w} height={marquee.h} fill="rgba(255,255,255,.06)" stroke="var(--accent-ink)" strokeWidth={line} strokeDasharray={`${4 / scale} ${3 / scale}`} />
-          )}
-          {/* 고른 레이어의 상자와 손잡이 — 선택 도구에서 하나만 골랐을 때 */}
-          {(tool === "select" || (tool === "sfx" && !!xformable?.sfx)) && xformable && !crop && (() => {
-            const cs = cornersOf(xformable);
-            const h = handlesOf(xformable);
-            return (
-              <g data-editor-handles>
-                <polygon points={cs.map((c) => `${c.x},${c.y}`).join(" ")} fill="none" stroke="var(--accent-ink)" strokeWidth={line} />
-                <line x1={h.top.x} y1={h.top.y} x2={h.rot.x} y2={h.rot.y} stroke="var(--accent-ink)" strokeWidth={line} />
-                <circle cx={h.rot.x} cy={h.rot.y} r={hs * 0.7} fill="var(--bg)" stroke="var(--accent-ink)" strokeWidth={line} />
-                {h.list.map((x) => (
-                  <rect key={`${x.sx},${x.sy}`} x={x.p.x - hs / 2} y={x.p.y - hs / 2} width={hs} height={hs} rx={1.5 / scale} fill="var(--bg)" stroke="var(--accent-ink)" strokeWidth={line} />
-                ))}
-              </g>
-            );
-          })()}
-          {/* ── 만화 페이지 (화면에만 있다, 저장 그림에는 안 들어간다) ── */}
-          {comic && <ComicOverlay doc={doc} scale={scale} tool={tool} single={single} cutLine={cutLine} newRect={newRect} bubbleHandles={bubbleHandles} editingId={editingBubble?.id ?? null} />}
-          {/* 자르기 상자 — 바깥은 어둡게 */}
-          {crop && crop.w > 0 && crop.h > 0 && (
-            <g data-editor-crop>
-              <path
-                d={`M0 0H${doc.w}V${doc.h}H0Z M${crop.x} ${crop.y}H${crop.x + crop.w}V${crop.y + crop.h}H${crop.x}Z`}
-                fill="rgba(0,0,0,.55)"
-                fillRule="evenodd"
-              />
-              <rect x={crop.x} y={crop.y} width={crop.w} height={crop.h} fill="none" stroke="#fff" strokeWidth={line} strokeDasharray={`${6 / scale} ${4 / scale}`} />
-            </g>
-          )}
-          {/* 붓 커서 */}
-          {(tool === "brush" || tool === "eraser") && cursor && (
-            <circle
-              data-editor-brush
-              cx={cursor.x}
-              cy={cursor.y}
-              r={brush.size / 2}
-              fill={tool === "eraser" ? "rgba(255,255,255,.12)" : "rgba(255,255,255,.08)"}
-              stroke={tool === "eraser" ? "rgba(255,255,255,.85)" : brushes.brush.color}
-              strokeWidth={line}
-              style={{ pointerEvents: "none" }}
+          );
+        })()}
+        {/* ── 만화 캔버스 (화면에만 있다, 저장 그림에는 안 들어간다) ── */}
+        {comic && <ComicOverlay doc={doc} scale={scale} tool={tool} single={single} cutLine={cutLine} newRect={newRect} bubbleHandles={bubbleHandles} editingId={editingBubble?.id ?? null} />}
+        {/* 자르기 상자 — 바깥은 어둡게 */}
+        {crop && crop.w > 0 && crop.h > 0 && (
+          <g data-editor-crop>
+            <path
+              d={`M0 0H${doc.w}V${doc.h}H0Z M${crop.x} ${crop.y}H${crop.x + crop.w}V${crop.y + crop.h}H${crop.x}Z`}
+              fill="rgba(0,0,0,.55)"
+              fillRule="evenodd"
             />
-          )}
-        </svg>
-        {/* 글 상자 — 글자 레이어를 고치는 동안 그 자리에 뜬다 (그 레이어는 합성에서 뺀다) */}
-        {editing && textEdit && <TextEditBox key={editing.id} l={editing} scale={scale} value={textEdit.value} />}
-        {editingBubble && textEdit && <BubbleEditBox key={editingBubble.id} l={editingBubble} scale={scale} value={textEdit.value} />}
-      </div>
+            <rect x={crop.x} y={crop.y} width={crop.w} height={crop.h} fill="none" stroke="#fff" strokeWidth={line} strokeDasharray={`${6 / scale} ${4 / scale}`} />
+          </g>
+        )}
+        {/* 붓 커서 */}
+        {(tool === "brush" || tool === "eraser") && cursor && (
+          <circle
+            data-editor-brush
+            cx={cursor.x}
+            cy={cursor.y}
+            r={brush.size / 2}
+            fill={tool === "eraser" ? "rgba(255,255,255,.12)" : "rgba(255,255,255,.08)"}
+            stroke={tool === "eraser" ? "rgba(255,255,255,.85)" : brushes.brush.color}
+            strokeWidth={line}
+            style={{ pointerEvents: "none" }}
+          />
+        )}
+      </svg>
+      {/* 글 상자 — 글자 레이어를 고치는 동안 그 자리에 뜬다 (그 레이어는 합성에서 뺀다) */}
+      {editing && textEdit && <TextEditBox key={editing.id} l={editing} scale={scale} value={textEdit.value} />}
+      {editingBubble && textEdit && <BubbleEditBox key={editingBubble.id} l={editingBubble} scale={scale} value={textEdit.value} />}
     </div>
   );
 }
@@ -887,10 +1079,18 @@ function TextEditBox({ l, scale, value }: { l: Layer; scale: number; value: stri
   );
 }
 
-/** 만화 페이지의 화면 표시 — 안내선(기본 틀) · 컷 번호 · 고른 컷 · 자르기선 · 새 컷 상자 · 고른 말풍선의 손잡이.
- *  ★컷 번호는 만화 제작기 콘티와 같은 양식이다: 컷 왼쪽 위의 글자 번호, 고른 컷은 `#2f6fa8` (설계 10-2 「표시 양식」).
+/** 만화 캔버스의 화면 표시 (한 페이지) — 안내선(기본 틀) · 컷 번호 · 고른 컷 · 생성할 컷 · 인물 점 · 대기/생성 중 · 자르기선 · 새 컷 상자 · 고른 말풍선의 손잡이.
+ *  ★컷 번호는 만화 제작기 콘티와 같은 양식이다: 컷 왼쪽 위의 글자 번호, 고른 컷은 `#2f6fa8`.
  *    그림 위에 얹히므로 흰 테를 두른다. 크기는 화면에서 늘 같게 (`/ scale`) */
 const SEL = "#2f6fa8";
+/** Pretendard 숫자 높이 / 글자 크기 — 번호를 대문자 높이 기준으로 가운데에 앉힌다 (`CharPositioner` 의 `text-box: trim-both cap` 과 같은 자리) */
+const CAP = 0.7;
+let measure: CanvasRenderingContext2D | null = null;
+const labelW = (s: string, size: number) => {
+  measure ??= makeCanvas(1, 1).getContext("2d")!;
+  measure.font = `600 ${size}px Pretendard, sans-serif`;
+  return measure.measureText(s).width;
+};
 function ComicOverlay({
   doc, scale, tool, single, cutLine, newRect, bubbleHandles, editingId,
 }: {
@@ -909,6 +1109,8 @@ function ComicOverlay({
   const nums = panelNumbers(doc.layers, page.dir, doc.h);
   const panels = doc.layers.filter((l) => l.panel && l.on);
   const selPanel = single?.panel ? single : null;
+  // ★생성 버튼이 뽑을 컷 — 고른 것이 없어도 테두리로 남는다 (설계 8-1). 전체 문서에서 찾으므로 이 페이지 것일 때만 그린다
+  const target = useEditor((s) => { const d = s.doc(); return d ? curCut(d)?.id ?? null : null; });
   const f = page.frame;
   // 자르기선이 만들 두 컷 (미리보기)
   const halves = cutLine && Math.hypot(cutLine.b.x - cutLine.a.x, cutLine.b.y - cutLine.a.y) * scale >= 12
@@ -918,38 +1120,27 @@ function ComicOverlay({
     : null;
   const pts = (poly: Pt[]) => poly.map((q) => `${q[0]},${q[1]}`).join(" ");
   const bub = single?.bubble && (tool === "select" || tool === "bubble") && single.id !== editingId ? single : null;
-  // ── 컷 생성: 인물 점 · 대기 · 생성 중 (설계 8번 · 목업 ⑤)
-  const chars = usePrompt((p) => p.chars);
+  // ── 컷 생성: 인물 점 · 대기 · 생성 중 (설계 8번)
   const pending = useQueue((q) => q.pending);
   const steps = useQueue((q) => q.steps);
   useQueue((q) => q.progress);
   const ws = useWs((w) => w.current) ?? "";
   const group = comicGroupId(doc.id);
   const running = runningPendingId(group);
-  // ★인물 점의 번호는 **페이지 흐름 순서**다 — 컷을 읽는 차례대로, 컷 안에서는 고른 차례대로 이어 센다 (사용자 결정 2026-09-23).
-  //   넘겨받은 컷은 콘티의 흐름 번호를 그대로 쓰고, 직접 고른 인물은 그 뒤에서 이어 센다 (설계 10-2)
-  const ordered = [...panels].sort((a, b) => (nums.get(a.id) ?? 0) - (nums.get(b.id) ?? 0));
-  const nai = page.addon?.bubbles !== "editor";
-  let flow = 0;
-  type Mark = { key: string; n: number; x: number; y: number; color: string; name: string; square?: boolean; peek?: string; note?: boolean };
-  const dots: Mark[] = ordered.flatMap((l) => {
+  // ★인물 점의 번호는 **페이지 흐름 순서**다 — 컷을 읽는 차례대로, 컷 안에서는 캐릭터 프롬프트 차례대로 이어 센다 (사용자 결정 2026-09-23)
+  const flow = castNumbers(doc.layers, page.dir, doc.h);
+  const chars = page.common.chars;
+  type Mark = { key: string; n: number; x: number; y: number; color: string; name: string };
+  const dots: Mark[] = panels.flatMap((l) => {
     const b = bboxOf(panelPts(l, l.panel!.pts));
-    const at = (c: { x: number; y: number }) => ({ x: b.x + c.x * b.w, y: b.y + c.y * b.h });
-    const h = l.panel!.gen?.handed;
-    if (h) {
-      const out: Mark[] = [
-        ...h.chars.map((c, i) => ({ key: `${l.id}:h${i}`, n: c.no, ...at(c), color: c.color, name: c.name, peek: nai && c.lines.length ? c.lines.join(" / ") : undefined })),
-        ...(nai ? h.notes.map((c, i) => ({ key: `${l.id}:n${i}`, n: c.no, ...at(c), color: CAST_NEUTRAL, name: t("editor.narration"), square: true, peek: c.text || undefined, note: true })) : []),
-        ...(h.empty ? [{ key: `${l.id}:e`, n: h.empty, ...at({ x: 0.5, y: 0.5 }), color: CAST_NEUTRAL, name: t("editor.handedEmpty"), square: true }] : []),
-      ];
-      flow = Math.max(flow, ...out.map((m) => m.n));
-      return out;
-    }
-    return (l.panel!.gen?.cast ?? []).map((c) => {
-      const ci = chars.findIndex((x) => x.id === c.id);
-      return { key: `${l.id}:${c.id}`, n: ++flow, ...at(c), color: ci >= 0 ? CAST_COLORS[ci % CAST_COLORS.length] : CAST_NEUTRAL, name: ci >= 0 ? chars[ci].name || `#${ci + 1}` : "?" };
+    return genOf(l.panel).cast.map((c) => {
+      const ci = chars.findIndex((x) => x.id === c.who);
+      const neutral = c.who === WHO_NARRATION || c.who === WHO_BUBBLE;
+      const name = c.who === WHO_NARRATION ? t("editor.narration") : c.who === WHO_BUBBLE ? t("editor.speechBubble") : ci >= 0 ? chars[ci].name || t("cards.charN", { n: ci + 1 }) : "?";
+      return { key: `${l.id}:${c.key}`, n: flow.get(`${l.id}:${c.key}`) ?? 0, x: b.x + c.x * b.w, y: b.y + c.y * b.h, color: neutral || ci < 0 ? CAST_NEUTRAL : CAST_COLORS[ci % CAST_COLORS.length], name };
     });
   });
+  const tp = target ? panels.find((l) => l.id === target) : undefined;
   return (
     <g data-editor-comic style={{ pointerEvents: "none" }}>
       {/* 대기 · 생성 중 — 그 컷 안에 (씬 칸의 대기 칸과 같은 말). 그리는 중인 그림이 오면 컷 모양으로 잘라 보여 준다 */}
@@ -976,6 +1167,10 @@ function ComicOverlay({
       {page.guides && (
         <rect data-editor-guides x={f.x} y={f.y} width={f.w} height={f.h} fill="none" stroke="#35a8d8" strokeWidth={k} strokeDasharray={`${4 * k} ${3 * k}`} opacity={0.75} />
       )}
+      {/* 생성 버튼이 뽑을 컷 — 고른 컷이 아니어도 얇은 테두리로 남는다 */}
+      {tp && tp.id !== selPanel?.id && (
+        <polygon data-editor-panel-target points={pts(panelPts(tp, tp.panel!.pts))} fill="none" stroke={SEL} strokeWidth={1.5 * k} strokeDasharray={`${5 * k} ${3 * k}`} />
+      )}
       {/* 고른 컷 — 선택 도구에서는 테두리만, 컷 도구에서는 꼭짓점 손잡이까지 */}
       {selPanel?.panel && (tool === "select" || tool === "panel") && (() => {
         const poly = panelPts(selPanel, selPanel.panel.pts);
@@ -992,7 +1187,7 @@ function ComicOverlay({
       {panels.map((l) => {
         const poly = panelPts(l, l.panel!.pts);
         const tl = poly.reduce((a, q) => (q[0] + q[1] < a[0] + a[1] ? q : a));
-        const on = selPanel?.id === l.id;
+        const on = selPanel?.id === l.id || target === l.id;
         return (
           <text
             key={l.id}
@@ -1011,18 +1206,23 @@ function ComicOverlay({
           </text>
         );
       })}
-      {/* 인물 점 — 만화 제작기 콘티와 같은 양식 (인물 색 동그라미 + 번호 + 이름), 생김새는 편집기 목업이 기준 (설계 10-2) */}
-      {dots.map((c) => (
-        <g key={c.key} data-editor-cast-dot={c.n} data-square={c.square ? "" : undefined} transform={`translate(${c.x},${c.y})`}>
-          {c.square
-            ? <rect x={-11 * k} y={-11 * k} width={22 * k} height={22 * k} rx={5.5 * k} fill={c.color} stroke="#fff" strokeWidth={1.8 * k} />
-            : <circle r={11.5 * k} fill={c.color} stroke="#fff" strokeWidth={1.8 * k} />}
-          <text textAnchor="middle" y={4.2 * k} fontSize={11.5 * k} fontWeight={600} fill="#fff" style={{ fontFamily: "var(--font-sans)" }}>{c.n}</text>
-          <text textAnchor="middle" y={25 * k} fontSize={10.5 * k} fontWeight={600} fill={c.square ? "#526980" : "#263749"} stroke="#fff" strokeWidth={2.8 * k} paintOrder="stroke" style={{ fontFamily: "var(--font-sans)" }}>{c.name}</text>
-          {/* NAI 가 말풍선 담당일 때 — 무슨 대사를 넣었는지만 (자리는 NAI 가 정한다): 인물은 점 위에 점선 말풍선, 내레이션은 사각형 아래 (목업 ⑧) */}
-          {c.peek && <LinePeek text={c.peek} k={k} below={!!c.note} />}
-        </g>
-      ))}
+      {/* 인물 점 — 번호 원 시안 D (사용자 결정 2026-09-28): 어두운 반투명 바탕 · 인물 색 테 · 흰 번호, 원 뒤에 이름표가 반쯤 깔린다.
+          내레이션 · 말풍선은 무채색 테. 페이지 오른쪽 끝에 닿으면 이름표가 왼쪽으로 간다 (`CharPositioner` 의 `CharNo` 와 같은 생김새) */}
+      {dots.map((c) => {
+        const r = 10.5 * k;
+        const lw = labelW(c.name, 10.5) * k + 25 * k;
+        const left = c.x + lw > doc.w;
+        const lx = left ? -lw : 0;
+        return (
+          <g key={c.key} data-editor-cast-dot={c.n} transform={`translate(${c.x},${c.y})`} style={{ filter: "drop-shadow(0 1px 1.5px rgba(0,0,0,.28))" }}>
+            <rect x={lx} y={-8.5 * k} width={lw} height={17 * k} rx={5 * k} fill="rgba(30,30,36,.96)" stroke="#2e2e36" strokeWidth={k} />
+            <text x={left ? -lw + 8 * k : 17 * k} y={(10.5 * CAP * k) / 2} fontSize={10.5 * k} fontWeight={600} fill="#ececf1" style={{ fontFamily: "var(--font-sans)" }}>{c.name}</text>
+            <circle r={r} fill="rgba(14,14,18,.86)" />
+            <circle r={r - k} fill="none" stroke={c.color} strokeWidth={2 * k} />
+            <text textAnchor="middle" y={(11 * CAP * k) / 2} fontSize={11 * k} fontWeight={600} fill="#fff" style={{ fontFamily: "var(--font-sans)", fontVariantNumeric: "tabular-nums" }}>{c.n}</text>
+          </g>
+        );
+      })}
       {/* 자르기선 (끄는 중) + 놓으면 생길 두 컷 */}
       {cutLine && cutLine.ids.length > 0 && (
         <g data-editor-cutline>
@@ -1053,26 +1253,6 @@ function ComicOverlay({
           </g>
         );
       })()}
-    </g>
-  );
-}
-
-/** NAI 담당일 때의 대사 미리보기 — 점선 둥근 상자 (목업 `linePeek`). 인물은 점 위에 꼬리를 점 쪽으로, 내레이션은 사각형 아래 */
-function LinePeek({ text, k, below }: { text: string; k: number; below: boolean }) {
-  const s = text.length > 28 ? `${text.slice(0, 27)}…` : text;
-  const w = ([...s].length * 10 + 14) * k;
-  const h = 17 * k;
-  const top = below ? 31 * k : -17 * k - h - 5 * k;
-  return (
-    <g data-editor-line-peek>
-      <rect x={-w / 2} y={top} width={w} height={h} rx={8.5 * k} fill="#fff" stroke="#526980" strokeWidth={k} strokeDasharray={`${2.5 * k} ${2 * k}`} />
-      {!below && (
-        <>
-          <path d={`M${-4 * k} ${top + h - 0.5 * k}L0 ${top + h + 5 * k}L${4 * k} ${top + h - 0.5 * k}`} fill="#fff" stroke="#526980" strokeWidth={k} strokeDasharray={`${2.5 * k} ${2 * k}`} />
-          <path d={`M${-3.2 * k} ${top + h - k}L${3.2 * k} ${top + h - k}`} stroke="#fff" strokeWidth={1.6 * k} />
-        </>
-      )}
-      <text x={0} y={top + 12 * k} textAnchor="middle" fontSize={10 * k} fill="#263749" style={{ fontFamily: "var(--font-sans)" }}>{s}</text>
     </g>
   );
 }

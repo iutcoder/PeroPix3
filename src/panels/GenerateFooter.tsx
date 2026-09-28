@@ -42,7 +42,7 @@ export function GenerateFooter({ compact = false }: { compact?: boolean }) {
   const accounts = useAccounts((s) => s.items);
   const account = useCurrentAccount();
   const setAccount = useWs((s) => s.setAccount);
-  const { params, set, busy, error, generateAll } = useGen();
+  const { params, busy, error, generateAll } = useGen();
   const { progress, phase, cancelAll } = useQueue();
   /** 잔액을 다시 물어본 횟수 — 누를 때마다 아이콘을 **한 바퀴 더** 돌린다 (v2 `refreshAnlasBtn`).
    *  ★각도를 원위치시키지 않고 누적한다. 되돌리면 애니메이션이 거꾸로 돌아 흔들려 보인다. */
@@ -456,84 +456,7 @@ export function GenerateFooter({ compact = false }: { compact?: boolean }) {
       </div>
 
       {/* 시드 — 매번 만지는 값이라 생성 버튼 바로 위에 고정 */}
-      <div
-        style={{
-          display: "flex",
-          alignItems: "center",
-          gap: "var(--sp-2)",
-          paddingTop: "var(--sp-2)",
-          borderTop: "1px solid var(--line-soft, var(--line))",
-        }}
-      >
-        <span style={{ fontSize: "var(--text-2xs)", color: "var(--ink-faint)", flexShrink: 0 }}>
-          {t("options.seed")}
-        </span>
-        <input
-          data-seed
-          value={params.seed}
-          onChange={(e) => {
-            const v = parseInt(e.target.value, 10);
-            set("seed", Number.isFinite(v) ? v : 0);
-          }}
-          // ★★**랜덤이어도 고칠 수 있다** (사용자 지적 2026-08-16). 랜덤은 아무 숫자를
-          //   넣는 게 아니라 **여기 적힌 값으로 뽑고 나서** 이 칸을 굴리는 것이라,
-          //   잠그면 "이 시드로 한 장 더" 를 아예 못 한다 (`lib/seedRounds` 머리 주석).
-          style={{
-            flex: 1,
-            minWidth: 0,
-            background: "var(--panel)",
-            border: "1px solid var(--line)",
-            borderRadius: "var(--r-2)",
-            padding: "3px var(--sp-3)",
-            fontSize: "var(--text-2xs)",
-            fontFamily: "var(--font-mono)",
-          }}
-        />
-        {/* 주사위 — 지금 자리에서 바로 새 시드를 뽑아 본다 */}
-        <button
-          data-seed-roll
-          onClick={() => set("seed", randomSeed())}
-          data-tip={t("options.seedRoll")}
-          style={{ flexShrink: 0, color: "var(--ink-faint)", display: "grid", padding: "0 2px" }}
-        >
-          {Icon.dice}
-        </button>
-        {/* ★배타적 3택이다 — 체크박스 둘이면 「고정 + 씬마다 랜덤」 같은 뜻 없는 상태가
-            생긴다 (사용자 지적 2026-08-11). v2 의 `랜덤/고정/슬롯마다 랜덤` 이관. */}
-        <div
-          data-seed-mode={params.seed_mode}
-          style={{
-            display: "flex",
-            flexShrink: 0,
-            border: "1px solid var(--line)",
-            borderRadius: "var(--r-2)",
-            overflow: "hidden",
-          }}
-        >
-          {SEED_MODES.map((m, i) => {
-            const on = params.seed_mode === m;
-            return (
-              <button
-                key={m}
-                data-seed-pick={m}
-                onClick={() => set("seed_mode", m)}
-                data-tip={t(SEED_HINTS[i])}
-                style={{
-                  padding: "2px var(--sp-3)",
-                  fontSize: "var(--text-2xs)",
-                  whiteSpace: "nowrap",
-                  borderRight: i < 2 ? "1px solid var(--line)" : undefined,
-                  background: on ? "var(--accent-bg)" : "transparent",
-                  color: on ? "var(--accent-ink)" : "var(--ink-dim)",
-                  fontWeight: on ? "var(--w-semi)" : "var(--w-normal)",
-                }}
-              >
-                {t(SEED_LABELS[i])}
-              </button>
-            );
-          })}
-        </div>
-      </div>
+      <SeedRow />
 
       {genRow}
         {/* ★플러그인이 둔 단추 — 없으면 아무것도 안 그린다 (`lib/pluginHost`, 자리 이름 generate.footer) */}
@@ -713,3 +636,90 @@ const qbtn: React.CSSProperties = {
   color: "var(--ink-soft)",
   background: "var(--panel)",
 };
+
+/** 시드 줄 — 숫자칸 · 주사위 · 시드 모드 3택. 생성 푸터와 만화 캔버스의 컷 생성 푸터가 **같은 것**을 쓴다 (값은 `useGen.params` 하나) */
+export function SeedRow() {
+  const t = useI18n((s) => s.t);
+  const params = useGen((s) => s.params);
+  const set = useGen((s) => s.set);
+  return (
+    <div
+      style={{
+        display: "flex",
+        alignItems: "center",
+        gap: "var(--sp-2)",
+        paddingTop: "var(--sp-2)",
+        borderTop: "1px solid var(--line-soft, var(--line))",
+      }}
+    >
+      <span style={{ fontSize: "var(--text-2xs)", color: "var(--ink-faint)", flexShrink: 0 }}>
+        {t("options.seed")}
+      </span>
+      <input
+        data-seed
+        value={params.seed}
+        onChange={(e) => {
+          const v = parseInt(e.target.value, 10);
+          set("seed", Number.isFinite(v) ? v : 0);
+        }}
+        // ★★**랜덤이어도 고칠 수 있다** (사용자 지적 2026-08-16). 랜덤은 아무 숫자를
+        //   넣는 게 아니라 **여기 적힌 값으로 뽑고 나서** 이 칸을 굴리는 것이라,
+        //   잠그면 "이 시드로 한 장 더" 를 아예 못 한다 (`lib/seedRounds` 머리 주석).
+        style={{
+          flex: 1,
+          minWidth: 0,
+          background: "var(--panel)",
+          border: "1px solid var(--line)",
+          borderRadius: "var(--r-2)",
+          padding: "3px var(--sp-3)",
+          fontSize: "var(--text-2xs)",
+          fontFamily: "var(--font-mono)",
+        }}
+      />
+      {/* 주사위 — 지금 자리에서 바로 새 시드를 뽑아 본다 */}
+      <button
+        data-seed-roll
+        onClick={() => set("seed", randomSeed())}
+        data-tip={t("options.seedRoll")}
+        style={{ flexShrink: 0, color: "var(--ink-faint)", display: "grid", padding: "0 2px" }}
+      >
+        {Icon.dice}
+      </button>
+      {/* ★배타적 3택이다 — 체크박스 둘이면 「고정 + 씬마다 랜덤」 같은 뜻 없는 상태가
+          생긴다 (사용자 지적 2026-08-11). v2 의 `랜덤/고정/슬롯마다 랜덤` 이관. */}
+      <div
+        data-seed-mode={params.seed_mode}
+        style={{
+          display: "flex",
+          flexShrink: 0,
+          border: "1px solid var(--line)",
+          borderRadius: "var(--r-2)",
+          overflow: "hidden",
+        }}
+      >
+        {SEED_MODES.map((m, i) => {
+          const on = params.seed_mode === m;
+          return (
+            <button
+              key={m}
+              data-seed-pick={m}
+              onClick={() => set("seed_mode", m)}
+              data-tip={t(SEED_HINTS[i])}
+              style={{
+                padding: "2px var(--sp-3)",
+                fontSize: "var(--text-2xs)",
+                whiteSpace: "nowrap",
+                borderRight: i < 2 ? "1px solid var(--line)" : undefined,
+                background: on ? "var(--accent-bg)" : "transparent",
+                color: on ? "var(--accent-ink)" : "var(--ink-dim)",
+                fontWeight: on ? "var(--w-semi)" : "var(--w-normal)",
+              }}
+            >
+              {t(SEED_LABELS[i])}
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+}

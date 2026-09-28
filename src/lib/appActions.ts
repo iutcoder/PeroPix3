@@ -1383,3 +1383,68 @@ defineAction({
     return { ok: true, did: n ? `걸려 있는 그림 입력 ${n}개` : "걸려 있는 그림 입력이 없음", inputs: v };
   },
 });
+
+/* ── 만화 캔버스 (AI 콘티, 설계 `docs/comic-editor-design.md` 10번) ──────────────────
+   ★실행은 `editor/comicAgent` 가 한다 — 편집기는 지연 로드라 부를 때 싣는다 (첫 화면이 편집기를 싣지 않게).
+   ★공통의 화풍 · 외형은 **고치는 액션이 없다** (설계 10-3). 배경만 더할 수 있다.
+   ★되돌리기는 이미지 편집의 Ctrl+Z 다 — 조수의 `undo_change` 로는 못 돌린다 (그렇게 적어 돌려준다). */
+
+defineAction({
+  id: "read_comic",
+  title: "만화 캔버스를 읽습니다",
+  desc: "★**이미지 편집의 만화 캔버스**를 읽는다 — 공통(화풍 · 캐릭터 외형 · 배경), 페이지마다 컷(상자 · 장면 요약 · 배경 · 컷 태그 · 캐릭터 칸 · 든 그림 수)과 말풍선. "
+    + "★결과의 `guide` 가 만화 콘티를 짜는 규칙이다 — add_comic_page 전에 반드시 읽고 따른다. "
+    + "AI 콘티가 도는 중이면 그 캔버스, 아니면 지금 보고 있는 만화 캔버스를 읽는다.",
+  args: {},
+  confirm: "none",
+  run: async () => (await import("../editor/comicAgent")).readComic(),
+});
+
+defineAction({
+  id: "add_comic_page",
+  title: "만화 페이지를 깝니다",
+  desc: "★**만화 캔버스의 마지막 페이지 뒤에 페이지 한 장을 깐다** (마지막 페이지가 비어 있으면 거기에). 컷 나누기 · 장면 요약 · 배경 · 컷 태그 · 캐릭터 칸 · 말풍선을 한 번에. "
+    + "cuts 는 읽는 차례대로 `{box:[x,y,w,h], summary, background, tags, cast:[{who, tags, x, y}]}` — box 는 페이지 기본 틀 안의 비율, "
+    + "who 는 read_comic 의 캐릭터 이름 · \"narration\" · \"bubble\", tags 는 그 컷에서만 붙는 태그(외형은 넣지 않는다), x·y 는 컷 안 비율. "
+    + "bubbles 는 `{cut(1부터), kind: speech|thought|shout|whisper|narration, text, x, y, tail:{x,y}}` (편집기가 얹는 말풍선). "
+    + "layout 을 주면 box 대신 템플릿 배치를 쓴다. 공통에 없는 배경은 new_backgrounds `[{name, tags}]` 로 함께 더한다. "
+    + "★먼저 read_comic 의 guide 를 따른다. 그림은 만들지 않는다 (생성은 사용자가 한다).",
+  args: {
+    cuts: { type: "array", items: { type: "object" }, desc: "컷 — 읽는 차례대로 {box, summary, background, tags, cast}", required: true },
+    bubbles: { type: "array", items: { type: "object" }, desc: "말풍선 — {cut, kind, text, x, y, tail}. 대사를 편집기 말풍선으로 넣을 때만" },
+    layout: { type: "string", desc: "템플릿 배치 이름 (single · two-rows · three-rows · four-grid · four-rows · hero-top · hero-bottom · six-grid · two-cols · tall-left · tall-right). 주면 box 대신 이 배치" },
+    new_backgrounds: { type: "array", items: { type: "object" }, desc: "공통에 더할 배경 — {name, tags}" },
+  },
+  confirm: "none",
+  run: async (a) => (await import("../editor/comicAgent")).addComicPage(a),
+});
+
+defineAction({
+  id: "edit_comic_cut",
+  title: "만화 컷을 고칩니다",
+  desc: "★**만화 캔버스의 컷 하나를 고친다** — 장면 요약 · 배경 · 컷 태그 · 캐릭터 칸 (주는 것만 바뀐다). page · cut 은 1부터 (컷은 그 페이지의 읽는 차례). "
+    + "cast 를 주면 그 컷의 캐릭터 칸을 통째로 갈아 끼운다 ({who, tags, x, y}). 화풍과 캐릭터 외형은 고치지 않는다.",
+  args: {
+    page: { type: "number", desc: "페이지 번호 (1부터)", required: true },
+    cut: { type: "number", desc: "컷 번호 (그 페이지의 읽는 차례, 1부터)", required: true },
+    summary: { type: "string", desc: "장면 요약 (한국어 한 문장)" },
+    background: { type: "string", desc: "공통의 배경 이름 · 빈 값이면 배경 없음" },
+    tags: { type: "string", desc: "컷 태그 — 구도 · 소품 · 날씨 (쉼표로)" },
+    cast: { type: "array", items: { type: "object" }, desc: "캐릭터 칸 전부 — {who, tags, x, y}" },
+  },
+  confirm: "none",
+  run: async (a) => (await import("../editor/comicAgent")).editComicCut(a),
+});
+
+defineAction({
+  id: "add_comic_background",
+  title: "만화 배경을 더합니다",
+  desc: "★**만화 캔버스의 공통에 배경 하나를 더한다** — 이야기에 필요한 장소가 공통에 없을 때만. name 은 한국어 이름, tags 는 장소 · 시간 · 조명 · 날씨 태그. "
+    + "이미 있는 이름이면 거절한다 (그 이름을 그대로 쓴다).",
+  args: {
+    name: { type: "string", desc: "배경 이름 (한국어)", required: true },
+    tags: { type: "string", desc: "장소 · 시간 · 조명 · 날씨 태그 (쉼표로)", required: true },
+  },
+  confirm: "none",
+  run: async (a) => (await import("../editor/comicAgent")).addComicBackground(a),
+});

@@ -4,7 +4,7 @@
  *    옛 캔버스를 그대로 들고 있으므로 되돌리기는 참조를 바꾸는 것으로 끝난다.
  *  ★합성은 **문서 좌표계**에서 한다 — 레이어의 변형(자리·크기·회전·반전)은 그릴 때 `ctx` 변환으로 건다 (비파괴). */
 import { centerOf, filterOf, floodFill, hexRgb, layoutText, rad, textBaseline, type LayerMeta, type Rect, type Size, type TextMeta, type Xform } from "./model";
-import { bodyFor, bubbleBounds, bubbleShape, panelPts, wrapLines, type BubbleMeta, type ComicPage, type PanelMeta, type Pt } from "./comic";
+import { bodyFor, bubbleBounds, bubbleShape, panelPts, wrapLines, type BubbleMeta, type ComicMeta, type PanelMeta, type Pt } from "./comic";
 import { SFX_FALLBACK, layoutSfx, primaryFamily, sfxBounds, type Glyph, type SfxMeta } from "./sfx";
 import { FX_AMT, applyFx, applyFxList, fxListKey, liveFx, type Fx, type FxKind } from "./fx";
 
@@ -287,7 +287,7 @@ export const ensureFont = (t: TextMeta): Promise<void> =>
 
 /** 컷 테두리 — 레이어 상자 크기의 캔버스에 다각형 **안쪽으로** 그린다 (그림을 자르는 자리와 선의 바깥 변이 같다).
  *  「테두리 없음」이면 빈 캔버스 */
-export function bakePanel(meta: PanelMeta, w: number, h: number, page: Pick<ComicPage, "border" | "color">): HTMLCanvasElement {
+export function bakePanel(meta: PanelMeta, w: number, h: number, page: Pick<ComicMeta, "border" | "color">): HTMLCanvasElement {
   const cv = makeCanvas(w, h);
   if (meta.noBorder || page.border <= 0) return cv;
   const g = cv.getContext("2d")!;

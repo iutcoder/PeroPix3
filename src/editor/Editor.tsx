@@ -8,16 +8,17 @@ import { isAbsPath } from "../store/censor";
 import { box, card, dropFocus, num, on } from "../panels/censor/ui";
 import { ImageActions } from "../panels/ImageActions";
 import { useConvertQueue } from "../panels/tools/ConvertTool";
-import { saveName, useEditor, type Tool } from "./store";
+import { curPage, saveName, useEditor, type Tool } from "./store";
 import { Stage } from "./Stage";
-import { Side } from "./Side";
+import { ComicFontStatus, Side } from "./Side";
 import { sendToEditor } from "./sendTo";
-import { NewCanvasDialog } from "./dialogs";
+import { CanvasSizeDialog, ExportPagesDialog, ImageSizeDialog, NewCanvasDialog } from "./dialogs";
+import { CutLane } from "./ComicPanel";
+import { ContiButton } from "./ComicConti";
 import { BubbleKindIcon, LayoutThumb } from "./comicUi";
-import { BUBBLE_KINDS, LAYOUTS, type BubbleKind } from "./comic";
+import { BUBBLE_KINDS, LAYOUTS, pageLabel, type BubbleKind } from "./comic";
 import { SFX_STYLES, type SfxStyleId } from "./sfx";
 import { ensureComicFonts, stackOf, useComicFonts } from "./comicFonts";
-import { AddonBand, DrawerPanel, DrawerRail, useComicDrawers } from "./ComicAddon";
 
 /** 이미지 편집 모드 (사용자 지시 2026-09-22, 목업 `docs/image-editor-mockup.html`).
  *
@@ -41,10 +42,6 @@ export default function Editor() {
   useEffect(() => {
     if (hasComic) void ensureComicFonts();
   }, [hasComic]);
-  /** 플러그인 서랍 (만화 페이지에만) — 열린 서랍 하나 (설계 10-1) */
-  const drawers = useComicDrawers();
-  const [drawerKey, setDrawerKey] = useState<string | null>(null);
-  const drawer = doc?.comic ? drawers.find((d) => d.key === drawerKey) ?? null : null;
 
   /* ── 단축키 ── */
   useEffect(() => {
@@ -157,7 +154,6 @@ export default function Editor() {
           <div style={{ flex: 1, minHeight: 0, display: "flex", gap: "var(--sp-4)" }}>
             <ToolStrip />
             <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", gap: "var(--sp-2)" }}>
-              {doc.comic?.addon && <AddonBand doc={doc} />}
               <Stage doc={doc} />
               <ImageActions
                 url=""
@@ -180,15 +176,17 @@ export default function Editor() {
                   useUi.getState().setMode("censor");
                 }}
                 right={
-                  <span data-editor-info style={{ fontSize: "var(--text-2xs)", color: "var(--ink-faint)", whiteSpace: "nowrap" }}>
-                    {t("editor.layersN", { n: doc.layers.length })}
+                  <span data-editor-info style={{ fontSize: "var(--text-2xs)", color: "var(--ink-faint)", whiteSpace: "nowrap", fontVariantNumeric: "tabular-nums" }}>
+                    {doc.comic
+                      ? t("editor.pageInfo", { p: pageLabel(Math.max(0, doc.comic.pages.indexOf(curPage(doc) ?? ""))), n: doc.comic.pages.length, w: doc.w, h: doc.h })
+                      : t("editor.layersN", { n: doc.layers.length })}
                   </span>
                 }
               />
+              {/* 생성할 컷의 후보 — 무대 아래 줄 (설계 8-4 · 목업 v2) */}
+              {doc.comic && <CutLane doc={doc} />}
             </div>
             <Side doc={doc} />
-            {drawer && <DrawerPanel drawer={drawer} onClose={() => setDrawerKey(null)} />}
-            {doc.comic && drawers.length > 0 && <DrawerRail drawers={drawers} open={drawer?.key ?? null} onOpen={setDrawerKey} />}
           </div>
         </>
       )}
@@ -402,6 +400,9 @@ function ToolOptions() {
         </>
       )}
       <span style={{ flex: 1 }} />
+      {/* 만화 캔버스 — 「AI 콘티」(설계 10번) · 「페이지」 메뉴(용지 · 읽는 방향 · 안내선 · 크기 · 내보내기, 설계 8-5) */}
+      {doc.comic && <ContiButton doc={doc} />}
+      {doc.comic && <PageMenu />}
       <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
         <button data-editor-fit onMouseDown={dropFocus} onClick={() => s.setView({ fit: true })} data-tip={t("editor.fit")} style={{ ...box, ...(doc.view.fit ? on : {}), display: "grid", padding: "3px 6px" }}>{Icon.fitBox}</button>
         <button data-editor-1to1 onMouseDown={dropFocus} onClick={() => s.setView({ fit: false, zoom: 1 })} data-tip={t("editor.oneToOne")} style={{ ...box, ...(zoomPct === 100 ? on : {}), display: "grid", padding: "3px 6px" }}>{Icon.oneToOne}</button>
@@ -455,6 +456,77 @@ function Opt({ label, children }: { label: string; children: React.ReactNode }) 
       {label}
       {children}
     </span>
+  );
+}
+
+/** 「페이지」 메뉴 — 만화 캔버스의 캔버스 값 (설계 8-5: 오른쪽 기둥에서 옮겨 왔다). 읽는 방향 · 안내선 · 캔버스 크기 · 이미지 크기 ·
+ *  여러 페이지 내보내기 · 지금 페이지 지우기 · 만화 글꼴 상태. 크기는 **모든 페이지에** 걸린다 (페이지는 모두 캔버스 크기다) */
+function PageMenu() {
+  const t = useI18n((s) => s.t);
+  const s = useEditor();
+  const doc = s.doc()!;
+  const page = doc.comic!;
+  const [open, setOpen] = useState(false);
+  const [dlg, setDlg] = useState<"canvas" | "image" | "export" | null>(null);
+  const ref = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    if (!open) return;
+    const close = (e: PointerEvent) => {
+      if (ref.current?.contains(e.target as Node)) return;
+      setOpen(false);
+    };
+    document.addEventListener("pointerdown", close, true);
+    return () => document.removeEventListener("pointerdown", close, true);
+  }, [open]);
+  const pid = curPage(doc);
+  const i = pid ? page.pages.indexOf(pid) : -1;
+  const row: React.CSSProperties = { display: "flex", alignItems: "center", gap: "var(--sp-2)", fontSize: "var(--text-2xs)", color: "var(--ink-faint)" };
+  const wide: React.CSSProperties = { ...box, display: "inline-flex", alignItems: "center", justifyContent: "center", gap: 6, padding: "4px 8px", fontSize: "var(--text-2xs)" };
+  return (
+    <div ref={ref} style={{ position: "relative" }}>
+      <button data-editor-page-menu onMouseDown={dropFocus} onClick={() => setOpen((v) => !v)} style={{ ...box, ...(open ? on : {}), display: "inline-flex", alignItems: "center", gap: 5, padding: "2px 9px" }}>
+        {Icon.page12}{t("editor.page")}
+      </button>
+      {open && (
+        <div
+          data-editor-page-pop
+          style={{ position: "absolute", right: 0, top: "100%", marginTop: 4, zIndex: 30, width: 280, padding: "var(--sp-4)", display: "flex", flexDirection: "column", gap: "var(--sp-3)",
+                   background: "var(--panel)", border: "1px solid var(--line)", borderRadius: "var(--r-2)", boxShadow: "0 8px 28px rgba(0,0,0,.5)" }}
+        >
+          <div style={{ ...row, color: "var(--ink-soft)", fontVariantNumeric: "tabular-nums" }}>{t("editor.pageSize", { w: doc.w, h: doc.h, n: page.pages.length })}</div>
+          <div style={row}>
+            <span style={{ width: 56, flexShrink: 0 }}>{t("editor.readDir")}</span>
+            <button data-editor-dir="rtl" onMouseDown={dropFocus} onClick={() => s.setComic({ dir: "rtl" })} style={{ ...box, ...(page.dir === "rtl" ? on : {}), padding: "2px 8px" }}>{t("editor.dirRtl")}</button>
+            <button data-editor-dir="ltr" onMouseDown={dropFocus} onClick={() => s.setComic({ dir: "ltr" })} style={{ ...box, ...(page.dir === "ltr" ? on : {}), padding: "2px 8px" }}>{t("editor.dirLtr")}</button>
+          </div>
+          <div style={row}>
+            <span style={{ width: 56, flexShrink: 0 }}>{t("editor.guides")}</span>
+            <button data-editor-guides-toggle onMouseDown={dropFocus} onClick={() => s.setComic({ guides: !page.guides })} style={{ ...box, ...(page.guides ? on : {}), display: "inline-flex", alignItems: "center", gap: 4, padding: "2px 8px" }}>
+              {Icon.fitBox}{t(page.guides ? "editor.guidesOn" : "editor.guidesOff")}
+            </button>
+          </div>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "var(--sp-2)" }}>
+            <button data-editor-canvas-size onClick={() => { setOpen(false); setDlg("canvas"); }} style={wide}>{Icon.fitBox}{t("editor.canvasSize")}</button>
+            <button data-editor-image-size onClick={() => { setOpen(false); setDlg("image"); }} style={wide}>{Icon.scaling}{t("editor.imageSize")}</button>
+          </div>
+          <button data-editor-export-pages onClick={() => { setOpen(false); setDlg("export"); }} style={wide}>{Icon.pages}{t("editor.exportPagesN", { n: page.pages.length })}</button>
+          {pid && (
+            <button
+              data-editor-page-del
+              disabled={page.pages.length <= 1}
+              onClick={() => { setOpen(false); void s.removePage(pid); }}
+              style={{ ...wide, color: page.pages.length <= 1 ? "var(--ink-ghost)" : "var(--err-ink)" }}
+            >
+              {Icon.trash}{t("editor.pageDel", { p: pageLabel(i) })}
+            </button>
+          )}
+          <ComicFontStatus />
+        </div>
+      )}
+      {dlg === "canvas" && <CanvasSizeDialog doc={doc} onClose={() => setDlg(null)} />}
+      {dlg === "image" && <ImageSizeDialog doc={doc} onClose={() => setDlg(null)} />}
+      {dlg === "export" && <ExportPagesDialog doc={doc} onClose={() => setDlg(null)} />}
+    </div>
   );
 }
 

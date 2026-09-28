@@ -4,15 +4,17 @@
  *  ★판정: `node --experimental-strip-types src/editor/comic.test.ts` */
 import type { Rect, Size, TextStyle } from "./model";
 import type { Block } from "../lib/blocks";
+import type { Thumb } from "../store/prompt";
 
 export type Pt = [number, number];
 export type Dir = "rtl" | "ltr";
 
 /* ── 용지 ─────────────────────────────────────────────────────── */
 
-/** 만화 페이지의 속성 — 캔버스(`Doc.comic`)가 든다. 컷 간격·테두리는 페이지 값이다 (옵션 줄의 컷 도구가 고친다) */
-export type ComicPage = {
-  /** 읽는 방향 — 컷 번호가 이것을 따른다 */
+/** 만화 캔버스의 속성 — 캔버스(`Doc.comic`)가 든다. 만화 한 편에 한 벌이고 모든 페이지가 같이 쓴다.
+ *  컷 간격·테두리는 캔버스 값이다 (옵션 줄의 컷 도구가 고친다) */
+export type ComicMeta = {
+  /** 읽는 방향 — 페이지 **안의** 컷 차례에만 걸린다. 페이지끼리는 언제나 위에서 아래다 (설계 3번) */
   dir: Dir;
   /** 안쪽 여백(기본 틀). 컷 템플릿은 이 안을 나눈다. 안내선으로만 보이고 저장 그림에는 안 들어간다 */
   frame: Rect;
@@ -24,55 +26,24 @@ export type ComicPage = {
   color: string;
   /** 안내선을 보이나 */
   guides: boolean;
-  /** 플러그인이 깐 콘티 (애드온 띠에 뜬다, 설계 10-1). 직접 만든 페이지에는 없다 */
-  addon?: ComicAddon;
+  /** ★★페이지 차례 — 위에서 아래로 (사용자 지시 2026-09-28: 만화 한 편 = 캔버스 하나에 페이지 여럿).
+   *  레이어는 `page` 로 제 페이지를 가리키고, 좌표는 **그 페이지 안**의 것이다. 페이지는 모두 캔버스 크기(`Doc.w`·`Doc.h`)다 */
+  pages: string[];
+  /** 공통 — 화풍 · 캐릭터 카드 · 배경. 모든 페이지 · 모든 컷이 가져다 쓴다 (설계 8-1) */
+  common: ComicCommon;
 };
 
-/* ── 플러그인 연동 (설계 10번) ─────────────────────────────────── */
+/* ── 공통 (설계 8-1) ────────────────────────────────────────────── */
 
-/** 플러그인 프로젝트의 생성 옵션 — 넘겨받은 컷은 지금 워크스페이스 값이 아니라 이것으로 생성한다 (설계 10-2 「화풍·생성 옵션은 플러그인 프로젝트의 것」) */
-export type HandedGen = { model?: string; steps?: number; cfg?: number; cfg_rescale?: number; sampler?: string; quality_preset?: string; uc_preset?: string };
-/** 이 캔버스에 콘티를 깐 플러그인 — 애드온 띠(깐 플러그인 · 프로젝트와 페이지 · 모드 · 말풍선 담당)가 이것을 읽는다 */
-export type ComicAddon = { plugin: string; name: string; label: string; mode: "page" | "cut"; bubbles: "editor" | "nai"; source?: unknown; gen?: HandedGen };
-/** 넘겨받은 인물 — 번호는 콘티의 흐름 번호 그대로, 자리는 **컷 안 비율**(사선 보정 뒤). `lines` 는 NAI 담당일 때 그 인물 슬롯에 실린 대사 */
-export type HandedChar = { no: number; name: string; color: string; prompt: string; uc: string; x: number; y: number; lines: string[] };
-/** 넘겨받은 내레이션 슬롯 (NAI 담당일 때만) — 따로 좌표를 갖는 캐릭터 슬롯이다 */
-export type HandedNote = { no: number; text: string; prompt: string; x: number; y: number };
-/** 넘겨받은 프롬프트 — 컷 프롬프트·인물 대신 이것으로 생성한다 (설계 10-2 「컷 모드의 프롬프트 나누기」). `empty` 는 인물 없는 컷의 번호 */
-export type Handed = { summary: string; base: string; uc: string; chars: HandedChar[]; notes: HandedNote[]; empty?: number | null };
+/** 베이스 프롬프트 카드의 머리 — 이름과 배너 그림 (생성 모드의 스타일 카드와 같은 것) */
+export type ComicStyle = { ref: string | null; name: string; thumb: Thumb | null };
+/** 캐릭터 카드 — 외형. ★캔버스에 한 벌뿐이라 카드 하나가 곧 인물 하나다 (같은 인물인지 따로 판단하지 않는다) */
+export type ComicChar = { id: string; ref: string | null; name: string; thumb: Thumb | null; prompt: Block[]; uc: Block[] };
+/** 공통 — 베이스(화풍) · UC · 캐릭터 카드 · 배경. 배경은 **블록 하나가 배경 하나**다 (이름 = 블록 이름, 태그 = 배경 프롬프트) */
+export type ComicCommon = { style: ComicStyle; base: Block[]; uc: Block[]; chars: ComicChar[]; bgs: Block[] };
 
-/** 인물 없는 칸·내레이션 — 콘티와 같은 중립색 (`plugins/manga-maker/web/app.js` 의 `CAST_NEUTRAL`) */
+/** 인물 없는 칸·내레이션·말풍선의 점 — 무채색 (`plugins/manga-maker/web/app.js` 의 `CAST_NEUTRAL`) */
 export const CAST_NEUTRAL = "#78859a";
-
-/** 컷 다각형 → 플러그인 콘티의 컷 틀 (`Region.frame`) — 네 꼭짓점이고 위 변이 기울었으면 사선 (오른쪽이 올라가면 slant-up) */
-export function frameOf(poly: Pt[]): "rectangle" | "slant-up" | "slant-down" {
-  if (poly.length !== 4) return "rectangle";
-  const b = bboxOf(poly);
-  if (b.h <= 0) return "rectangle";
-  const top = [...poly].sort((a, c) => a[1] - c[1]).slice(0, 2).sort((a, c) => a[0] - c[0]);
-  const d = (top[1][1] - top[0][1]) / b.h;
-  return d < -0.03 ? "slant-up" : d > 0.03 ? "slant-down" : "rectangle";
-}
-
-/** 플러그인이 정한 컷(페이지 전체에 대한 0~1 다각형)을 이 캔버스에 놓는다.
- *  · 페이지 그림이 있으면(페이지 모드) 그림이 곧 캔버스라 **그대로** 곱한다.
- *  · 없으면(컷 모드) 기본 틀 안에 넣고, 이웃한 변(페이지 가장자리가 아닌 변)만 간격의 반씩 들인다 (템플릿과 같은 규칙) */
-export function placeOwn(pts: Pt[], page: Pick<ComicPage, "frame" | "gapX" | "gapY">, size: Size, withImage: boolean): Pt[] {
-  if (withImage) return pts.map(([x, y]) => [x * size.w, y * size.h] as Pt);
-  const f = page.frame;
-  const b = bboxOf(pts);
-  const E = 0.01;
-  const inset = (v: number, lo: number, hi: number, gap: number) => {
-    // 그 점이 상자의 어느 변 쪽인가 — 페이지 가장자리에 붙은 변은 안 들인다
-    if (Math.abs(v - lo) < 1e-9 && lo > E) return gap / 2;
-    if (Math.abs(v - hi) < 1e-9 && hi < 1 - E) return -gap / 2;
-    return 0;
-  };
-  return pts.map(([x, y]) => [
-    f.x + x * f.w + inset(x, b.x, b.x + b.w, page.gapX),
-    f.y + y * f.h + inset(y, b.y, b.y + b.h, page.gapY),
-  ] as Pt);
-}
 
 /** 판형 — 세로형 만화 원고 (mm). 웹 게시 세로는 픽셀로 정한다 */
 export const PAPERS = {
@@ -92,8 +63,8 @@ export function paperPx(id: Exclude<PaperId, "custom">, dpi: Dpi): Size {
   return { w: Math.round((p.mm[0] / 25.4) * dpi), h: Math.round((p.mm[1] / 25.4) * dpi) };
 }
 
-/** 새 만화 페이지의 기본값 — 여백·간격·테두리는 A4 보통(폭 1654)을 기준으로 폭에 비례한다 (목업 ③: 가로 24 · 세로 36 · 테두리 3) */
-export function newPage(size: Size, dir: Dir): ComicPage {
+/** 새 만화 캔버스의 페이지 값 — 여백·간격·테두리는 A4 보통(폭 1654)을 기준으로 폭에 비례한다 (목업 ③: 가로 24 · 세로 36 · 테두리 3) */
+export function newPage(size: Size, dir: Dir): Omit<ComicMeta, "pages" | "common"> {
   const k = size.w / 1654;
   const mx = Math.round(size.w * 0.0575);
   const my = Math.round(size.h * 0.047);
@@ -107,6 +78,16 @@ export function newPage(size: Size, dir: Dir): ComicPage {
     guides: true,
   };
 }
+
+/* ── 페이지 ──────────────────────────────────────────────────── */
+
+/** 그 레이어가 든 페이지 — 모르는 페이지(없어진 페이지·페이지가 없던 옛 저장본)면 **첫 페이지**다.
+ *  ★페이지를 가리는 자리는 전부 이것 하나를 지난다 (무대 · 레이어 목록 · 차례 · 컷 번호) — 따로 거르면 한쪽에서만 레이어가 사라진다 */
+export const pageOfLayer = (l: { page?: string }, pages: string[]): string => (l.page && pages.includes(l.page) ? l.page : pages[0]);
+/** 그 페이지의 레이어 (차례 그대로) */
+export const pageLayers = <T extends { page?: string }>(layers: T[], pages: string[], pid: string): T[] => layers.filter((l) => pageOfLayer(l, pages) === pid);
+/** 페이지 이름 — `p.01` (목업의 페이지 머리 · 컷 줄 · 레이어 묶음이 같은 이름) */
+export const pageLabel = (i: number) => `p.${String(i + 1).padStart(2, "0")}`;
 
 /** 첫 배치 — 빈 페이지 + 만화 제작기와 같은 11가지 (`plugins/manga-maker/core.py` 의 `LAYOUTS`).
  *  ★앱은 플러그인을 담지 않으므로 표는 **앱 것**이다 (설계 5번). 값은 기본 틀 안의 비율 (x, y, w, h) */
@@ -126,16 +107,20 @@ export const LAYOUTS: Record<string, [number, number, number, number][]> = {
 };
 
 /** 템플릿 → 컷 다각형들 (문서 좌표). 이웃한 변 사이에만 간격을 준다 (바깥 변은 기본 틀에 붙는다) */
-export function templatePanels(page: Pick<ComicPage, "frame" | "gapX" | "gapY">, key: string): Pt[][] {
+export function templatePanels(page: Pick<ComicMeta, "frame" | "gapX" | "gapY">, key: string): Pt[][] {
+  return (LAYOUTS[key] ?? []).map((r) => framePanel(page, r));
+}
+
+/** 기본 틀 안의 비율 상자(x, y, w, h — 0~1) → 컷 다각형 (문서 좌표). 이웃한 변 사이에만 간격의 반씩 들인다 (바깥 변은 기본 틀에 붙는다).
+ *  ★템플릿과 AI 콘티(`add_comic_page` 의 컷 상자)가 같은 셈을 쓴다 — 둘이 다르면 같은 배치가 다른 모양이 된다 */
+export function framePanel(page: Pick<ComicMeta, "frame" | "gapX" | "gapY">, [x, y, w, h]: [number, number, number, number]): Pt[] {
   const f = page.frame;
   const E = 1e-6;
-  return (LAYOUTS[key] ?? []).map(([x, y, w, h]) => {
-    const x0 = f.x + x * f.w + (x > E ? page.gapX / 2 : 0);
-    const x1 = f.x + (x + w) * f.w - (x + w < 1 - E ? page.gapX / 2 : 0);
-    const y0 = f.y + y * f.h + (y > E ? page.gapY / 2 : 0);
-    const y1 = f.y + (y + h) * f.h - (y + h < 1 - E ? page.gapY / 2 : 0);
-    return rectPts({ x: x0, y: y0, w: x1 - x0, h: y1 - y0 });
-  });
+  const x0 = f.x + x * f.w + (x > E ? page.gapX / 2 : 0);
+  const x1 = f.x + (x + w) * f.w - (x + w < 1 - E ? page.gapX / 2 : 0);
+  const y0 = f.y + y * f.h + (y > E ? page.gapY / 2 : 0);
+  const y1 = f.y + (y + h) * f.h - (y + h < 1 - E ? page.gapY / 2 : 0);
+  return rectPts({ x: x0, y: y0, w: x1 - x0, h: y1 - y0 });
 }
 
 export const rectPts = (r: Rect): Pt[] => [[r.x, r.y], [r.x + r.w, r.y], [r.x + r.w, r.y + r.h], [r.x, r.y + r.h]];
@@ -143,18 +128,38 @@ export const rectPts = (r: Rect): Pt[] => [[r.x, r.y], [r.x + r.w, r.y], [r.x + 
 /* ── 컷 (다각형) ─────────────────────────────────────────────── */
 
 /** 컷 레이어가 드는 것 — 꼭짓점은 **레이어 상자 안의 비율**(0~1)이다. 그래서 선택 도구로 옮기고 늘려도 모양이 따라간다.
- *  테두리 두께·색은 페이지 값(`ComicPage`)이고 컷은 「테두리 없음」만 따로 든다 */
+ *  테두리 두께·색은 캔버스 값(`ComicMeta`)이고 컷은 「테두리 없음」만 따로 든다 */
 export type PanelMeta = { pts: Pt[]; noBorder: boolean; gen?: PanelGen };
 
 /* ── 컷 생성 (설계 8번) ─────────────────────────────────────────── */
 
-/** 이 컷에 나올 인물 — 지금 탭의 캐릭터 카드 id 와 **컷 안의 자리**(컷 상자 안 비율 0~1) */
-export type CutCast = { id: string; x: number; y: number };
+/** 컷의 캐릭터 프롬프트 한 칸 — 인물(`who` = 공통의 캐릭터 카드 id) · 내레이션 · 말풍선.
+ *  ★같은 인물을 한 컷에 여러 번 넣을 수 있다 (사용자 지시 2026-09-28) — 그래서 칸마다 `key` 가 따로 있다.
+ *  자리(`x`·`y`)는 **컷 상자 안의 비율**(0~1), `blocks` 는 그 컷에서만 붙는 칩 (블록 하나, 씬 칸과 같다) */
+export type CutCast = { key: string; who: string; x: number; y: number; blocks: Block[] };
+/** 캐릭터 카드가 아닌 칸 — 내레이션 · 말풍선. 인물과 **같은 칩 입력**이다 (사용자 지시 2026-09-28) */
+export const WHO_NARRATION = "@narration";
+export const WHO_BUBBLE = "@bubble";
+/** 내레이션 · 말풍선을 넣을 때 미리 들어가는 칩 — 그릴 글은 그 뒤에 따옴표로 적는다 (만화 제작기가 내레이션 상자를 넣는 방식, `core.py` 의 `narration box`) */
+export const WHO_PRESET: Record<string, string> = { [WHO_NARRATION]: "no humans, narration box", [WHO_BUBBLE]: "no humans, speech bubble" };
 /** 그 컷에서 뽑은 그림 — 워크스페이스 파일 (`ws` 의 `file`). 파일이라 지워지지 않는다 */
 export type CutTake = { ws: string; file: string };
-/** 컷 하나가 곧 씬 하나다 — 컷 프롬프트(씬 칸과 같은 블록 하나) · 나올 인물 · 크게 · 뽑은 후보.
- *  `handed` 가 있으면 플러그인이 나눠 준 프롬프트로 생성한다 (컷 프롬프트·인물 대신, 설계 10-2) */
-export type PanelGen = { blocks: Block[]; cast: CutCast[]; big?: boolean; takes: CutTake[]; handed?: Handed };
+/** 컷 하나가 곧 씬 하나다 — 그 컷에만 있는 것 (설계 8-1): 장면 요약(프롬프트에 안 들어가는 메모) · 배경(공통의 배경 블록 id) ·
+ *  컷 태그(씬 칸과 같은 블록 하나) · 캐릭터 프롬프트 · 크게 · 뽑은 후보 */
+export type PanelGen = { summary: string; bg: string | null; blocks: Block[]; cast: CutCast[]; big?: boolean; takes: CutTake[] };
+/** 컷의 생성 설정 — 빈 칸은 기본값으로 (옛 저장본·새 컷) */
+export const genOf = (p: { gen?: Partial<PanelGen> } | undefined): PanelGen => {
+  const g = p?.gen ?? {};
+  return {
+    summary: g.summary ?? "",
+    bg: g.bg ?? null,
+    blocks: g.blocks ?? [],
+    // ★칸 모양이 옛 것(`{ id, x, y }`)이면 거른다 — 만화 기능은 릴리즈 전이라 옮겨 줄 사용자 데이터가 없다
+    cast: (g.cast ?? []).filter((c) => !!c && typeof c.who === "string" && typeof c.key === "string").map((c) => ({ ...c, blocks: c.blocks ?? [] })),
+    takes: g.takes ?? [],
+    ...(g.big ? { big: true } : {}),
+  };
+};
 
 /** Opus 무료 한도 — `lib/anlas.ts` 의 `FREE_PIXELS` 와 같은 값 (공홈 `eZ`). 순수 계산이라 여기 둔다 */
 const FREE_PX = 1048576;
@@ -358,7 +363,7 @@ export function snapTo(v: number, cands: number[], tol: number): number {
 }
 
 /** 꼭짓점을 끌 때의 붙을 자리 — 다른 컷 꼭짓점의 x·y 와 그 ± 간격, 기본 틀의 변 */
-export function snapCands(others: Pt[][], page: Pick<ComicPage, "frame" | "gapX" | "gapY">): { xs: number[]; ys: number[] } {
+export function snapCands(others: Pt[][], page: Pick<ComicMeta, "frame" | "gapX" | "gapY">): { xs: number[]; ys: number[] } {
   const f = page.frame;
   const xs = [f.x, f.x + f.w];
   const ys = [f.y, f.y + f.h];
@@ -614,7 +619,7 @@ export function wrapLines(value: string, maxW: number, measure: (s: string) => n
 
 /* ── 레이어 차례 ─────────────────────────────────────────────── */
 
-type Stackable = { id: string; panel?: PanelMeta; bubble?: BubbleMeta; sfx?: unknown; clip?: string; x: number; y: number; w: number; h: number };
+type Stackable = { id: string; panel?: PanelMeta; bubble?: BubbleMeta; sfx?: unknown; clip?: string; page?: string; x: number; y: number; w: number; h: number };
 
 /** 레이어가 든 묶음 — 레이어 목록의 묶음 머리(그 밖 · 컷 · 효과음 · 말풍선)와 같다 */
 export type Tier = "base" | "panel" | "sfx" | "bubble";
@@ -638,8 +643,13 @@ export function comicTiers<T extends Stackable>(layers: T[]): Map<string, Tier> 
 /** 만화 페이지의 레이어 차례 — **아래부터** 그 밖 묶음(용지 등) → 컷마다 [그 컷에 든 그림들, 컷 테두리] → 컷 위에 둔 레이어 →
  *  효과음 묶음 → 말풍선 묶음. 컷 테두리가 그 컷의 그림 위에 오고, 효과음은 컷 테두리 위(컷 밖으로 삐져나가는 것이 흔하다),
  *  말풍선이 맨 위에 온다. 그 밖의 레이어가 어느 묶음인지는 `comicTiers` 가 정한다.
- *  레이어 목록도 이 묶음으로 보인다 (설계 4번). 같은 묶음 안의 차례는 지킨다 — 목록에서 끌어 바꾼 것이 남는다 */
-export function comicStack<T extends Stackable>(layers: T[]): T[] {
+ *  레이어 목록도 이 묶음으로 보인다 (설계 4번). 같은 묶음 안의 차례는 지킨다 — 목록에서 끌어 바꾼 것이 남는다.
+ *  ★`pages` 를 주면 **페이지마다** 이 차례로 맞춰 페이지 차례대로 잇는다 (페이지끼리는 겹치지 않으므로 페이지가 곧 가장 큰 묶음이다) */
+export function comicStack<T extends Stackable>(layers: T[], pages?: string[]): T[] {
+  if (pages?.length) return pages.flatMap((pid) => stackOne(pageLayers(layers, pages, pid)));
+  return stackOne(layers);
+}
+function stackOne<T extends Stackable>(layers: T[]): T[] {
   const tier = comicTiers(layers);
   const panels = layers.filter((l) => l.panel);
   const ids = new Set(panels.map((p) => p.id));
@@ -655,11 +665,26 @@ export function comicStack<T extends Stackable>(layers: T[]): T[] {
   ];
 }
 
-/** 컷 번호 — 읽는 차례대로 1부터 (컷 레이어 id → 번호) */
+/** 컷 번호 — 읽는 차례대로 1부터 (컷 레이어 id → 번호). ★**한 페이지의** 레이어를 준다 (페이지마다 1부터 센다) */
 export function panelNumbers<T extends Stackable>(layers: T[], dir: Dir, pageH: number): Map<string, number> {
   const panels = layers.filter((l) => l.panel);
   const order = readingOrder(panels.map((p) => bboxOf(panelPts(p, p.panel!.pts))), dir, pageH * 0.02);
   return new Map(order.map((i, n) => [panels[i].id, n + 1]));
+}
+
+/** 한 페이지의 컷 — 읽는 차례대로 */
+export function panelsInOrder<T extends Stackable>(layers: T[], dir: Dir, pageH: number): T[] {
+  const nums = panelNumbers(layers, dir, pageH);
+  return layers.filter((l) => l.panel).sort((a, b) => (nums.get(a.id) ?? 0) - (nums.get(b.id) ?? 0));
+}
+
+/** 인물 점 번호 — **페이지 흐름 순서** (사용자 결정 2026-09-23): 컷을 읽는 차례대로, 컷 안에서는 캐릭터 프롬프트 차례대로
+ *  한 페이지에서 이어 센다. 열쇠는 `<컷 id>:<칸 key>` */
+export function castNumbers<T extends Stackable>(layers: T[], dir: Dir, pageH: number): Map<string, number> {
+  const out = new Map<string, number>();
+  let n = 0;
+  for (const p of panelsInOrder(layers, dir, pageH)) for (const c of genOf(p.panel).cast) out.set(`${p.id}:${c.key}`, ++n);
+  return out;
 }
 
 /** 새 꼬리 — 몸통 아래 왼쪽(오른쪽부터 읽으면 아래 왼쪽, 왼쪽부터면 아래 오른쪽)으로 몸통 높이의 0.9 배만큼 */

@@ -15,6 +15,7 @@ import { fxListOf } from "./fx";
 import { getPx, loadState, putPx, putState, type PersistDoc } from "./io";
 import { bakeBubble, bakePanel, bakeSfx, ensureFont, fitBubble, rebakeText, type Layer } from "./pixels";
 import type { Doc } from "./store";
+import type { ComicMeta } from "./comic";
 
 const keyOf = new WeakMap<HTMLCanvasElement, string>();
 const uploaded = new WeakSet<HTMLCanvasElement>();
@@ -95,7 +96,10 @@ async function flush(): Promise<void> {
         }
       }
       keep[d.id] = [...keys];
-      out.push({ id: d.id, name: d.name, w: d.w, h: d.h, sel: d.sel, src: d.src, dirty: d.dirty, view: d.view, layers, ...(d.comic ? { comic: d.comic } : {}) });
+      out.push({
+        id: d.id, name: d.name, w: d.w, h: d.h, sel: d.sel, src: d.src, dirty: d.dirty, view: d.view, layers,
+        ...(d.comic ? { comic: d.comic, page: d.page, cut: d.cut ?? null } : {}),
+      });
     }
     await putState({ docs: out, cur, keep });
   } catch (e) {
@@ -134,6 +138,24 @@ const selOf = (raw: PersistDoc["sel"], layers: Layer[]): string[] => {
   const ids = (Array.isArray(raw) ? raw : raw ? [raw] : []).filter((id) => layers.some((l) => l.id === id));
   return ids.length ? ids : layers.length ? [layers[layers.length - 1].id] : [];
 };
+
+/** 남긴 만화 캔버스의 속성 — 페이지 목록·공통이 없던 판(개편 전, 릴리즈 전 개발본에만 있다)이면 **첫 페이지 하나**와 빈 공통으로 채운다.
+ *  페이지를 모르는 레이어는 첫 페이지 것으로 읽힌다 (`comic.pageOfLayer`) */
+function comicOf(c: Partial<ComicMeta> & Omit<ComicMeta, "pages" | "common">, layers: Layer[]): ComicMeta {
+  const pages = c.pages?.length ? c.pages : [layers.find((l) => l.page)?.page ?? "pg0"];
+  const cm = c.common;
+  return {
+    ...c,
+    pages,
+    common: {
+      style: cm?.style ?? { ref: null, name: "", thumb: null },
+      base: cm?.base ?? [],
+      uc: cm?.uc ?? [],
+      chars: cm?.chars ?? [],
+      bgs: cm?.bgs ?? [],
+    },
+  };
+}
 
 export async function loadDocs(): Promise<{ docs: Doc[]; cur: string | null }> {
   const st = await loadState();
@@ -183,7 +205,7 @@ export async function loadDocs(): Promise<{ docs: Doc[]; cur: string | null }> {
       id: p.id, name: p.name, w: p.w, h: p.h, layers,
       sel: selOf(p.sel, layers),
       src: p.src ?? null, hist: emptyHist(), dirty: !!p.dirty, view: p.view ?? { fit: true, zoom: 1 },
-      ...(p.comic ? { comic: p.comic } : {}),
+      ...(p.comic ? { comic: comicOf(p.comic, layers), page: p.page, cut: p.cut ?? null } : {}),
     });
   }
   return { docs, cur: st.cur ?? null };

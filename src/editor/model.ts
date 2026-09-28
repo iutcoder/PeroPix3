@@ -55,6 +55,8 @@ export type LayerMeta = Xform & {
   draw?: boolean;
   /** 컷 생성으로 뽑아 넣은 그림 — 어느 파일인가 (후보 줄에서 지금 든 것을 가리킨다). 미저장 그림은 `null` */
   take?: CutTake | null;
+  /** 만화 캔버스에서 이 레이어가 든 페이지 id (`ComicMeta.pages`) — 좌표는 그 페이지 안의 것이다. 보통 캔버스에는 없다 */
+  page?: string;
 };
 
 /** 글자를 어떻게 앉히나 — 줄마다 잰 폭을 받아 상자 크기와 줄의 x 를 정한다 (재는 것은 캔버스가, 셈은 여기가) */

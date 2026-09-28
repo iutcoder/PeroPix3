@@ -49,8 +49,17 @@ export function BlockList({
   onDone,
   onNext,
   onTab,
+  noToggle,
+  tagOf,
+  addAs,
 }: {
   blocks: Block[];
+  /** 블록마다 켜고끄기가 **뜻이 없는 자리** — 만화 캔버스의 배경 (켜는 것은 컷이 고른다, `BlockRow` 의 같은 이름) */
+  noToggle?: boolean;
+  /** 블록 이름 뒤의 작은 글 — 만화 캔버스의 배경은 그 배경을 쓰는 페이지·컷 */
+  tagOf?: (b: Block) => React.ReactNode;
+  /** 「+ 블록」 대신 이 이름으로 늘린다 — 단추 글과 새 블록의 이름 (만화 캔버스의 배경: 「+ 배경」 · 「새 배경」) */
+  addAs?: { label: string; name: string };
   onChange: (b: Block[]) => void;
   /** 저장소에서 끌어온 블록을 받을 자리인가 — **화면에서 유일한 id** 를 준다.
    *  ★목록이 여럿이라(베이스·UC·캐릭터마다·씬 칸마다) id 가 겹치면 엉뚱한 곳에 떨어진다 */
@@ -244,7 +253,7 @@ export function BlockList({
     const at = Math.min(Math.max(splitAt ?? src.length, 0), src.length);
     const head = src.slice(0, at).replace(/[\s,]+$/, "");
     const tail = src.slice(at).replace(/^[\s,]+/, "");
-    const nb = makeBlock(t("block.newBlock"), [], {
+    const nb = makeBlock(addAs?.name ?? t("block.newBlock"), [], {
       open: true,
       color: b.color,
       tags: parseSegs(tail),
@@ -350,6 +359,8 @@ export function BlockList({
               bare={single}
               fill={fill}
               open={open}
+              noToggle={noToggle}
+              tag={tagOf?.(b)}
               zone={libZone}
               dup={dup}
               dragging={dragIdx === i}
@@ -396,11 +407,11 @@ export function BlockList({
               data-block-add
               onClick={() => {
                 pushUndo(t("common.undoBlockAdd"), () => onChange(blocks), libZone);
-                onChange([...blocks, makeBlock(t("block.newBlock"), [], { open: true })]);
+                onChange([...blocks, makeBlock(addAs?.name ?? t("block.newBlock"), [], { open: true })]);
               }}
               style={addBtn}
             >
-              {t("block.add")}
+              {addAs?.label ?? t("block.add")}
             </button>
           </div>
         </>

@@ -19,7 +19,7 @@ const SCHEDULERS = ["karras", "native", "exponential", "polyexponential"];
  *  오른쪽 기둥은 카드덱이 쓴다. 여기 있는 것들은 프롬프트와 함께 보면서 만지는 값이다.
  *  ★묶음마다 접힌다 — 한 기둥에 프롬프트까지 들어오므로 다 펴 두면 훑을 수가 없다.
  *    접기 단추는 따로 두지 않는다. **묶음 이름을 누르면** 접힌다. */
-export function OptionsPanel() {
+export function OptionsPanel({ only }: { /** 이 묶음만 — 만화 캔버스의 「공통」은 생성 옵션 하나 (해상도는 컷 모양이 정하고 저장 옵션은 생성 모드 것이다) */ only?: "gen" } = {}) {
   const p = useGen((s) => s.params);
   const set = useGen((s) => s.set);
   const t = useI18n((s) => s.t);
@@ -119,6 +119,7 @@ export function OptionsPanel() {
         </div>
       </Category>
 
+      {!only && (<>
       {/* v2 의 `Vibe / Character Ref` + `Base Image` 절 */}
       {/* ★걸린 그림을 알리는 딱지는 **생성 버튼 곁**이다 (`ImageInputBadge` → `GenerateFooter`) —
           이 묶음은 접히면 안이 통째로 언마운트돼서, 안에 두면 접힌 동안 아무 말도 못 한다 */}
@@ -181,7 +182,7 @@ export function OptionsPanel() {
               </Group>
         </div>
       </Category>
-
+      </>)}
     </div>
   );
 }

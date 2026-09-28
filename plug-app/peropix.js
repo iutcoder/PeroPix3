@@ -12,8 +12,6 @@
  *     peropix.onLocale((lang) => …);                     // 앱 언어가 바뀔 때 — 자기 문구를 다시 그린다
  *     await peropix.openCanvas();                        // 이 플러그인을 캔버스에 꺼내 맨 앞으로
  *     const me = await peropix.plugin();                 // 내 매니페스트
- *     const page = await peropix.comicPage();             // 지금 만화 페이지 캔버스 (서랍에서)
- *     await peropix.applyComic({ … });                   // 그 캔버스에 콘티를 깐다
  *
  * ★이 배관(postMessage·id 짝맞추기·시간 제한)을 플러그인마다 복사하던 것을 앱이 대신 준다 (사용자 지시 2026-09-10: 개발을 간단하게).
  * ★앱 밖(그냥 브라우저)에서 열면 부를 앱이 없다 — `peropix.inApp` 이 false 이고, 호출은 `{ ok: false }` 로 조용히 돌아온다.
@@ -25,7 +23,6 @@
   var pending = new Map();
   var themeHandlers = [];
   var localeHandlers = [];
-  var comicHandlers = [];
   var inApp = window.parent !== window;
 
   window.addEventListener("message", function (e) {
@@ -41,12 +38,6 @@
       document.documentElement.lang = d.locale;
       localeHandlers.forEach(function (fn) {
         try { fn(d.locale); } catch (err) { console.error("[peropix] onLocale", err); }
-      });
-      return;
-    }
-    if (d.event === "comicPage") {                                // 만화 캔버스가 바뀌었다 (서랍)
-      comicHandlers.forEach(function (fn) {
-        try { fn(d.page); } catch (err) { console.error("[peropix] onComicPage", err); }
       });
       return;
     }
@@ -126,17 +117,6 @@
     },
     /** 앱 토큰 값 (`"--accent"`). 이름 없이 부르면 지금 테마 이름 */
     theme: function (name) { return unwrap(call({ call: "theme", name: name || "" })); },
-    /** 지금 보고 있는 **만화 페이지 캔버스** (이미지 편집) — 만화 캔버스가 아니면 `null`.
-     *  `{ id, name, w, h, dir, frame, panels: [{ id, no, box, pts, frame, filled }], addon }` — 좌표는 캔버스 크기에 대한 0~1 */
-    comicPage: function () { return unwrap(call({ call: "comicPage" })); },
-    /** 지금 만화 캔버스에 콘티를 깐다 (컷·컷 프롬프트·인물 점·말풍선·페이지 그림). 여러 장이면 나머지는 새 캔버스로.
-     *  ★사람이 보는 일이 아니지만 그림을 읽어 오는 데 시간이 걸리므로 끊지 않는다 */
-    applyComic: function (payload) { return unwrap(call({ call: "applyComic", args: payload || {} }, 0)); },
-    /** 만화 캔버스가 바뀌거나 컷 구성이 바뀔 때 부른다 → 끊는 함수 */
-    onComicPage: function (fn) {
-      comicHandlers.push(fn);
-      return function () { comicHandlers = comicHandlers.filter(function (x) { return x !== fn; }); };
-    },
     /** 앱 번역 (`t("plugins.install")`) */
     t: function (key, args) { return unwrap(call({ call: "t", key: key, args: args })); },
     /** 지금 앱 언어 — `"ko"` | `"en"` | `"ja"`. 앱 밖에서는 브라우저 언어로 떨어진다 */

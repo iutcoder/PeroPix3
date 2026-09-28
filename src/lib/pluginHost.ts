@@ -68,7 +68,7 @@ export type PluginInfo = {
   web: string;
   /** 앱 페이지 안에서 돌 JS 주소들 */
   ext: string[];
-  contributes: { buttons?: DeclaredButton[]; drawers?: DeclaredDrawer[] } & Record<string, unknown>;
+  contributes: { buttons?: DeclaredButton[] } & Record<string, unknown>;
   /** 못 읽었으면 까닭. 비면 정상 */
   error: string;
   dir: string;
@@ -101,19 +101,12 @@ export type DeclaredButton = {
   do?: "openCanvas" | { action: string; args?: Record<string, unknown> };
 };
 
-/** `plugin.json` 의 `contributes.drawers[]` — **서랍 자리** (설계 `docs/comic-editor-design.md` 10-1).
- *  그 자리를 쓰는 화면이 오른쪽 레일에 아이콘을 세우고, 누르면 기둥 옆에 자기 열로 `page` 를 iframe 으로 연다.
- *  지금 자리는 `editor.comic` 하나 (이미지 편집의 만화 페이지 캔버스). 앱은 틀(머리·닫기·폭)만 그린다 */
-export type DeclaredDrawer = { slot: string; label: LocText; icon?: string; page: string; width?: number };
-export type PluginDrawer = { key: string; plugin: string; label: LocText; icon?: string; url: string; width: number };
-
 export type PluginButton = { key: string; plugin: string; label: LocText; icon?: string; onClick: () => void };
 export type PluginImage = { url: string; name: string };
 export type PluginMenuItem = { key: string; plugin: string; label: LocText; onClick: (img: PluginImage) => void };
 
 /** 자리 이름 — 여기 없는 이름으로 등록하면 아무 데도 안 그려진다 (오류는 아니다) */
 export const SLOTS = ["generate.footer", "nav.right"] as const;
-export const DRAWERS = ["editor.comic"] as const;
 export const MENUS = ["image.send"] as const;
 
 type S = {
@@ -123,7 +116,6 @@ type S = {
   loaded: boolean;
   buttons: Record<string, PluginButton[]>;
   menus: Record<string, PluginMenuItem[]>;
-  drawers: Record<string, PluginDrawer[]>;
   /** 목록을 읽고(언제나) 확장 JS 를 불러들인다(처음 한 번) */
   load: () => Promise<void>;
 };
@@ -139,11 +131,10 @@ export const usePlugins = create<S>((set) => ({
   loaded: false,
   buttons: {},
   menus: {},
-  drawers: {},
   async load() {
     const base = await backendUrl();
     const r = await api<{ dir: string; items: PluginInfo[] }>("/api/plugins");
-    set({ items: r.items, dir: r.dir, base, loaded: true, drawers: drawersOf(r.items) });
+    set({ items: r.items, dir: r.dir, base, loaded: true });
     if (extDone) return;
     extDone = true;
     installBridge();
@@ -181,25 +172,6 @@ export const usePlugins = create<S>((set) => ({
     }
   },
 }));
-
-/** 매니페스트가 적은 서랍 — 읽힌 플러그인 것만 (켜고 끄기는 그리는 쪽이 `isOn` 으로 거른다).
- *  ★페이지 주소는 플러그인 폴더 안이어야 한다 (`web/…` 처럼 적힌 상대 경로) */
-function drawersOf(items: PluginInfo[]): Record<string, PluginDrawer[]> {
-  const out: Record<string, PluginDrawer[]> = {};
-  for (const p of items) {
-    if (p.error) continue;
-    for (const d of p.contributes?.drawers ?? []) {
-      try {
-        if (!d?.slot || !d?.page || typeof d.page !== "string" || d.page.includes("..") || /^[a-z]+:/i.test(d.page)) continue;
-        const url = `/plug/${p.id}/${d.page.replace(/^\/+/, "")}`;
-        out[d.slot] = [...(out[d.slot] ?? []), { key: `${p.id}:${d.page}`, plugin: p.id, label: d.label || p.name, icon: d.icon, url, width: Math.max(260, Math.min(640, Number(d.width) || 340)) }];
-      } catch (e) {
-        console.error(`[plugins] ${p.id} 서랍`, e);
-      }
-    }
-  }
-  return out;
-}
 
 function push<T extends { key: string }>(map: Record<string, T[]>, k: string, item: T): Record<string, T[]> {
   const list = (map[k] ?? []).filter((x) => x.key !== item.key);
@@ -325,7 +297,7 @@ function watchTheme() {
     const now = currentTheme();
     if (now === last) return;
     last = now;
-    for (const f of pluginFrames()) {
+    for (const f of document.querySelectorAll<HTMLIFrameElement>("iframe[data-plugin-canvas]")) {
       f.contentWindow?.postMessage({ type: "peropix", event: "theme", theme: now }, "*");
     }
   };
@@ -343,7 +315,7 @@ function watchTheme() {
     if (font && font !== lastFont) { lastFont = font; msgs.push({ type: "peropix", event: "font", font }); }
     if (scale && scale !== lastScale) { lastScale = scale; msgs.push({ type: "peropix", event: "scale", scale }); }
     if (!msgs.length) return;
-    for (const f of pluginFrames()) {
+    for (const f of document.querySelectorAll<HTMLIFrameElement>("iframe[data-plugin-canvas]")) {
       for (const m of msgs) f.contentWindow?.postMessage(m, "*");
     }
   };
@@ -356,15 +328,11 @@ function watchTheme() {
     const now = useI18n.getState().locale;
     if (now === lastLoc) return;
     lastLoc = now;
-    for (const f of pluginFrames()) {
+    for (const f of document.querySelectorAll<HTMLIFrameElement>("iframe[data-plugin-canvas]")) {
       f.contentWindow?.postMessage({ type: "peropix", event: "locale", locale: now }, "*");
     }
   });
 }
-
-/** 플러그인 페이지가 든 iframe 전부 — 캔버스(`data-plugin-canvas`)와 서랍(`data-plugin-frame`).
- *  ★서랍을 캔버스 표식으로 달지 않는다 — 플러그인 모드의 캔버스가 그 표식으로 「맨 앞으로」를 셈한다 (`PluginCanvas`) */
-export const pluginFrames = () => [...document.querySelectorAll<HTMLIFrameElement>("iframe[data-plugin-canvas], iframe[data-plugin-frame]")];
 
 /** `<html>` 에 꽂힌 앱 토큰 값 (`--font-sans`·`--text-scale`) */
 function rootVar(name: string): string {
@@ -388,9 +356,9 @@ function installBridge() {
     let origin = "";
     try { origin = new URL(base).origin; } catch { /* 아직 모르면 아래 프레임 대조만 */ }
     if (origin && e.origin !== origin) return;
-    const frame = pluginFrames().find((f) => f.contentWindow === e.source);
+    const frame = [...document.querySelectorAll<HTMLIFrameElement>("iframe[data-plugin-canvas]")].find((f) => f.contentWindow === e.source);
     if (!frame) return;
-    const pid = frame.getAttribute("data-plugin-canvas") ?? frame.getAttribute("data-plugin-frame") ?? "";
+    const pid = frame.getAttribute("data-plugin-canvas") ?? "";
     const p = usePlugins.getState().items.find((x) => x.id === pid);
     if (!p) return;
     const reply = (msg: Record<string, unknown>) => (e.source as Window | null)?.postMessage({ type: "peropix", id: d.id, ...msg }, e.origin || "*");
@@ -421,11 +389,6 @@ function installBridge() {
           case "t": result = t(String(d.key ?? d.name ?? ""), d.args as Record<string, string | number> | undefined); break;
           case "locale": result = a.locale(); break;
           case "plugin": result = { id: p.id, name: pickText(p.name), version: p.version, backend: base }; break;
-          /* ★만화 페이지 캔버스 (설계 10-3). 편집기는 지연 로드라 그때 불러온다 — 앱 첫 화면이 편집기를 싣지 않게.
-             ★조수의 앱 액션(`appActions`)으로 두지 않는다: 그 목록은 AI 조수의 도구 목록이기도 해서, 콘티를 통째로 받는
-               창구가 조수에게 도구로 보이게 된다 */
-          case "comicPage": result = (await import("../editor/comicBridge")).comicPage(); break;
-          case "applyComic": result = await (await import("../editor/comicBridge")).applyComic(d.args ?? {}, p.id, pickText(p.name)); break;
           default: throw new Error(`모르는 호출: ${d.call}`);
         }
         reply({ ok: true, result });

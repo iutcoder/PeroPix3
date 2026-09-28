@@ -37,6 +37,10 @@ import { Tools } from "./panels/Tools";
 /* ★★이미지 편집은 **지연 로드** (사용자 지시 2026-09-22: "이미지 편집이 크다고 하니까 분리"). 픽셀 편집기가
    다른 화면의 첫 그림을 늦추지 않게, 그 모드에 처음 들어갈 때 받는다. */
 const Editor = lazy(() => import("./editor/Editor"));
+/* ★만화 캔버스의 왼쪽 패널(공통 · 컷 편집)과 컷 생성 푸터 — 편집기와 같은 덩이로 늦게 받는다 (설계 8-1) */
+const ComicLeft = lazy(() => import("./editor/ComicPanel").then((m) => ({ default: m.ComicLeft })));
+const ComicFooter = lazy(() => import("./editor/ComicPanel").then((m) => ({ default: m.ComicFooter })));
+import { useComicOn } from "./editor/comicFlag";
 import { Plugins } from "./panels/Plugins";
 import { PluginPanel } from "./panels/PluginPanel";
 import { usePlugins } from "./lib/pluginHost";
@@ -79,6 +83,8 @@ export function App() {
   const health = useHealth((s) => s.health);
   const dead = useHealth((s) => s.dead);
   const mode = useUi((s) => s.mode);
+  /** 이미지 편집에서 만화 캔버스를 보고 있나 — 그때만 왼쪽 패널(공통 · 컷 편집)이 선다 */
+  const comicLeft = useComicOn((s) => s.on) && mode === "editor";
   // ★여기서 구독해야 언어를 바꿨을 때 패널 머리글이 따라 바뀐다 (tGlobal 은 구독이 아니다)
   const tr = useI18n((s) => s.t);
   const initGen = useGen((s) => s.init);
@@ -310,11 +316,15 @@ export function App() {
            이미 만든 것을 다루는 화면에 뜨면 "여기서 고치면 뭐가 되나"가 흐려진다.
            갤러리는 기둥을 쓴다(폴더·그림 정보). 검열·보조 도구는 **레일도 안 남긴다** —
            열 것이 없는 레일은 막다른 길이다. */
-        hideLeft={mode !== "generate" && mode !== "gallery"}
+        hideLeft={mode !== "generate" && mode !== "gallery" && !comicLeft}
         hideRight={mode !== "generate" && mode !== "gallery" && mode !== "plugins"}
         left={
           mode === "gallery" ? (
             <GalleryFolders />
+          ) : comicLeft ? (
+            <Suspense fallback={null}>
+              <ComicLeft />
+            </Suspense>
           ) : (
             <LeftPanel onThumb={(section, img) => setThumbAsk({ type: "section", section, img })} />
           )
@@ -335,8 +345,8 @@ export function App() {
           ) : undefined
         }
         /* 최종 프롬프트 바로 아래, 패널 맨 밑에 **고정**. 접어도 버튼은 레일에 남는다 */
-        leftFooter={mode === "generate" ? <GenerateFooter /> : undefined}
-        leftFooterCompact={mode === "generate" ? <GenerateFooter compact /> : undefined}
+        leftFooter={mode === "generate" ? <GenerateFooter /> : comicLeft ? <Suspense fallback={null}><ComicFooter /></Suspense> : undefined}
+        leftFooterCompact={mode === "generate" ? <GenerateFooter compact /> : comicLeft ? <Suspense fallback={null}><ComicFooter compact /></Suspense> : undefined}
         right={
           mode === "gallery" ? (
             <GalleryMeta />

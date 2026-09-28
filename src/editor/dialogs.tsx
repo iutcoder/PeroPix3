@@ -3,13 +3,13 @@ import { useI18n } from "../i18n";
 import { Icon } from "../components/Icon";
 import { Line, box, dropFocus, on } from "../panels/censor/ui";
 import { sizePreview, withRatio, type Anchor, type Fill, type Size } from "./model";
-import { LAYOUTS, paperPx, type Dir, type Dpi, type PaperId } from "./comic";
+import { LAYOUTS, pageLabel, paperPx, type Dir, type Dpi, type PaperId } from "./comic";
 import { LayoutThumb } from "./comicUi";
 import { composite, exportDataUrl } from "./pixels";
 import { api } from "../lib/backend";
 import { toast } from "../store/toast";
 import { useUi } from "../store/ui";
-import { useEditor, type Doc } from "./store";
+import { pageView, useEditor, type Doc } from "./store";
 
 /** 캔버스 크기 — 목업 ③ 그대로 (사용자 지적 2026-09-22: 생김새가 목업과 많이 달랐다).
  *  왼쪽에 폭·높이(지금 값이 오른쪽에 흐리게) · 빈 자리 · 기준점(3×3 화살표), 오른쪽에 미리보기.
@@ -304,19 +304,18 @@ export function NewCanvasDialog({ onClose }: { onClose: () => void }) {
   );
 }
 
-/** 만화 페이지 여러 장을 **한 번에** 내보낸다 (설계 11번) — 이름 차례(숫자는 수로)로 `<이름>_01.png` …, ZIP 하나, PDF 하나.
+/** 만화 캔버스의 페이지 여러 장을 **한 번에** 내보낸다 (설계 11번) — 페이지 차례로 `<이름>_01.png` …, ZIP 하나, PDF 하나.
  *  ★저장 폴더는 한 장 저장의 「저장 폴더 지정」과 같은 값(`useUi.editLast.dest`)을 쓴다. 메타데이터는 한 장 저장과 같이 민다 */
-export function ExportPagesDialog({ onClose }: { onClose: () => void }) {
+export function ExportPagesDialog({ doc, onClose }: { doc: Doc; onClose: () => void }) {
   const t = useI18n((s) => s.t);
-  const docs = useEditor((s) => s.docs);
-  const pages = docs.filter((d) => d.comic).sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
-  const [pick, setPick] = useState<string[]>(() => pages.map((d) => d.id));
+  const pages = doc.comic?.pages ?? [];
+  const [pick, setPick] = useState<string[]>(() => [...pages]);
   const [fmt, setFmt] = useState<"png" | "webp" | "zip" | "pdf">("png");
-  const [name, setName] = useState(() => commonStem(pages.map((d) => d.name)));
+  const [name, setName] = useState(() => doc.name);
   const dest = useUi((s) => s.editLast.dest);
   const setEditLast = useUi((s) => s.setEditLast);
   const [busy, setBusy] = useState(false);
-  const chosen = pages.filter((d) => pick.includes(d.id));
+  const chosen = pages.filter((p) => pick.includes(p));
   const pickDir = async () => {
     try {
       const r = await api<{ dir: string | null }>("/api/files/pick-dir", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ start: dest }) });
@@ -330,7 +329,7 @@ export function ExportPagesDialog({ onClose }: { onClose: () => void }) {
     if (!dest) return toast(t("editor.needDest"), "warn");
     setBusy(true);
     try {
-      const images = chosen.map((d) => exportDataUrl(d));
+      const images = chosen.map((p) => exportDataUrl(pageView(doc, p)));
       const r = await api<{ files: string[]; dir: string }>("/api/edit/export-pages", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -348,14 +347,13 @@ export function ExportPagesDialog({ onClose }: { onClose: () => void }) {
   return (
     <Modal title={t("editor.exportPages")} mark="editor-export-pages" onOk={() => void run()} onClose={onClose} okLabel={busy ? t("editor.exporting") : t("editor.export")} width={420}>
       <div data-export-pages-list style={{ display: "flex", flexDirection: "column", gap: 2, maxHeight: 200, overflowY: "auto", border: "1px solid var(--line)", borderRadius: "var(--r-2)", padding: 4, background: "var(--panel)" }}>
-        {pages.map((d, i) => {
-          const onIt = pick.includes(d.id);
+        {pages.map((p, i) => {
+          const onIt = pick.includes(p);
           return (
-            <label key={d.id} data-export-page={d.id} style={{ display: "flex", alignItems: "center", gap: 8, padding: "3px 6px", fontSize: "var(--text-xs)", color: onIt ? "var(--ink)" : "var(--ink-faint)", cursor: "pointer" }}>
-              <input type="checkbox" checked={onIt} onChange={() => setPick(onIt ? pick.filter((x) => x !== d.id) : [...pick, d.id])} />
-              <span style={{ width: 22, color: "var(--ink-faint)", fontVariantNumeric: "tabular-nums" }}>{i + 1}</span>
-              <span style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{d.name}</span>
-              <span style={{ color: "var(--ink-ghost)", fontSize: "var(--text-3xs)" }}>{d.w} × {d.h}</span>
+            <label key={p} data-export-page={i + 1} style={{ display: "flex", alignItems: "center", gap: 8, padding: "3px 6px", fontSize: "var(--text-xs)", color: onIt ? "var(--ink)" : "var(--ink-faint)", cursor: "pointer" }}>
+              <input type="checkbox" checked={onIt} onChange={() => setPick(onIt ? pick.filter((x) => x !== p) : [...pick, p])} />
+              <span style={{ flex: 1, minWidth: 0, fontVariantNumeric: "tabular-nums" }}>{pageLabel(i)}</span>
+              <span style={{ color: "var(--ink-ghost)", fontSize: "var(--text-3xs)" }}>{doc.w} × {doc.h}</span>
             </label>
           );
         })}
@@ -376,13 +374,4 @@ export function ExportPagesDialog({ onClose }: { onClose: () => void }) {
       <span data-export-preview style={{ fontSize: "var(--text-2xs)", color: "var(--ink-faint)" }}>{t("tools.preview", { s: `${name.trim() || "page"}${ext}` })} · {t("editor.exportCount", { n: chosen.length })}</span>
     </Modal>
   );
-}
-
-/** 여러 이름의 공통 앞부분 — 끝의 구분 글자(`_`·`-`·공백·`p.`)를 걷는다. 없으면 첫 이름 */
-function commonStem(names: string[]): string {
-  if (!names.length) return "page";
-  let p = names[0];
-  for (const n of names) while (!n.startsWith(p)) p = p.slice(0, -1);
-  p = p.replace(/[\s_\-.]*(p|page|쪽)?[\s_\-.]*$/i, "").trim();
-  return p || names[0];
 }
