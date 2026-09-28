@@ -24,6 +24,7 @@ import type { Block } from "../lib/blocks";
 import type { CharCard, StyleCard } from "../store/cards";
 import { pickStyleOpts } from "../lib/styleOpts";
 import { PromptOptsBar } from "./PromptOpts";
+import { CharNo } from "./CharPositioner";
 
 /** 프롬프트 섹션들 — 스타일(공통) 하나 + 캐릭터 여럿.
  *  NAI 요청 구조 그대로다: 공통 `prompt/uc` 한 벌 + `characterPrompts[]`. */
@@ -245,6 +246,10 @@ export function CharSection({
      ★훅을 두 번 부르지 않는다: `||` 로 이으면 뒤엣것이 **조건부 호출**이 된다. */
   const char_ = useFlashAt<HTMLDivElement>([`prompt:${ch.id}`, `prompt:${ch.name}`]);
   const name = ch.name || t("cards.charN", { n: index + 1 });
+  /* ★인물 번호 — 배치 판을 **열었을 때만** 이름 뒤에 선다 (사용자 지시 2026-09-28). 판의 마커와
+     같은 번호다: 켜진 인물 중 몇 번째인가 (`CharPositioner` 의 `live`) */
+  const positioning = useUi((u) => u.positioning);
+  const liveNo = usePrompt((s) => (ch.on ? s.chars.filter((c) => c.on).indexOf(ch) + 1 : 0));
   return (
     <>
       {/* ★조수가 이 인물을 고쳤으면 여기를 강조한다 (`lib/agentAt` 의 `prompt:<id>`) */}
@@ -273,6 +278,7 @@ export function CharSection({
            띄우던 자리다. 연필 단추는 `SectionCard` 가 스스로 단다. */
         onRename={(v) => renameChar(ch.id, v)}
         renameTip={t("cards.rename")}
+        nameTag={positioning && liveNo > 0 ? <CharNo n={liveNo} size={20} ring={1.5} bg="rgba(0,0,0,0.42)" /> : null}
         /* ★★차례 바꾸기는 **위아래 단추**이고, 자리는 **이름변경 앞**이다
            (사용자 지시 2026-08-21).
            끌기로 만들었다가 걷었다: 배너를 끄는 것은 이미 **덱에 저장**이라
