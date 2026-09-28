@@ -1,5 +1,5 @@
 import { useI18n } from "../i18n";
-import { useState } from "react";
+import { useLayoutEffect, useRef, useState } from "react";
 import { compileBlocks, makeBlock } from "../lib/blocks";
 import { usePrompt } from "../store/prompt";
 import { canEnableChar } from "../store/gen";
@@ -14,6 +14,14 @@ import { useDrag } from "../cards/dragStore";
 import { QueueLanes } from "./QueueLanes";
 import { Icon } from "../components/Icon";
 
+/** ★★스크롤 자리는 **모듈이 들고 있는다** (사용자 지적 2026-09-28: 모드를 옮겼다 오면
+ *  좌측 패널이 맨 위로 돌아가 있다). 다른 모드로 가면 이 패널이 통째로 언마운트되므로
+ *  (`Shell` 은 모드마다 좌측 내용을 갈아 끼우고, 검열·보조 도구에서는 패널을 빼 버린다)
+ *  컴포넌트 안에 두면 돌아올 때 0 에서 다시 시작한다.
+ *  ★되돌리기는 곧바로 한 번, 그린 뒤 두 번 더 한다 — 내용이 한 박자 늦게 자라면 첫 번에는
+ *    그 높이까지 못 내려간다 (`lib/keepScroll` 과 같은 이유). */
+let keptTop = 0;
+
 /** 좌측 패널 — 카드형 섹션 안에 블록 시퀀스.
  *  스타일 섹션(= NAI 의 공통 prompt/uc) 하나 + 캐릭터 섹션 여럿(= characterPrompts[]). */
 export function PromptPanel({ onThumb }: SectionProps) {
@@ -25,12 +33,36 @@ export function PromptPanel({ onThumb }: SectionProps) {
   const dragImg = useDrag((s) => s.drag?.dir === "image");
   const t = useI18n((s) => s.t);
   const [preview, setPreview] = useState(false);
+  const scroller = useRef<HTMLDivElement>(null);
+  useLayoutEffect(() => {
+    const el = scroller.current;
+    if (!el || !keptTop) return;
+    const top = keptTop;
+    const put = () => {
+      if (el.scrollTop !== top) el.scrollTop = top;
+    };
+    put();
+    let r2 = 0;
+    const r1 = requestAnimationFrame(() => {
+      put();
+      r2 = requestAnimationFrame(put);
+    });
+    return () => {
+      cancelAnimationFrame(r1);
+      cancelAnimationFrame(r2);
+    };
+  }, []);
 
   return (
     // ★`height: 100%` 가 아니라 `flex: 1` 이다 — 아래에 생성 푸터가 형제로 붙으므로,
     //   100% 를 잡으면 푸터가 화면 밖으로 밀려난다 (실측 2026-08-04)
     <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}>
-      <div style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: "var(--sp-4) var(--sp-4) 0" }}>
+      <div
+        ref={scroller}
+        data-prompt-scroll
+        onScroll={(e) => (keptTop = e.currentTarget.scrollTop)}
+        style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: "var(--sp-4) var(--sp-4) 0" }}
+      >
         {/* ★그릇 이름은 **payload 의 어느 칸인가**, 카드 이름은 **무엇을 저장하는가**
             (사용자 지시 2026-08-11). 그래서 베이스만 쓰는 사람은 카드를 안 꽂고 그 칸에 바로
             적으면 되고, 스타일을 저장해 두는 사람은 「스타일 카드」로 알아본다.
