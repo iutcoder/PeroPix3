@@ -172,10 +172,7 @@ export function Shell({
               />
               {/* ★푸터는 스크롤 **밖**이다 — 안에 있으면 프롬프트를 내릴 때 생성 버튼이
                   같이 밀려 올라간다 (페로픽스파이 `params-footer` 와 같은 자리) */}
-              {/* ★표식이 있어야 「설정 불러오기」가 **보던 자리를 고정**할 수 있다
-                  (`lib/keepScroll`) — 불러오면 접힌 묶음이 펴지고 내용이 늘어 화면이 움직인다 */}
               <div
-                data-left-scroll
                 style={{ flex: 1, minHeight: 0, overflowY: "auto", display: "flex", flexDirection: "column" }}
               >
                 {left}
