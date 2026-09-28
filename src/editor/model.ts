@@ -109,6 +109,38 @@ export function layerToDoc(l: Xform & { sw: number; sh: number }, sx: number, sy
   return { x: c.x + rx * Math.cos(r) - ry * Math.sin(r), y: c.y + rx * Math.sin(r) + ry * Math.cos(r) };
 }
 
+/** 「아래와 합치기」 전에 아래 레이어를 얼마나 넓히나 — 위 레이어(캔버스 안에 든 만큼)가 아래 레이어의 원본 픽셀 밖으로 나가면
+ *  그만큼 네 변에 덧붙일 픽셀(`pad`)과 넓힌 뒤의 변형. 다 들어가면 null.
+ *  ★예전에는 아래 레이어의 원본에 그대로 그려 상자 밖이 잘려 나갔다 (사용자 결정 2026-09-28: 넓혀서 잘리지 않게).
+ *  ★캔버스 밖은 넓히지 않는다 — 보이지 않는 자리에 픽셀을 늘리면 메모리만 든다. 아래 레이어의 돌림·뒤집기·배율은 그대로다 */
+export function growFor(
+  below: Xform & { sw: number; sh: number },
+  top: Xform,
+  doc: Size,
+): { pad: { l: number; t: number; r: number; b: number }; xform: Xform & { sw: number; sh: number } } | null {
+  const cs = cornersOf(top);
+  const x0 = Math.max(0, Math.min(...cs.map((p) => p.x)));
+  const y0 = Math.max(0, Math.min(...cs.map((p) => p.y)));
+  const x1 = Math.min(doc.w, Math.max(...cs.map((p) => p.x)));
+  const y1 = Math.min(doc.h, Math.max(...cs.map((p) => p.y)));
+  if (x1 <= x0 || y1 <= y0) return null;
+  const q = [[x0, y0], [x1, y0], [x1, y1], [x0, y1]].map(([x, y]) => docToLayer(below, x, y));
+  const pad = {
+    l: Math.max(0, Math.ceil(-Math.min(...q.map((p) => p.x)) - 1e-6)),
+    t: Math.max(0, Math.ceil(-Math.min(...q.map((p) => p.y)) - 1e-6)),
+    r: Math.max(0, Math.ceil(Math.max(...q.map((p) => p.x)) - below.sw - 1e-6)),
+    b: Math.max(0, Math.ceil(Math.max(...q.map((p) => p.y)) - below.sh - 1e-6)),
+  };
+  if (!pad.l && !pad.t && !pad.r && !pad.b) return null;
+  const sw = below.sw + pad.l + pad.r;
+  const sh = below.sh + pad.t + pad.b;
+  const w = sw * (below.w / below.sw);
+  const h = sh * (below.h / below.sh);
+  // 넓힌 원본의 가운데가 문서의 어디인가 — 옛 원본 좌표로 (-l + 새 폭/2) 자리다
+  const c = layerToDoc(below, sw / 2 - pad.l, sh / 2 - pad.t);
+  return { pad, xform: { x: c.x - w / 2, y: c.y - h / 2, w, h, rot: below.rot, flipH: below.flipH, flipV: below.flipV, sw, sh } };
+}
+
 /** 상자 크기가 바뀌어도 **닻**(정렬 쪽의 위 모서리 — 왼쪽 정렬은 왼쪽 위, 가운데는 위 가운데, 오른쪽은 오른쪽 위)의 화면 자리를
  *  지키는 새 x·y. ★돌려 둔 글자 레이어는 글자를 칠 때마다 상자가 넓어지는데, x·y 를 그대로 두면 회전 중심(상자 가운데)이 옆으로
  *  옮겨 가 글 전체가 밀린다 (사용자 지적 2026-09-22: 한 글자마다 상자가 위로 올라갔다). 안 돌린 왼쪽 정렬이면 x·y 그대로다 */

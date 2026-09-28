@@ -14,11 +14,11 @@ import { useUi } from "../store/ui";
 import { ask } from "../store/ask";
 import type { Dropped } from "../lib/dropImages";
 import {
-  FILL_COLOR, NO_ADJUST, canvasShift, cropShift, destOf, dirOf, docToLayer, emptyHist, growsBeyond, hasAdjust, keepAnchor, nextName, placeNew, pushHist,
+  FILL_COLOR, NO_ADJUST, canvasShift, cropShift, destOf, dirOf, docToLayer, emptyHist, growFor, growsBeyond, hasAdjust, keepAnchor, nextName, placeNew, pushHist,
   redoHist, rotate90 as rot90, saveNameOf, scaleXform, textLayerName, undoHist,
   type Adjust, type Anchor, type Fill, type Hist, type Rect, type TextMeta,
 } from "./model";
-import { bakeBubble, bakePanel, bakeSfx, bakeStroke, bucketFill, clipOf, cloneCanvas, exportDataUrl, fillAround, fitBubble, makeCanvas, mergeInto, rebakeText, renderText, type Layer, type Stroke } from "./pixels";
+import { bakeBubble, bakePanel, bakeSfx, bakeStroke, bucketFill, clipOf, cloneCanvas, exportDataUrl, fillAround, fitBubble, makeCanvas, mergeInto, padCanvas, rebakeText, renderText, type Layer, type Stroke } from "./pixels";
 import { newSfx, withStyle, type SfxMeta, type SfxStyleId } from "./sfx";
 import type { Fx } from "./fx";
 import {
@@ -607,7 +607,10 @@ export const useEditor = create<S>((set, get) => {
         if (!top || !below) return null;
         // ★합친 결과는 보통 레이어다 — 아래가 글자 레이어였어도 원문을 떼어 낸다 (남기면 다음 고치기가 합친 것을 지운다).
         //   위가 컷에 든 그림이면 그 컷 모양으로 잘라 넣는다
-        const merged: Layer = { ...below, text: undefined, sfx: undefined, cv: mergeInto(below, top, top.clip !== below.clip ? clipOf(d.layers, top) : null) };
+        //   ★위가 아래 상자 밖으로 나가면 아래를 먼저 넓힌다 — 안 넓히면 밖으로 나간 자리가 잘려 나간다 (사용자 결정 2026-09-28)
+        const g = growFor(below, top, d);
+        const base: Layer = g ? { ...below, ...g.xform, cv: padCanvas(below.cv, g.pad) } : below;
+        const merged: Layer = { ...base, text: undefined, sfx: undefined, cv: mergeInto(base, top, top.clip !== below.clip ? clipOf(d.layers, top) : null) };
         const layers = d.layers.filter((_, k) => k !== i).map((x) => (x.id === below.id ? merged : x));
         return { layers, sel: [below.id] };
       });

@@ -541,6 +541,13 @@ export function bakeStroke(l: Layer, st: Stroke): HTMLCanvasElement {
   return cv;
 }
 
+/** 원본 픽셀의 네 변에 투명한 픽셀을 덧붙인다 (`model.growFor` 의 `pad`) */
+export function padCanvas(src: HTMLCanvasElement, pad: { l: number; t: number; r: number; b: number }): HTMLCanvasElement {
+  const cv = makeCanvas(src.width + pad.l + pad.r, src.height + pad.t + pad.b);
+  cv.getContext("2d")!.drawImage(src, pad.l, pad.t);
+  return cv;
+}
+
 /** 위 레이어를 아래 레이어의 **원본 픽셀 공간**에 그려 넣는다 → 아래 레이어의 새 캔버스.
  *  아래 레이어의 변형은 그대로 두고, 위 레이어는 문서 좌표로 그린 것을 아래의 역변환으로 받는다. */
 export function mergeInto(below: Layer, top: Layer, clip?: Pt[] | null): HTMLCanvasElement {
