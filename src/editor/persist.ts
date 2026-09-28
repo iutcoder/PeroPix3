@@ -11,6 +11,7 @@
  *    잠깐 기다린다 (`hookClose`, 최대 1.5초).
  *  ★★켜서 다 읽기 전에는 적지 않는다 (`store.ts` 의 `hydrated`) — 빈 상태로 덮어쓰면 남긴 것이 전부 휴지통으로 간다. */
 import { emptyHist, type LayerMeta } from "./model";
+import { fxListOf } from "./fx";
 import { getPx, loadState, putPx, putState, type PersistDoc } from "./io";
 import { bakeBubble, bakePanel, bakeSfx, ensureFont, fitBubble, rebakeText, type Layer } from "./pixels";
 import type { Doc } from "./store";
@@ -146,7 +147,8 @@ export async function loadDocs(): Promise<{ docs: Doc[]; cur: string | null }> {
         void _px;
         keyOf.set(cv, l.px);
         uploaded.add(cv);
-        const layer: Layer = { ...meta, cv };
+        // ★효과는 목록이다 — 한 개짜리로 남은 옛 저장본도 목록으로 맞춘다 (`fxListOf`)
+        const layer: Layer = { ...meta, fx: fxListOf(meta.fx), cv };
         // ★글자 레이어는 원문에서 **다시 굽는다** — 굽는 셈을 고쳐도 남겨 둔 레이어가 옛 픽셀로 남지 않게 (사용자 지적 2026-09-22).
         //   다시 구운 캔버스는 `uploaded` 에 없어 첫 flush 가 올린다 (켤 때마다 한 번, 작다). 글꼴은 먼저 싣는다
         if (layer.text) await ensureFont(layer.text);

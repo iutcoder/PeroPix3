@@ -6,7 +6,7 @@
 import { centerOf, filterOf, floodFill, hexRgb, layoutText, rad, textBaseline, type LayerMeta, type Rect, type Size, type TextMeta, type Xform } from "./model";
 import { bodyFor, bubbleBounds, bubbleShape, panelPts, wrapLines, type BubbleMeta, type ComicPage, type PanelMeta, type Pt } from "./comic";
 import { SFX_FALLBACK, layoutSfx, primaryFamily, sfxBounds, type Glyph, type SfxMeta } from "./sfx";
-import { FX_AMT, applyFx, fxKey, type Fx, type FxKind } from "./fx";
+import { FX_AMT, applyFx, applyFxList, fxListKey, liveFx, type Fx, type FxKind } from "./fx";
 
 export type Layer = LayerMeta & { cv: HTMLCanvasElement };
 
@@ -58,7 +58,7 @@ const fxDone = new WeakMap<HTMLCanvasElement, Map<string, HTMLCanvasElement>>();
 /** 캔버스마다 가장 최근에 다 된 것 — 새 것이 셈 중일 때 대신 보여 준다 */
 const fxLast = new WeakMap<HTMLCanvasElement, HTMLCanvasElement>();
 /** 워커에 맡길 차례를 기다리는 것 (캔버스마다 가장 최근 것 하나만) · 맡겨 둔 캔버스 */
-const fxWant = new WeakMap<HTMLCanvasElement, Fx>();
+const fxWant = new WeakMap<HTMLCanvasElement, Fx[]>();
 const fxBusy = new WeakSet<HTMLCanvasElement>();
 const fxListeners = new Set<() => void>();
 /** 워커가 효과를 다 셈하면 불린다 — 무대가 다시 그린다 */
@@ -120,18 +120,19 @@ function pumpFx(cv: HTMLCanvasElement, wk: Worker) {
   const id = nextJob++;
   jobs.set(id, (buf) => {
     fxBusy.delete(cv);
-    keepFx(cv, fxKey(fx), fxCanvasOf(cv.width, cv.height, new Uint8ClampedArray(buf)));
+    keepFx(cv, fxListKey(fx), fxCanvasOf(cv.width, cv.height, new Uint8ClampedArray(buf)));
     pumpFx(cv, wk);
     fxListeners.forEach((f) => f());
   });
   wk.postMessage({ id, data: data.buffer, w: cv.width, h: cv.height, fx }, [data.buffer]);
 }
 
-/** 레이어 픽셀에 효과를 입힌 것. `live`(무대)면 워커에 맡기고 다 될 때까지 앞의 결과(없으면 원본)를 준다 —
+/** 레이어 픽셀에 효과(목록, 건 차례대로)를 입힌 것. `live`(무대)면 워커에 맡기고 다 될 때까지 앞의 결과(없으면 원본)를 준다 —
  *  ★저장·합치기·미리보기는 `live` 없이 불러 **그 자리에서** 셈한 정확한 것을 받는다 */
-export function withFx(cv: HTMLCanvasElement, fx: Fx | null | undefined, live = false): HTMLCanvasElement {
-  if (!fx || fx.amt <= 0) return cv;
-  const key = fxKey(fx);
+export function withFx(cv: HTMLCanvasElement, list: readonly Fx[] | null | undefined, live = false): HTMLCanvasElement {
+  const fx = liveFx(list);
+  if (!fx.length) return cv;
+  const key = fxListKey(fx);
   const hit = fxDone.get(cv)?.get(key);
   if (hit) {
     fxLast.set(cv, hit);
@@ -140,7 +141,7 @@ export function withFx(cv: HTMLCanvasElement, fx: Fx | null | undefined, live = 
   const wk = live ? fxWorker() : null;
   if (!wk) {
     const data = cv.getContext("2d")!.getImageData(0, 0, cv.width, cv.height).data;
-    const out = fxCanvasOf(cv.width, cv.height, applyFx(data, cv.width, cv.height, fx));
+    const out = fxCanvasOf(cv.width, cv.height, applyFxList(data, cv.width, cv.height, fx));
     keepFx(cv, key, out);
     return out;
   }

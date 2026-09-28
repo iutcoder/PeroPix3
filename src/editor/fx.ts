@@ -6,6 +6,8 @@
  *  ★크기에 매인 값(줄 간격·밀기 폭·흐림 반경)은 전부 **그림의 짧은 변**에 비례한다 (`unitOf`). 그래야 1216×832 원본과
  *    효과 칸의 작은 미리보기가 같은 모양이 된다.
  *  ★무작위가 드는 효과(글리치·VHS·필름)는 `seed` 로 정해진다 — 화면에 보인 것과 저장된 것이 같아야 한다.
+ *  ★**여럿을 겹쳐 건다** (사용자 지시 2026-09-28) — 레이어는 목록(`Fx[]`)을 들고, **건 차례대로** 입힌다 (`applyFxList`).
+ *    같은 효과를 두 번 걸지는 않는다 (칸을 다시 누르면 뺀다).
  *  ★강도 0 이면 원본 그대로다. 각 효과는 강도를 **세기에** 쓰고(줄이 옅어지고 밀림이 줄어든다), 겹쳐 섞지 않는다
  *    (글리치를 반만 섞으면 두 겹으로 비친다). 하프톤만 섞는다 — 망점 크기는 인쇄처럼 정해져 있어야 한다. */
 
@@ -17,6 +19,15 @@ export type Fx = { kind: FxKind; amt: number; seed: number };
 /** 효과를 처음 고를 때의 강도 */
 export const FX_AMT = 60;
 export const fxKey = (fx: Fx) => `${fx.kind}:${fx.amt}:${fx.seed}`;
+/** 목록의 열쇠 — 차례까지 같아야 같은 결과다 */
+export const fxListKey = (list: readonly Fx[]) => list.map(fxKey).join("|");
+/** 실제로 걸리는 것만 (강도 0 은 뺀다) */
+export const liveFx = (list: readonly Fx[] | null | undefined): Fx[] => (list ?? []).filter((f) => f.amt > 0);
+/** 저장본을 읽을 때 — 한 개짜리(옛 모양)도 목록으로 맞춘다 */
+export const fxListOf = (raw: unknown): Fx[] | null => {
+  const list = (Array.isArray(raw) ? raw : raw ? [raw] : []).filter((f): f is Fx => !!f && typeof f === "object" && typeof (f as Fx).kind === "string");
+  return list.length ? list : null;
+};
 export const newSeed = () => Math.floor(Math.random() * 0x7fffffff);
 
 /** 효과를 입힌 새 바이트 — `src` 는 건드리지 않는다 */
@@ -35,6 +46,13 @@ export function applyFx(src: Uint8ClampedArray, w: number, h: number, fx: Fx): U
     vignette: () => vignette(src, w, h, t),
   }[fx.kind];
   return run ? run() : new Uint8ClampedArray(src);
+}
+
+/** 목록을 건 차례대로 입힌다 — 빈 목록이면 사본 */
+export function applyFxList(src: Uint8ClampedArray, w: number, h: number, list: readonly Fx[]): Uint8ClampedArray {
+  let out = src;
+  for (const fx of list) out = applyFx(out, w, h, fx);
+  return out === src ? new Uint8ClampedArray(src) : out;
 }
 
 /* ── 도구 ───────────────────────────────────────────────────────── */

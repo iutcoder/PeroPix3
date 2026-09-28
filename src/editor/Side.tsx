@@ -14,7 +14,7 @@ import { useUi } from "../store/ui";
 import { Hint, Line, Sec, box, dropFocus, num, on } from "../panels/censor/ui";
 import { NO_ADJUST, hasAdjust, withRatio } from "./model";
 import { fxThumb, thumbOf, type Layer } from "./pixels";
-import { FX_AMT, FX_KINDS, FX_SEEDED, newSeed, type FxKind } from "./fx";
+import { FX_AMT, FX_KINDS, FX_SEEDED, newSeed, type Fx, type FxKind } from "./fx";
 import { primaryOf, saveName, useEditor, whereOf, type Doc } from "./store";
 import { CanvasSizeDialog, ExportPagesDialog, ImageSizeDialog } from "./dialogs";
 import { BubbleKindIcon, CAST_COLORS } from "./comicUi";
@@ -323,23 +323,23 @@ const FX_LABEL = {
 /** 효과 칸의 미리보기 크기 (화면 크기의 두 배로 굽는다) */
 const FX_TILE = { w: 168, h: 112 };
 
-/** 효과 — 칸마다 고른 레이어에 그 효과를 입힌 작은 그림이 뜨고, 누르면 걸린다. 걸린 뒤에는 강도와 (무작위가 드는 것은) 다시 섞기.
- *  떼는 것은 보정과 같이 머리의 「초기화」다 (아홉 칸이 3×3 으로 맞아떨어진다) */
+/** 효과 — 칸마다 고른 레이어에 그 효과를 입힌 작은 그림이 뜨고, 누르면 걸리고 다시 누르면 빠진다. **여럿을 겹쳐 건다**
+ *  (사용자 지시 2026-09-28) — 건 차례대로 입히고, 칸에 그 차례 번호가 붙는다. 걸린 것마다 아래에 강도 한 줄 (무작위가 드는 것은
+ *  다시 섞기). 한꺼번에 떼는 것은 보정과 같이 머리의 「초기화」다 */
 function FxSection({ sel, many, n }: { sel: Layer | null; many: boolean; n: number }) {
   const t = useI18n((st) => st.t);
   const s = useEditor();
-  const fx = sel && !many ? (sel.fx ?? null) : null;
-  const pick = (k: FxKind) => {
-    if (fx?.kind === k) return;
-    s.setFx({ kind: k, amt: fx?.amt || FX_AMT, seed: fx?.seed ?? newSeed() });
-  };
+  const list = sel && !many ? (sel.fx ?? []) : [];
+  const toggle = (k: FxKind) =>
+    s.setFx(list.some((f) => f.kind === k) ? list.filter((f) => f.kind !== k) : [...list, { kind: k, amt: FX_AMT, seed: newSeed() }]);
+  const patch = (k: FxKind, p: Partial<Fx>, live = false) => s.setFx(list.map((f) => (f.kind === k ? { ...f, ...p } : f)), live);
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: "var(--sp-2)" }}>
       <span style={{ display: "flex", alignItems: "center", gap: "var(--sp-2)", fontSize: "var(--text-xs)", fontWeight: "var(--w-semi)", color: "var(--ink-soft)" }}>
         {t("editor.fx")}
         <Help tip={t("editor.fxHint")} />
         <span style={{ flex: 1 }} />
-        <button data-editor-fx-reset disabled={!fx} onClick={() => s.setFx(null)} style={{ ...box, padding: "1px 8px", fontSize: "var(--text-3xs)", color: "var(--ink-faint)" }}>
+        <button data-editor-fx-reset disabled={!list.length} onClick={() => s.setFx(null)} style={{ ...box, padding: "1px 8px", fontSize: "var(--text-3xs)", color: "var(--ink-faint)" }}>
           {t("editor.reset")}
         </button>
       </span>
@@ -349,21 +349,31 @@ function FxSection({ sel, many, n }: { sel: Layer | null; many: boolean; n: numb
         <>
           <div data-editor-fx-grid style={{ display: "grid", gridTemplateColumns: "repeat(3, minmax(0, 1fr))", gap: "var(--sp-2)" }}>
             {FX_KINDS.map((k) => {
-              const cur = fx?.kind === k;
+              const at = list.findIndex((f) => f.kind === k);
+              const cur = at >= 0;
               return (
                 <button
                   key={k}
                   data-editor-fx={k}
                   data-on={cur ? "" : undefined}
                   onMouseDown={dropFocus}
-                  onClick={() => pick(k)}
-                  style={{ ...box, ...(cur ? on : {}), padding: 3, display: "flex", flexDirection: "column", alignItems: "stretch", gap: 3 }}
+                  onClick={() => toggle(k)}
+                  style={{ ...box, ...(cur ? on : {}), position: "relative", padding: 3, display: "flex", flexDirection: "column", alignItems: "stretch", gap: 3 }}
                 >
                   <img
                     src={fxThumb(sel.cv, k, FX_TILE.w, FX_TILE.h)}
                     draggable={false}
                     style={{ display: "block", width: "100%", aspectRatio: `${FX_TILE.w} / ${FX_TILE.h}`, objectFit: "cover", borderRadius: 3, background: "var(--bg)" }}
                   />
+                  {/* 건 차례 — 겹칠 때 먼저 건 것이 먼저 입혀진다 */}
+                  {cur && list.length > 1 && (
+                    <span
+                      data-editor-fx-order={at + 1}
+                      style={{ position: "absolute", top: 6, left: 6, minWidth: 16, height: 16, padding: "0 4px", borderRadius: 8, background: "var(--accent)", color: "#fff", fontSize: 10, fontWeight: "var(--w-semi)", display: "grid", placeItems: "center", fontVariantNumeric: "tabular-nums" }}
+                    >
+                      {at + 1}
+                    </span>
+                  )}
                   <span style={{ fontSize: "var(--text-3xs)", textAlign: "center", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", color: cur ? "var(--ink)" : "var(--ink-soft)" }}>
                     {t(FX_LABEL[k])}
                   </span>
@@ -371,32 +381,34 @@ function FxSection({ sel, many, n }: { sel: Layer | null; many: boolean; n: numb
               );
             })}
           </div>
-          {fx && (
-            <Line label={t("editor.fxAmount")}>
-              <input
-                type="range"
-                data-editor-fx-amount
-                min={0}
-                max={100}
-                value={fx.amt}
-                onPointerDown={() => s.markBefore()}
-                onChange={(e) => s.setFx({ ...fx, amt: Number(e.target.value) }, true)}
-                style={{ flex: 1, minWidth: 0 }}
-              />
-              <span style={num}>{fx.amt}</span>
-              {FX_SEEDED.includes(fx.kind) && (
-                <button
-                  data-editor-fx-reseed
-                  data-tip={t("editor.fxReseed")}
-                  onMouseDown={dropFocus}
-                  onClick={() => s.setFx({ ...fx, seed: newSeed() })}
-                  style={{ ...box, display: "grid", padding: "3px 6px" }}
-                >
-                  {Icon.dice}
-                </button>
-              )}
-            </Line>
-          )}
+          {list.map((f) => (
+            <div key={f.kind} data-editor-fx-row={f.kind}>
+              <Line label={t(FX_LABEL[f.kind])}>
+                <input
+                  type="range"
+                  data-editor-fx-amount={f.kind}
+                  min={0}
+                  max={100}
+                  value={f.amt}
+                  onPointerDown={() => s.markBefore()}
+                  onChange={(e) => patch(f.kind, { amt: Number(e.target.value) }, true)}
+                  style={{ flex: 1, minWidth: 0 }}
+                />
+                <span style={num}>{f.amt}</span>
+                {FX_SEEDED.includes(f.kind) && (
+                  <button
+                    data-editor-fx-reseed={f.kind}
+                    data-tip={t("editor.fxReseed")}
+                    onMouseDown={dropFocus}
+                    onClick={() => patch(f.kind, { seed: newSeed() })}
+                    style={{ ...box, display: "grid", padding: "3px 5px" }}
+                  >
+                    {Icon.dice}
+                  </button>
+                )}
+              </Line>
+            </div>
+          ))}
         </>
       )}
     </div>

@@ -100,8 +100,8 @@ type S = {
   setAdjust: (p: Partial<Adjust>, live?: boolean) => void;
   /** 고른 레이어의 보정을 전부 0 으로 (한 걸음) */
   resetAdjust: () => void;
-  /** 고른 레이어의 효과 — `null` 이면 뗀다. 보정과 같은 규칙이다 (`live` 면 이력을 안 적는다) */
-  setFx: (fx: Fx | null, live?: boolean) => void;
+  /** 고른 레이어의 효과 목록 (건 차례대로) — 비었거나 `null` 이면 뗀다. 보정과 같은 규칙이다 (`live` 면 이력을 안 적는다) */
+  setFx: (fx: Fx[] | null, live?: boolean) => void;
   setRatioLock: (v: boolean) => void;
   setView: (v: Partial<Doc["view"]>) => void;
 
@@ -524,7 +524,7 @@ export const useEditor = create<S>((set, get) => {
     setFx(fx, live = false) {
       const l = get().layer();
       if (!l) return;
-      get().patchLayer(l.id, { fx }, live);
+      get().patchLayer(l.id, { fx: fx?.length ? fx : null }, live);
     },
     setRatioLock: (v) => set({ ratioLock: v }),
     setView(v) {

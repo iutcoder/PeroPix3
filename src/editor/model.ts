@@ -37,8 +37,8 @@ export type LayerMeta = Xform & {
   /** 0~100 */
   opacity: number;
   adj: Adjust;
-  /** 효과 프리셋 (`fx.ts`) — 보정처럼 언제나 걸리고 저장·합치기 때 굽힌다. 없으면 효과 없음 */
-  fx?: Fx | null;
+  /** 효과 프리셋 (`fx.ts`) — 보정처럼 언제나 걸리고 저장·합치기 때 굽힌다. **건 차례대로** 겹친다. 없으면 효과 없음 */
+  fx?: Fx[] | null;
   /** 원본 픽셀 크기 */
   sw: number;
   sh: number;
