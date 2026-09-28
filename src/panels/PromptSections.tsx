@@ -278,7 +278,7 @@ export function CharSection({
            띄우던 자리다. 연필 단추는 `SectionCard` 가 스스로 단다. */
         onRename={(v) => renameChar(ch.id, v)}
         renameTip={t("cards.rename")}
-        nameTag={positioning && liveNo > 0 ? <CharNo n={liveNo} size={20} ring={1.5} bg="rgba(0,0,0,0.42)" /> : null}
+        nameTag={positioning && liveNo > 0 ? <CharNo n={liveNo} size={20} ring={1.5} /> : null}
         /* ★★차례 바꾸기는 **위아래 단추**이고, 자리는 **이름변경 앞**이다
            (사용자 지시 2026-08-21).
            끌기로 만들었다가 걷었다: 배너를 끄는 것은 이미 **덱에 저장**이라

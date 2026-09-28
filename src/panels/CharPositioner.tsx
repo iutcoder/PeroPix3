@@ -6,7 +6,6 @@ import { useUi } from "../store/ui";
 import { useI18n } from "../i18n";
 import { Icon } from "../components/Icon";
 import { crowded, snapCenter, toCenter, CENTER_GRID, type Center } from "../lib/charPos";
-import { KIND_COLOR } from "../cards/kindColor";
 
 /** 배치와 관련된 화면이 **모두 같은 판정을 본다** — 세 곳에서 따로 세면 어긋난다.
  *
@@ -433,13 +432,15 @@ function GridSurface(p: Surface & { setPicked: (i: number) => void }) {
 }
 
 /** 인물 번호 원 — 배치 판의 마커와 캐릭터 카드 배너가 **같은 부품**을 쓴다 (사용자 결정 2026-09-28:
- *  목업 `docs/comic-editor-mockup-v2.html` ⑥ 의 시안 D). 어두운 반투명 바탕 + 테 + 흰 번호.
- *  ★★테 색은 **인물마다 다르지 않다** (사용자 지시 2026-09-28: 생성 쪽은 번호 색을 동일하게).
- *    캐릭터 카드의 종류 색을 쓴다 — 누구인지는 번호와 이름표가 말한다.
+ *  목업 `docs/comic-editor-mockup-v2.html` ⑥ 의 시안 D). 어두운 바탕 + 테 + 흰 번호.
+ *  ★★테 색은 **인물마다 다르지 않고 무채색**이다 (사용자 지시 2026-09-28: 생성 쪽은 번호 색을
+ *    동일하게, 동일하면 무채색으로). 누구인지는 번호와 이름표가 말한다.
+ *  ★★바탕은 **거의 불투명**하다 (사용자 지적 2026-09-28: 배너 위에서 숫자가 잘 안 보였다).
+ *    배너 단추(`BannerBtn`)의 0.42 를 따랐더니 썸네일이 비쳐 흰 숫자가 묻혔다.
  *  ★★숫자는 **대문자 높이로 잘라** 가운데에 둔다(`text-box`). 글꼴 상자 가운데에 두면 아래로
  *    내려 쓰는 글자 몫이 남아 숫자가 위로 뜬다 (사용자 지적 2026-09-28). */
-export function CharNo(p: { n: number; size: number; ring: number; bg: string; state?: "selected" | "warning" }) {
-  const ring = p.state === "selected" ? "#fff" : p.state === "warning" ? "var(--warn)" : KIND_COLOR.characters[1];
+export function CharNo(p: { n: number; size: number; ring: number; state?: "selected" | "warning" }) {
+  const ring = p.state === "selected" ? "#fff" : p.state === "warning" ? "var(--warn)" : "rgba(255,255,255,0.55)";
   return (
     <span
       style={{
@@ -451,7 +452,7 @@ export function CharNo(p: { n: number; size: number; ring: number; bg: string; s
         display: "grid",
         placeItems: "center",
         borderRadius: "50%",
-        background: p.state === "selected" ? "var(--accent)" : p.bg,
+        background: p.state === "selected" ? "var(--accent)" : "rgba(12,12,16,0.88)",
         boxShadow: `inset 0 0 0 ${p.ring}px ${ring}`,
         color: p.state === "warning" ? "var(--warn)" : "#fff",
         fontSize: p.size >= 24 ? 12 : 11,
@@ -496,7 +497,6 @@ function Marker(p: {
         n={p.n}
         size={p.size}
         ring={2}
-        bg="rgba(14,14,18,0.78)"
         state={p.warning ? "warning" : p.selected ? "selected" : undefined}
       />
       <span
