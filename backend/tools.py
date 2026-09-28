@@ -14,6 +14,7 @@ from __future__ import annotations
 import base64
 import binascii
 import io
+import math
 from pathlib import Path
 
 from PIL import Image
@@ -324,6 +325,20 @@ def convert(
     return {"results": results, "ok": sum(1 for r in results if r["ok"])}
 
 
+def _finite(v):
+    """NaN·무한대를 None 으로 — JSON 응답이 그 값에서 통째로 실패한다.
+
+    ★남의 그림의 메타데이터에는 `NaN` 이 글자 그대로 들어 있을 수 있고 파이썬 `json.loads` 는 그것을
+      숫자로 받아 준다. 응답을 만들 때 `json.dumps` 는 거부해서 EXIF 리더가 오류만 냈다 (사용자 로그 2026-09-28)."""
+    if isinstance(v, float):
+        return v if math.isfinite(v) else None
+    if isinstance(v, dict):
+        return {k: _finite(x) for k, x in v.items()}
+    if isinstance(v, (list, tuple)):
+        return [_finite(x) for x in v]
+    return v
+
+
 def read_meta(root: Path, it: Item) -> dict:
     """EXIF 리더 — **읽기만.** 파일을 저장하지도, 고치지도 않는다.
 
@@ -371,4 +386,4 @@ def read_meta(root: Path, it: Item) -> dict:
             out["vibe"]["data"] = str(info.get("vibe_data") or "")
     # ★500자에서 자른다 — 화면에 통째로 쏟으면 읽을 수 없다 (v2 도 같은 자리에서 잘랐다)
     out["extra"] = {k: str(v)[:500] for k, v in info.items() if k not in SHOWN_CHUNKS}
-    return out
+    return _finite(out)
