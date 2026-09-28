@@ -22,9 +22,10 @@ import { bakeBubble, bakePanel, bakeSfx, bakeStroke, bucketFill, clipOf, cloneCa
 import { newSfx, withStyle, type SfxMeta, type SfxStyleId } from "./sfx";
 import type { Fx } from "./fx";
 import {
-  bboxOf, comicStack, coverRect, defaultTail, gapFor, genOf, hasTails, newPage, pageLabel as pageLabelOf, pageLayers, pageOfLayer, panelPts, splitPoly, templatePanels, toPanel,
-  framePanel, type BubbleKind, type BubbleMeta, type ComicCommon, type ComicMeta, type CutTake, type Dir, type PanelGen, type Pt, type Tail,
+  bboxOf, comicGenOf, comicStack, COMIC_GEN_KEYS, coverRect, defaultTail, gapFor, genOf, hasTails, newPage, pageLabel as pageLabelOf, pageLayers, pageOfLayer, panelPts, splitPoly, templatePanels, toPanel,
+  framePanel, type BubbleKind, type BubbleMeta, type ComicCommon, type ComicGen, type ComicMeta, type CutTake, type Dir, type PanelGen, type Pt, type Tail,
 } from "./comic";
+import { useGen } from "../store/gen";
 import { makeBlock, type Block } from "../lib/blocks";
 import { loadItem, saveImage } from "./io";
 import { loadDocs, scheduleFlush } from "./persist";
@@ -72,6 +73,9 @@ export type Doc = {
   page?: string;
   /** 만화 캔버스에서 **생성 버튼이 뽑을 컷** — 무대나 컷 줄에서 컷을 고르면 그 컷이 된다. 「공통」을 보는 동안에도 남는다 (설계 8-1) */
   cut?: string | null;
+  /** 만화 캔버스의 생성 옵션 (사용자 결정 2026-09-28: 캔버스마다 따로. 모양은 `comic.ComicGen`).
+   *  ★이력 밖이다. 시드는 생성할 때마다 바뀌는데 이력 안에 두면 되돌리기가 옛 시드까지 되살린다 (생성 모드에서도 시드·모델은 되돌리기 밖이다) */
+  gen?: ComicGen;
 };
 
 /** 지금 페이지 — 없어진 페이지(되돌리기로 사라진 것)면 첫 페이지. 보통 캔버스는 null */
@@ -205,6 +209,8 @@ type S = {
   removePage: (pid: string) => Promise<void>;
   /** 공통(화풍 · 캐릭터 카드 · 배경)을 고친다 (한 걸음, 설계 8-1) */
   patchCommon: (fn: (c: ComicCommon) => ComicCommon) => void;
+  /** 만화 캔버스의 생성 옵션 하나를 고친다 (이력 없이, `Doc.gen`). 캔버스가 드는 열쇠(`COMIC_GEN_KEYS`)가 아니면 아무것도 안 한다 */
+  setComicGen: <K extends keyof ComicGen>(docId: string, k: K, v: ComicGen[K]) => void;
   /** 캐릭터 카드를 지운다 — 그 인물이 든 컷의 칸도 **같은 걸음에** 뺀다 (되돌리면 둘 다 돌아온다). 컷에 나와 있으면 묻는다 */
   removeComicChar: (id: string) => Promise<void>;
   /** AI 콘티가 페이지 한 장을 깐다 (설계 10-2) — 마지막 페이지 뒤에, 마지막 페이지가 비어 있으면 거기에.
@@ -373,7 +379,9 @@ export const useEditor = create<S>((set, get) => {
     const comic: ComicMeta = { ...newPage({ w, h }, dir), pages: [pid], common };
     const layers: Layer[] = [mkPaper(w, h, pid)];
     for (const poly of templatePanels(comic, layout)) layers.push(mkPanel({ layers }, poly, comic, pid));
-    return { id: newId("d"), name, w, h, layers, sel: [], src: null, hist: emptyHist(), dirty: false, view: { fit: true, zoom: 1 }, comic, page: pid, cut: null };
+    // 생성 옵션은 생성 모드의 지금 값을 복사해 시작한다
+    const gen = comicGenOf(null, useGen.getState().params);
+    return { id: newId("d"), name, w, h, layers, sel: [], src: null, hist: emptyHist(), dirty: false, view: { fit: true, zoom: 1 }, comic, page: pid, cut: null, gen };
   };
   /** 만화 캔버스에서 고른 것이 바뀌었을 때 — 으뜸이 컷이거나 컷에 든 그림이면 그 컷이 **생성 버튼이 뽑을 컷**이 되고,
    *  으뜸의 페이지가 지금 페이지가 된다 (설계 8-1: 무대에서 컷을 누르면 그 컷을 편다). 아무것도 안 골랐으면 그대로 둔다 */
@@ -920,6 +928,11 @@ export const useEditor = create<S>((set, get) => {
     },
     patchCommon(fn) {
       commit((d) => (d.comic ? { comic: { ...d.comic, common: fn(d.comic.common) } } : null));
+    },
+    setComicGen(docId, k, v) {
+      const d = get().docs.find((x) => x.id === docId);
+      if (!d?.comic || !(COMIC_GEN_KEYS as readonly string[]).includes(k)) return;
+      patchDoc(docId, { gen: { ...comicGenOf(d.gen, useGen.getState().params), [k]: v } });
     },
     async removeComicChar(id) {
       const d = docOf(get());

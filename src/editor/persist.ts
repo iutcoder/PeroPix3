@@ -15,7 +15,8 @@ import { fxListOf } from "./fx";
 import { getPx, loadState, putPx, putState, type PersistDoc } from "./io";
 import { bakeBubble, bakePanel, bakeSfx, ensureFont, fitBubble, rebakeText, type Layer } from "./pixels";
 import type { Doc } from "./store";
-import type { ComicMeta } from "./comic";
+import { comicGenOf, type ComicMeta } from "./comic";
+import { useGen } from "../store/gen";
 
 const keyOf = new WeakMap<HTMLCanvasElement, string>();
 const uploaded = new WeakSet<HTMLCanvasElement>();
@@ -98,7 +99,7 @@ async function flush(): Promise<void> {
       keep[d.id] = [...keys];
       out.push({
         id: d.id, name: d.name, w: d.w, h: d.h, sel: d.sel, src: d.src, dirty: d.dirty, view: d.view, layers,
-        ...(d.comic ? { comic: d.comic, page: d.page, cut: d.cut ?? null } : {}),
+        ...(d.comic ? { comic: d.comic, page: d.page, cut: d.cut ?? null, gen: d.gen } : {}),
       });
     }
     await putState({ docs: out, cur, keep });
@@ -205,7 +206,8 @@ export async function loadDocs(): Promise<{ docs: Doc[]; cur: string | null }> {
       id: p.id, name: p.name, w: p.w, h: p.h, layers,
       sel: selOf(p.sel, layers),
       src: p.src ?? null, hist: emptyHist(), dirty: !!p.dirty, view: p.view ?? { fit: true, zoom: 1 },
-      ...(p.comic ? { comic: comicOf(p.comic, layers), page: p.page, cut: p.cut ?? null } : {}),
+      // 생성 옵션이 없던 판(캔버스마다 따로 두기 전)은 생성 모드의 지금 값으로 시작한다
+      ...(p.comic ? { comic: comicOf(p.comic, layers), page: p.page, cut: p.cut ?? null, gen: comicGenOf(p.gen, useGen.getState().params) } : {}),
     });
   }
   return { docs, cur: st.cur ?? null };

@@ -5,7 +5,7 @@ import { PluginSlot } from "../components/PluginSlot";
 /** ★키를 조립하지 않는다 — i18n 검사가 동적 접두사를 잡는다 (`i18n.test.ts`) */
 const SEED_LABELS = ["options.seedFixed", "options.seedRound", "options.seedScene"] as const;
 const SEED_HINTS = ["options.seedFixedHint", "options.seedRoundHint", "options.seedSceneHint"] as const;
-import { SEED_MODES, randomSeed, useGen } from "../store/gen";
+import { SEED_MODES, randomSeed, useGen, type ParamsHost } from "../store/gen";
 import { useQueue } from "../store/queue";
 import { allScenes, useWs } from "../store/workspace";
 import { useImageInput } from "../store/imageInput";
@@ -638,10 +638,12 @@ const qbtn: React.CSSProperties = {
 };
 
 /** 시드 줄 — 숫자칸 · 주사위 · 시드 모드 3택. 생성 푸터와 만화 캔버스의 컷 생성 푸터가 **같은 것**을 쓴다 (값은 `useGen.params` 하나) */
-export function SeedRow() {
+export function SeedRow({ host }: { /** 읽고 쓸 값. 없으면 생성 모드 것 (만화 캔버스는 자기 값을 준다) */ host?: ParamsHost } = {}) {
   const t = useI18n((s) => s.t);
-  const params = useGen((s) => s.params);
-  const set = useGen((s) => s.set);
+  const gen = useGen((s) => s.params);
+  const setGen = useGen((s) => s.set);
+  const params = host?.params ?? gen;
+  const set = host?.set ?? setGen;
   return (
     <div
       style={{

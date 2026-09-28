@@ -10,6 +10,7 @@ import {
   pushVibe,
   useImageInput,
   type BaseMode,
+  type ImageInputStore,
 } from "../store/imageInput";
 import { canFocus } from "../lib/focused";
 import { fitSizeToBase, modelCaps, useGen } from "../store/gen";
@@ -32,10 +33,22 @@ const readDropped = (path: string) =>
  *
  *  ★v2 의 `Vibe / Character Ref` 절과 베이스 이미지 절을 옮긴 것이다
  *    (index.html:8998-9063 · 18362-18700). 값·범위·배타 규칙은 **원문 그대로**다. */
-export function ImageInputPanel() {
+export function ImageInputPanel({
+  store = useImageInput,
+  model: own,
+  refsOnly = false,
+}: {
+  /** 어느 한 벌을 보이나. 없으면 생성 모드 것. 만화 캔버스는 자기 것을 준다 (`editor/cutGen` 의 `useComicInput`) */
+  store?: ImageInputStore;
+  /** 그 한 벌이 따르는 모델. 없으면 생성 옵션의 모델 */
+  model?: string;
+  /** Vibe · Precise Reference 만 (만화 캔버스는 베이스 그림을 안 쓴다. 컷 인페인트가 그 자리다) */
+  refsOnly?: boolean;
+} = {}) {
   const t = useI18n((s) => s.t);
-  const s = useImageInput();
-  const model = useGen((g) => g.params.model);
+  const s = store();
+  const genModel = useGen((g) => g.params.model);
+  const model = own ?? genModel;
   const cap = modelCaps(model);
   const [cache, setCache] = useState(false);
 
@@ -47,14 +60,14 @@ export function ImageInputPanel() {
    *    `encoded` 를 채우는 순간 배열이 새로 만들어져 무한히 돌게 된다. */
   const vibeKey = s.vibes.map((v) => `${v.image.length}:${v.info_extracted}`).join("|");
   useEffect(() => {
-    void useImageInput.getState().syncVibeCache();
-  }, [vibeKey, model]);
+    void store.getState().syncVibeCache();
+  }, [vibeKey, model, store]);
 
   /** 밖에서 가져온 바이브 파일 한 장 */
   const importVibeText = (text: string, name: string) => {
     try {
       const v = parseNaiVibeFile(text, name);
-      if (!pushVibe(v)) {
+      if (!pushVibe(v, store)) {
         toast(t("imgIn.vibeFull", { n: MAX_VIBES }), "warn");
         return;
       }
@@ -247,6 +260,7 @@ export function ImageInputPanel() {
       </Section>
       )}
 
+      {!refsOnly && (
       <Section label={t("imgIn.base")} data-sec="base" flashKey="base">
         {s.baseImage ? (
           <Card
@@ -352,8 +366,9 @@ export function ImageInputPanel() {
           </>
         )}
       </Section>
+      )}
 
-      {cache && <VibeCache onClose={() => setCache(false)} />}
+      {cache && <VibeCache store={store} onClose={() => setCache(false)} />}
     </div>
   );
 }

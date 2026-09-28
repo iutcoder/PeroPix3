@@ -1,6 +1,6 @@
 import { useI18n } from "../i18n";
 import { Icon } from "../components/Icon";
-import { modelCaps, useGen } from "../store/gen";
+import { modelCaps, useGen, type ParamsHost } from "../store/gen";
 import type { StyleOpts } from "../lib/styleOpts";
 
 /** 프롬프트 칸 **하단에 붙는 띠** — 프롬프트의 일부가 되는 설정들.
@@ -41,10 +41,17 @@ const UC_PRESETS = ["Heavy", "Light", "Human Focus", "Furry Focus", "None"];
  *    프롬프트에 꺼내 놓았을 때만 보이고 덱에서는 보이지도 고칠 수도 없었다. */
 export type OptsTarget = { value: StyleOpts; onChange: (patch: StyleOpts) => void };
 
-export function PromptOptsBar({ uc, target }: { uc: boolean; target?: OptsTarget }) {
+export function PromptOptsBar({ uc, target, host }: {
+  uc: boolean;
+  target?: OptsTarget;
+  /** 지금 생성 설정이 생성 모드 것이 아닐 때 (만화 캔버스는 자기 값을 준다) */
+  host?: ParamsHost;
+}) {
   const t = useI18n((s) => s.t);
-  const live = useGen((s) => s.params);
-  const setLive = useGen((s) => s.set);
+  const gen = useGen((s) => s.params);
+  const setGen = useGen((s) => s.set);
+  const live = host?.params ?? gen;
+  const setLive = host?.set ?? setGen;
   /* ★카드를 고칠 때도 **고를 수 있는 값은 지금 모델이 정한다** — 카드는 모델을 안 들고
      다니기 때문이다 (모델은 카드의 관심사가 아니다). */
   const cap = modelCaps(live.model);

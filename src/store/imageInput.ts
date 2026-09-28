@@ -153,12 +153,6 @@ export type ImageSnap = Pick<
 /** v2 제한 그대로 (index.html:18376) */
 export const MAX_VIBES = 16;
 
-/** 베이스 그림 크기를 재는 중인 약속. `startEdit` 이 그 뒤에 자동 켜기를 판단한다 */
-let measuring: Promise<void> | null = null;
-
-/** 캐시 조회 회차. 늦게 온 답이 새 목록을 덮지 않게 한다 */
-let syncSeq = 0;
-
 /** ★★**마스크가 실제로 나가는가** — 값을 매기는 쪽과 보내는 쪽이 이 하나를 본다.
  *
  *  칠한 것이 없어도 Focused 사각형이 있으면 **안쪽 전체**가 마스크가 된다 (`payload`).
@@ -181,7 +175,16 @@ export const inputOn = (x: { on?: boolean }) => x.on !== false;
  *    자르므로 경로가 필요 없다. */
 const focusingNow = (s: S) => s.baseMode === "inpaint" && s.focused && !!s.tileRect;
 
-export const useImageInput = create<S>((set, get) => ({
+/** 이미지 입력 한 벌을 만든다. `modelOf` 는 **이 한 벌이 따르는 모델**이다. 바이브 기본값·캐시 조회·모델 능력이 그것을 본다.
+ *  ★두 벌이다: 생성 모드(`useImageInput`, 생성 옵션의 모델)와 만화 캔버스(`editor/cutGen` 의 `useComicInput`, 캔버스의 모델).
+ *    만화 캔버스는 참조 그림을 캔버스마다 따로 든다 (사용자 결정 2026-09-28). 부품(`ImageInputPanel`)은 둘 다 같은 것을 쓴다.
+ *  ★베이스 그림 갈래(`setFocused`·`costSize`)는 생성 모드의 해상도 칸을 본다. 만화 캔버스는 베이스 그림을 안 쓴다 (컷 인페인트가 그 자리다) */
+export function makeImageInput(modelOf: () => string) {
+  /** 베이스 그림 크기를 재는 중인 약속. `startEdit` 이 그 뒤에 자동 켜기를 판단한다 */
+  let measuring: Promise<void> | null = null;
+  /** 캐시 조회 회차. 늦게 온 답이 새 목록을 덮지 않게 한다 */
+  let syncSeq = 0;
+  return create<S>((set, get) => ({
   vibeOn: false,
   vibes: [],
   normalizeVibe: true,
@@ -211,7 +214,7 @@ export const useImageInput = create<S>((set, get) => ({
             vibes: [
               ...s.vibes,
               (() => {
-                const d = vibeDefaults(useGen.getState().params.model);
+                const d = vibeDefaults(modelOf());
                 return { image, name, info_extracted: d.infoExtracted, strength: d.strength };
               })(),
             ],
@@ -229,7 +232,7 @@ export const useImageInput = create<S>((set, get) => ({
     //   큰 인코딩은 올리지 않고 "들고 있는가 + 어느 모델·info 로 구웠나"만 보낸다.
     const items = get().vibes;
     if (!items.length) return;
-    const model = useGen.getState().params.model;
+    const model = modelOf();
     const tag = ++syncSeq;
     try {
       const r = await api<{ items: { keep: boolean; encoded?: string | null;
@@ -392,7 +395,7 @@ export const useImageInput = create<S>((set, get) => ({
     const s = get();
     // ★능력표는 **백엔드와 같은 것**을 본다 (`backend/nai.py` 의 `caps`) — 거기서 지우는 것을
     //   여기서 세면 "보낸다고 해 놓고 안 나가는" 상태가 된다
-    const cap = modelCaps(useGen.getState().params.model);
+    const cap = modelCaps(modelOf());
     return {
       vibes: cap.vibe && s.vibeOn ? s.vibes.filter(inputOn) : [],
       refs: cap.char_ref && s.refOn ? s.refs.filter(inputOn) : [],
@@ -432,20 +435,25 @@ export const useImageInput = create<S>((set, get) => ({
       inpaint_rect: focusing ? s.tileRect : null,
     };
   },
-}));
+  }));
+}
+
+/** 생성 모드의 이미지 입력. 생성 옵션의 모델을 따른다 */
+export const useImageInput = makeImageInput(() => useGen.getState().params.model);
+export type ImageInputStore = typeof useImageInput;
 
 /** 바이브 한 장을 목록 끝에 **값까지 갖춘 채로** 붙인다.
  *
  *  ★`addVibe` 는 꽉 차면 조용히 아무것도 안 한다. 그 뒤에 「길이 − 1」을 고치면 엉뚱한
  *    항목이 바뀌므로 여기서 먼저 막고 결과를 돌려준다. 캐시 뷰어와 `.naiv4vibe` 임포트가
  *    같은 경로를 쓴다 — 넣는 창구가 여럿이 되면 켬/끔 처리가 갈린다. */
-export function pushVibe(v: Vibe): boolean {
-  const s = useImageInput.getState();
+export function pushVibe(v: Vibe, store: ImageInputStore = useImageInput): boolean {
+  const s = store.getState();
   if (s.vibes.length >= MAX_VIBES) return false;
   // ★Vibe 와 Precise Reference 는 함께 못 쓴다 — 켜면 다른 쪽이 꺼진다 (v2 와 같다)
   s.setVibeOn(true);
   s.addVibe(v.image, v.name);
-  const i = useImageInput.getState().vibes.length - 1;
+  const i = store.getState().vibes.length - 1;
   s.patchVibe(i, {
     strength: v.strength,
     info_extracted: v.info_extracted,

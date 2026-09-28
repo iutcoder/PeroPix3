@@ -18,16 +18,17 @@ import { currentAccountId } from "../store/accounts";
 import { useCards, type CharCard, type StyleCard } from "../store/cards";
 import { CHAR_COLOR, DEFAULT_STYLE_COLOR, thumbFromCard } from "../store/prompt";
 import { useQueue } from "../store/queue";
+import { useGen, type ParamsHost } from "../store/gen";
 import { useCurrentSub, useSub } from "../store/sub";
 import { useUi } from "../store/ui";
 import { useImageInput } from "../store/imageInput";
 import { box, dropFocus, on } from "../panels/censor/ui";
 import {
   castNumbers, castSpot, comicGroupId, genOf, pageLabel, pageOfLayer, panelsInOrder, WHO_BUBBLE, WHO_NARRATION, WHO_PRESET,
-  CAST_NEUTRAL, type ComicChar, type CutCast, type PanelGen,
+  CAST_NEUTRAL, type ComicChar, type ComicGen, type CutCast, type PanelGen,
 } from "./comic";
 import { CAST_COLORS } from "./comicUi";
-import { cutCost, cutName, cutPrompt, emptyCuts, generateCuts, inpaintCuts, cutRoute, pickTake, sizeOf, whoName } from "./cutGen";
+import { cutCost, cutName, cutParams, cutPrompt, emptyCuts, generateCuts, inpaintCuts, cutRoute, pickTake, refPayload, sizeOf, useComicInput, whoName } from "./cutGen";
 import { curCut, curPage, pageView, useEditor, type Doc } from "./store";
 import type { Layer } from "./pixels";
 
@@ -37,7 +38,7 @@ import type { Layer } from "./pixels";
  *  한 번 정해 두고, 컷 번호를 누르면(무대에서 컷을 눌러도 같다) 그 컷에만 있는 것(장면 요약 · 배경 고르기 · 컷 태그 · 캐릭터 프롬프트)을 적는다.
  *  ★공통을 보는 동안에도 무대에서 고른 컷은 컷 줄에 테두리로 남는다 — 생성 버튼이 그 컷을 뽑는다.
  *  ★카드와 블록은 생성 모드와 **같은 부품**이다 (`SectionCard` · `SectionBody` · `BlockList`). 새 부품을 만들지 않는다.
- *  ★여기서 고친 것은 전부 캔버스의 되돌리기 한 걸음이다 (`patchCommon` · `setPanelGen`) */
+ *  ★여기서 고친 것은 전부 캔버스의 되돌리기 한 걸음이다 (`patchCommon` · `setPanelGen`). 생성 옵션만 이력 밖이다 (`Doc.gen`) */
 export function ComicLeft() {
   const doc = useEditor((s) => s.docs.find((d) => d.id === s.cur) ?? null);
   const view = useEditor((s) => s.comicView);
@@ -117,12 +118,19 @@ function CutBar({ doc, view }: { doc: Doc; view: "common" | "cut" }) {
 
 /* ── 공통 ─────────────────────────────────────────────────────── */
 
+/** 캔버스의 생성 옵션을 옵션 부품에 넘긴다 (사용자 결정 2026-09-28: 캔버스마다 따로). 부품은 생성 모드와 같은 것이다 */
+function useComicHost(doc: Doc): ParamsHost {
+  const gen = useGen((s) => s.params);
+  return { params: cutParams(doc, gen), set: (k, v) => useEditor.getState().setComicGen(doc.id, k as keyof ComicGen, v as never) };
+}
+
 /** 「공통」 — 베이스 프롬프트(화풍) · 캐릭터 프롬프트(외형) · 배경 · 생성 옵션 (설계 8-1).
  *  ★캐릭터 카드와 배경은 캔버스에 한 벌뿐이다 — 카드 하나가 곧 인물 하나 (같은 인물은 어느 컷에서나 같은 색) */
 function CommonBody({ doc }: { doc: Doc }) {
   const t = useI18n((s) => s.t);
   const c = doc.comic!.common;
   const s = useEditor.getState();
+  const host = useComicHost(doc);
   /** 배경마다 그것을 쓰는 페이지·컷 — 이름 옆에 (목업 v2 ②) */
   const usage = new Map<string, string>();
   doc.comic!.pages.forEach((pid, pi) => {
@@ -139,7 +147,7 @@ function CommonBody({ doc }: { doc: Doc }) {
   return (
     <>
       <Category id="c-base" label={t("prompt.baseBox")} right={<CardPick kind="styles" />}>
-        <StyleCardC doc={doc} />
+        <StyleCardC doc={doc} host={host} />
       </Category>
       <Category id="c-char" label={t("prompt.charBox")} right={<CardPick kind="characters" />}>
         <div style={{ display: "flex", flexDirection: "column", marginBottom: "var(--sp-5)" }}>
@@ -168,13 +176,13 @@ function CommonBody({ doc }: { doc: Doc }) {
         </div>
       </Category>
       <div style={{ height: 1, background: "var(--line)", margin: "0 0 var(--sp-4)" }} />
-      <OptionsPanel only="gen" />
+      <OptionsPanel only="gen" host={host} refs={useComicInput} />
     </>
   );
 }
 
 /** 베이스 프롬프트 카드 — 생성 모드의 스타일 카드와 같은 카드(이름 · 배너 그림 · Prompt/UC · 프롬프트 옵션 띠) */
-function StyleCardC({ doc }: { doc: Doc }) {
+function StyleCardC({ doc, host }: { doc: Doc; host: ParamsHost }) {
   const t = useI18n((s) => s.t);
   const c = doc.comic!.common;
   const s = useEditor.getState();
@@ -198,7 +206,7 @@ function StyleCardC({ doc }: { doc: Doc }) {
           uc={c.uc}
           onPrompt={(b) => s.patchCommon((cc) => ({ ...cc, base: b }))}
           onUc={(b) => s.patchCommon((cc) => ({ ...cc, uc: b }))}
-          footer={(showUc) => <PromptOptsBar uc={showUc} />}
+          footer={(showUc) => <PromptOptsBar uc={showUc} host={host} />}
         />
       </SectionCard>
     </div>
@@ -473,21 +481,28 @@ function SummaryBox({ value, onCommit }: { value: string; onCommit: (v: string) 
 /* ── 생성 푸터 ────────────────────────────────────────────────── */
 
 /** 컷 생성 푸터 — 최종 프롬프트 · 장 수 · 시드 · 「컷 N 생성」 · 「빈 컷 전부 생성」 · Anlas (목업 v2).
- *  ★시드 줄은 생성 푸터와 **같은 부품**이다 (`SeedRow`). 생성 옵션도 같은 값이다 (`useGen.params`) */
+ *  ★시드 줄은 생성 푸터와 **같은 부품**이다 (`SeedRow`). 값은 캔버스의 것이다 (`Doc.gen`) */
 export function ComicFooter({ compact = false }: { compact?: boolean }) {
-  const t = useI18n((s) => s.t);
   const doc = useEditor((s) => s.docs.find((d) => d.id === s.cur) ?? null);
+  if (!doc?.comic) return null;
+  return <ComicFooterC doc={doc} compact={compact} />;
+}
+
+function ComicFooterC({ doc, compact }: { doc: Doc; compact: boolean }) {
+  const t = useI18n((s) => s.t);
   const count = useEditor((s) => s.cutCount);
   const pending = useQueue((q) => q.pending);
   const sub = useCurrentSub();
   const [preview, setPreview] = useState(false);
-  if (!doc?.comic) return null;
+  const host = useComicHost(doc);
+  // 참조 그림이 바뀌면 값을 다시 센다
+  useComicInput();
   const p = curCut(doc);
-  const cost = p ? cutCost([p], count) : null;
+  const cost = p ? cutCost(doc, [p], count) : null;
   const size = p ? sizeOf(p) : null;
   const nm = p ? cutName(doc, p) : null;
   const empty = emptyCuts(doc, pending);
-  const emptyCost = cutCost(empty, 1);
+  const emptyCost = cutCost(doc, empty, 1);
   const costText = (c: { total: number; free: boolean }) => (c.free ? "FREE" : t("editor.cutCost", { a: c.total }));
   const gen = () => p && void generateCuts(doc, [p.id], count);
   if (compact) {
@@ -523,7 +538,7 @@ export function ComicFooter({ compact = false }: { compact?: boolean }) {
           ))}
         </span>
       </div>
-      <SeedRow />
+      <SeedRow host={host} />
       <button
         data-editor-cut-gen
         disabled={!p || !!cost?.overLimit}
@@ -585,7 +600,7 @@ export function CutLane({ doc }: { doc: Doc }) {
   const cur = p ? (doc.layers.find((l) => l.clip === p.id && l.take)?.take ?? null) : null;
   const waiting = p ? pending.filter((q) => q.groupId === comicGroupId(doc.id) && q.cellId === p.id).length : 0;
   const nm = p ? cutName(doc, p) : null;
-  const inpaintCost = p ? cutCost([p], count, useImageInput.getState().baseInpaintStrength ?? 1) : null;
+  const inpaintCost = p ? cutCost(doc, [p], count, useImageInput.getState().baseInpaintStrength ?? 1, true) : null;
   return (
     <div data-comic-lane style={{ flexShrink: 0, height: 114, border: "1px solid var(--line)", borderRadius: "var(--r-3)", display: "flex", flexDirection: "column", overflow: "hidden" }}>
       <div style={{ height: 28, flexShrink: 0, display: "flex", alignItems: "center", gap: "var(--sp-3)", padding: "0 var(--sp-2) 0 var(--sp-4)", borderBottom: "1px solid var(--line)", fontSize: "var(--text-2xs)", color: "var(--ink-faint)" }}>
@@ -643,7 +658,7 @@ export function CutLane({ doc }: { doc: Doc }) {
           </span>
         ))}
       </div>
-      {enhance && cur && p && <EnhanceDialog files={[cur.file]} ws={cur.ws} route={cutRoute(doc, p)} onClose={() => setEnhance(false)} />}
+      {enhance && cur && p && <EnhanceDialog files={[cur.file]} ws={cur.ws} route={cutRoute(doc, p)} input={() => refPayload(doc)} onClose={() => setEnhance(false)} />}
     </div>
   );
 }

@@ -61,6 +61,7 @@ export function EnhanceDialog({
   onClose,
   ws: wsFor,
   route,
+  input,
 }: {
   /** 강화할 그림들. 여럿이면 **배치**다 — 큐로 보낸다 */
   files: string[];
@@ -69,6 +70,8 @@ export function EnhanceDialog({
   ws?: string;
   /** 결과를 보낼 자리를 덮어쓴다 (탭·씬 그룹·칸) — 만화 편집의 컷 강화는 결과가 그 컷으로 돌아와야 한다 (`editor/cutGen`) */
   route?: Record<string, unknown>;
+  /** 실을 참조 그림 조각. 없으면 생성 모드 것 (만화 편집의 컷 강화는 캔버스의 참조 그림이다: `editor/cutGen` 의 `refPayload`) */
+  input?: () => Record<string, unknown>;
 }) {
   const t = useI18n((s) => s.t);
   const { base, params } = useGen();
@@ -276,7 +279,7 @@ export function EnhanceDialog({
       await useQueue.getState().enqueue(
         {
           ...useGen.getState().params,
-          ...useImageInput.getState().payload(),
+          ...(input ? input() : useImageInput.getState().payload()),
           prompt, negative_prompt: uc, characters: chars,
           /* ★열쇠 짝은 낱말표 그대로다 (`shared/terms.json`): `tab`=탭 이름 ·
              `set`=세트 이름 · `scene_group_id`=그 세트의 id. 개명 뒤에도 여기가 옛 짝

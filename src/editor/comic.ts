@@ -5,6 +5,9 @@
 import type { Rect, Size, TextStyle } from "./model";
 import type { Block } from "../lib/blocks";
 import type { Thumb } from "../store/prompt";
+import type { GenParams } from "../store/gen";
+import { STYLE_OPT_KEYS } from "../lib/styleOpts.ts";
+import { MODELS } from "../lib/naiModels.ts";
 
 export type Pt = [number, number];
 export type Dir = "rtl" | "ltr";
@@ -41,6 +44,23 @@ export type ComicStyle = { ref: string | null; name: string; thumb: Thumb | null
 export type ComicChar = { id: string; ref: string | null; name: string; thumb: Thumb | null; prompt: Block[]; uc: Block[] };
 /** 공통 — 베이스(화풍) · UC · 캐릭터 카드 · 배경. 배경은 **블록 하나가 배경 하나**다 (이름 = 블록 이름, 태그 = 배경 프롬프트) */
 export type ComicCommon = { style: ComicStyle; base: Block[]; uc: Block[]; chars: ComicChar[]; bgs: Block[] };
+
+/** 캔버스가 드는 생성 옵션 (사용자 결정 2026-09-28: 캔버스마다 따로). 「공통」에 보이는 것 전부다:
+ *  생성 옵션 일곱과 프롬프트 옵션 띠의 넷(`STYLE_OPT_KEYS`), 시드와 시드 모드.
+ *  ★해상도는 컷 모양이 정하고 저장 옵션은 생성 모드 것을 쓴다 (`cutGen.cutParams`).
+ *  ★캔버스를 만들 때 생성 모드의 지금 값을 복사한다. 그 뒤로는 서로 안 따라간다 */
+export const COMIC_GEN_KEYS = [...STYLE_OPT_KEYS, "seed", "seed_mode"] as const;
+export type ComicGen = Pick<GenParams, (typeof COMIC_GEN_KEYS)[number]>;
+
+/** 남긴 값에서 캔버스의 생성 옵션을 읽는다. 없는 열쇠와 타입이 다른 값은 `from`(생성 모드의 지금 값)으로 채운다.
+ *  ★목록에서 사라진 모델도 `from` 의 것으로 (화면은 목록의 값을 보이는데 보내는 값이 옛 모델이면 둘이 어긋난다. `store/gen` 의 `loadParams` 와 같은 규칙) */
+export function comicGenOf(raw: unknown, from: GenParams): ComicGen {
+  const src = raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
+  const out: Record<string, unknown> = {};
+  for (const k of COMIC_GEN_KEYS) out[k] = typeof src[k] === typeof from[k] ? src[k] : from[k];
+  if (!MODELS.some(([id]) => id === out.model)) out.model = from.model;
+  return out as ComicGen;
+}
 
 /** 인물 없는 칸·내레이션·말풍선의 점 — 무채색 (`plugins/manga-maker/web/app.js` 의 `CAST_NEUTRAL`) */
 export const CAST_NEUTRAL = "#78859a";

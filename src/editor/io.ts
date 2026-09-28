@@ -5,7 +5,7 @@ import { api, backendUrl } from "../lib/backend";
 import { fileMgrImg } from "../lib/imgUrl";
 import type { Dropped } from "../lib/dropImages";
 import type { LayerMeta } from "./model";
-import type { ComicMeta } from "./comic";
+import type { ComicGen, ComicMeta } from "./comic";
 import { canvasFrom } from "./pixels";
 
 /** 바이트를 받는다 — `rel` 은 파일 관리의 그림 창구, `path` 는 떨군 파일 읽기, `data` 는 그대로 */
@@ -87,6 +87,8 @@ export type PersistDoc = {
   /** 만화 캔버스에서 지금 보는 페이지 · 생성 버튼이 뽑을 컷 (보기 상태라 이력에는 없다) */
   page?: string;
   cut?: string | null;
+  /** 만화 캔버스의 생성 옵션 (없던 판은 읽을 때 채운다: `persist.loadDocs`) */
+  gen?: ComicGen;
 };
 export type PersistState = { docs: PersistDoc[]; cur: string | null };
 

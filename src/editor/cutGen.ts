@@ -3,7 +3,8 @@
  *  ★★컷 하나가 곧 씬 하나다. 생성 흐름을 새로 만들지 않고 **지금 것을 지난다**: 큐(`useQueue.enqueue`) · 시드 규칙(`rounds`) ·
  *    와일드카드(`resolveShot`) · 요금(`anlasCost`) · 계정(`currentAccountId`). 생성 창구(`store/gen.generateAll`)와 같은 조립이다.
  *  · 무엇으로 (설계 8-2): 베이스 = 공통의 화풍 + 그 컷이 고른 배경 + 컷 태그. 캐릭터 프롬프트 = 인물은 공통의 외형 + 그 컷의 칩,
- *    내레이션 · 말풍선은 그 칸에 적은 것 그대로. UC 는 공통의 것. 생성 옵션은 지금 생성 옵션(`useGen.params`).
+ *    내레이션 · 말풍선은 그 칸에 적은 것 그대로. UC 는 공통의 것.
+ *  · 생성 옵션과 참조 그림(Vibe · Precise Reference)은 **캔버스의 것**이다 (사용자 결정 2026-09-28: 캔버스마다 따로. `cutParams` · `useComicInput`).
  *  · 크기: 컷 비율에 맞춘 64 배수, 기본은 Opus 무료 한도 안 (`comic.cutSize`).
  *  · 저장: 워크스페이스에 보통 생성물처럼 — 탭 「만화 편집」 · 씬 그룹 = 캔버스 이름 · 씬 = 「p.01 컷 N」. 캔버스 밖에도 남아 갤러리·파일에서 찾는다.
  *  · 넣기: 큐가 그림을 받으면(`imageTaps`) 씬 그룹 id(`comic_<캔버스>`)와 칸 id(= 컷 레이어 id)로 그 컷을 찾아 넣는다 (`placeTake`).
@@ -14,7 +15,7 @@ import { compileBlocks } from "../lib/blocks";
 import { randomSeed, rounds } from "../lib/seedRounds";
 import { resolveShot } from "../lib/wildcards";
 import { currentAccountId } from "../store/accounts";
-import { useGen } from "../store/gen";
+import { useGen, type GenParams } from "../store/gen";
 import { CHAR_COLOR, DEFAULT_STYLE_COLOR, type Char } from "../store/prompt";
 import { imageTaps, useQueue } from "../store/queue";
 import { useSub } from "../store/sub";
@@ -27,18 +28,52 @@ import {
 } from "./comic";
 import { loadItem } from "./io";
 import { composite, makeCanvas, type Layer } from "./pixels";
-import { useImageInput } from "../store/imageInput";
+import { makeImageInput, useImageInput, type ImageSnap } from "../store/imageInput";
 import { pageView, useEditor, type Doc } from "./store";
+
+/** 컷을 뽑는 생성 옵션. 캔버스가 드는 것(`Doc.gen`, 열쇠는 `comic.COMIC_GEN_KEYS`)은 캔버스 것이고,
+ *  나머지(저장 옵션)는 생성 모드 것이다. 해상도는 항목마다 컷 크기로 덮는다 */
+export const cutParams = (doc: Doc, gen: GenParams = useGen.getState().params): GenParams => ({ ...gen, ...doc.gen });
+
+/** 만화 캔버스의 참조 그림 한 벌. **지금 캔버스의 것**이 들어 있다 (생성 버튼은 지금 캔버스만 누를 수 있다).
+ *  ★캔버스를 옮기면 떠나는 캔버스의 것을 담고 새 캔버스의 것으로 갈아 끼운다. 생성 모드의 탭과 같은 규칙이다 (`store/gen` 의 `tabImages`):
+ *    그림 바이트라 파일에 안 적고 메모리에만 둔다. 앱을 다시 켜면 비어 있다 */
+export const useComicInput = makeImageInput(() => {
+  const s = useEditor.getState();
+  const d = s.docs.find((x) => x.id === s.cur);
+  return (d ? cutParams(d) : useGen.getState().params).model;
+});
+const canvasImages = new Map<string, ImageSnap>();
+/** 지금 `useComicInput` 에 든 캔버스 (만화 캔버스가 아니면 null) */
+let shown: string | null = null;
+function syncComicInput() {
+  const s = useEditor.getState();
+  const id = s.docs.some((d) => d.id === s.cur && d.comic) ? s.cur : null;
+  if (id === shown) return;
+  if (shown) canvasImages.set(shown, useComicInput.getState().snapshot());
+  shown = id;
+  // 닫힌 캔버스가 담아 둔 것은 버린다
+  for (const k of [...canvasImages.keys()]) if (!s.docs.some((d) => d.id === k)) canvasImages.delete(k);
+  useComicInput.getState().load(id ? (canvasImages.get(id) ?? null) : null);
+}
+useEditor.subscribe(syncComicInput);
+syncComicInput();
+
+/** 그 캔버스의 참조 그림 한 벌 (지금 캔버스가 아니면 없다) */
+const inputOf = (doc: Doc) => (doc.id === shown ? useComicInput.getState() : null);
 
 /** 컷의 생성 크기 — 컷 상자 비율 (`cutSize`) */
 export const sizeOf = (p: Layer) => cutSize(bboxOf(panelPts(p, p.panel!.pts)), !!p.panel!.gen?.big);
 
-/** 그 컷들을 `count` 장씩 뽑을 때의 값 — 컷마다 크기가 달라 컷마다 세어 더한다. `free` 는 전부 무료일 때만 */
-export function cutCost(panels: Layer[], count: number, strength = 1) {
-  const params = useGen.getState().params;
+/** 그 컷들을 `count` 장씩 뽑을 때의 값 — 컷마다 크기가 달라 컷마다 세어 더한다. `free` 는 전부 무료일 때만.
+ *  `inpaint` 면 컷 인페인트다 (마스크가 실리므로 공홈처럼 바이브 값을 안 센다: `lib/anlas`) */
+export function cutCost(doc: Doc, panels: Layer[], count: number, strength = 1, inpaint = false) {
+  const params = cutParams(doc);
   const sub = useSub.getState().current();
   const opus = (sub?.tier ?? 0) >= 3;
   const usage = opus ? (sub?.usage ?? null) : null;
+  // ★거르는 규칙은 `riding` 하나다 (모델 능력 · 묶음 스위치 · 낱장 스위치). 생성 모드의 `lib/costNow` 와 같다
+  const ride = inputOf(doc)?.riding() ?? { vibes: [], refs: [] };
   let total = 0;
   let free = true;
   let overLimit = false;
@@ -46,7 +81,8 @@ export function cutCost(panels: Layer[], count: number, strength = 1) {
     const s = sizeOf(p);
     const c = anlasCost({
       model: params.model, width: s.w, height: s.h, steps: params.steps, opus, opusExhausted: !!usage?.isNegative,
-      uncachedVibes: 0, activeVibes: 0, refCount: 0, strength, count,
+      uncachedVibes: ride.vibes.filter((v) => !v.encoded).length, activeVibes: ride.vibes.length, refCount: ride.refs.length,
+      inpaint, strength, count,
     });
     total += c.total;
     free &&= c.free;
@@ -129,7 +165,7 @@ export async function generateCuts(doc: Doc, ids: string[], count: number, extra
   if (!doc.comic) return;
   const panels = ids.map((id) => doc.layers.find((l) => l.id === id && l.panel)).filter((l): l is Layer => !!l);
   if (!panels.length) return;
-  const params = useGen.getState().params;
+  const params = cutParams(doc);
   const shots = new Map(panels.map((p) => [p.id, cutPrompt(doc, p)]));
   // 프롬프트가 통째로 비면 NAI 가 거절한다 — 누르기 전에 막는다
   if (panels.every((p) => { const s = shots.get(p.id)!; return !s.prompt.trim() && !s.chars.length; })) { toast(t("editor.cutEmpty"), "warn"); return; }
@@ -164,6 +200,7 @@ export async function generateCuts(doc: Doc, ids: string[], count: number, extra
   await useQueue.getState().enqueue(
     {
       ...params,
+      ...refPayload(doc),
       workspace: ws,
       account: currentAccountId(),
       tab: t("editor.comicTab"),
@@ -175,7 +212,13 @@ export async function generateCuts(doc: Doc, ids: string[], count: number, extra
     items,
     1,
   );
-  if (params.seed_mode !== "fixed") useGen.getState().set("seed", randomSeed());
+  if (params.seed_mode !== "fixed") useEditor.getState().setComicGen(doc.id, "seed", randomSeed());
+}
+
+/** 그 캔버스의 참조 그림 조각 (Vibe · Precise Reference). 싣는 것은 `payload` 가 정한다. 베이스 그림 칸은 안 싣는다 (컷 인페인트가 항목마다 싣는다) */
+export function refPayload(doc: Doc): Record<string, unknown> {
+  const p = inputOf(doc)?.payload();
+  return { vibe_transfer: p?.vibe_transfer ?? [], precise_references: p?.precise_references ?? [], normalize_reference_strength: p?.normalize_reference_strength ?? true };
 }
 
 /** 컷 인페인트의 베이스 — 그 컷 상자를 잘라 생성 크기로 (말풍선·효과음·컷 테두리는 뺀다) + **컷 모양 마스크**(사각이 아니다, 설계 8번).
