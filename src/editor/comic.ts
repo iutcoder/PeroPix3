@@ -616,17 +616,43 @@ export function wrapLines(value: string, maxW: number, measure: (s: string) => n
 
 type Stackable = { id: string; panel?: PanelMeta; bubble?: BubbleMeta; sfx?: unknown; clip?: string; x: number; y: number; w: number; h: number };
 
-/** 만화 페이지의 레이어 차례 — **아래부터** 그 밖의 레이어(용지 등) → 컷마다 [그 컷에 든 그림들, 컷 테두리] → 효과음 → 말풍선.
- *  컷 테두리가 그 컷의 그림 위에 오고, 효과음은 컷 테두리 위(컷 밖으로 삐져나가는 것이 흔하다), 말풍선이 맨 위에 온다.
- *  레이어 목록도 이 묶음(말풍선 · 효과음 · 컷 · 그 밖)으로 보인다 (설계 4번). 같은 묶음 안의 차례는 지킨다 — 목록에서 끌어 바꾼 것이 남는다 */
+/** 레이어가 든 묶음 — 레이어 목록의 묶음 머리(그 밖 · 컷 · 효과음 · 말풍선)와 같다 */
+export type Tier = "base" | "panel" | "sfx" | "bubble";
+
+/** 레이어마다 든 묶음. 컷·효과음·말풍선은 제 묶음, 컷에 든 그림은 그 컷 묶음이다.
+ *  ★그 밖의 레이어(보통 그림·글자)는 **바로 아래에 있는 것의 묶음**을 따른다 (사용자 결정 2026-09-28: 새 레이어를 컷 위·말풍선 위에
+ *    둘 수 있게) — 말풍선 바로 위에 두면 말풍선 묶음에 들어 말풍선과 함께 맨 위에 남고, 맨 아래에 두면 용지와 같은 묶음이다.
+ *    따로 적어 두는 값이 없으므로 끌어 옮기면 그 자리의 묶음이 곧 그 레이어의 묶음이 된다 */
+export function comicTiers<T extends Stackable>(layers: T[]): Map<string, Tier> {
+  const ids = new Set(layers.filter((l) => l.panel).map((l) => l.id));
+  const out = new Map<string, Tier>();
+  let cur: Tier = "base";
+  for (const l of layers) {
+    const own: Tier | null = l.panel ? "panel" : l.bubble ? "bubble" : l.sfx ? "sfx" : l.clip && ids.has(l.clip) ? "panel" : null;
+    if (own) cur = own;
+    out.set(l.id, own ?? cur);
+  }
+  return out;
+}
+
+/** 만화 페이지의 레이어 차례 — **아래부터** 그 밖 묶음(용지 등) → 컷마다 [그 컷에 든 그림들, 컷 테두리] → 컷 위에 둔 레이어 →
+ *  효과음 묶음 → 말풍선 묶음. 컷 테두리가 그 컷의 그림 위에 오고, 효과음은 컷 테두리 위(컷 밖으로 삐져나가는 것이 흔하다),
+ *  말풍선이 맨 위에 온다. 그 밖의 레이어가 어느 묶음인지는 `comicTiers` 가 정한다.
+ *  레이어 목록도 이 묶음으로 보인다 (설계 4번). 같은 묶음 안의 차례는 지킨다 — 목록에서 끌어 바꾼 것이 남는다 */
 export function comicStack<T extends Stackable>(layers: T[]): T[] {
+  const tier = comicTiers(layers);
   const panels = layers.filter((l) => l.panel);
   const ids = new Set(panels.map((p) => p.id));
   const inPanel = (l: T) => !l.panel && !l.bubble && !l.sfx && !!l.clip && ids.has(l.clip);
-  const base = layers.filter((l) => !l.panel && !l.bubble && !l.sfx && !inPanel(l));
-  const sfx = layers.filter((l) => l.sfx);
-  const bubbles = layers.filter((l) => l.bubble);
-  return [...base, ...panels.flatMap((p) => [...layers.filter((l) => inPanel(l) && l.clip === p.id), p]), ...sfx, ...bubbles];
+  const free = (l: T) => !l.panel && !l.bubble && !l.sfx && !inPanel(l);
+  const freeIn = (g: Tier) => (l: T) => free(l) && tier.get(l.id) === g;
+  return [
+    ...layers.filter(freeIn("base")),
+    ...panels.flatMap((p) => [...layers.filter((l) => inPanel(l) && l.clip === p.id), p]),
+    ...layers.filter(freeIn("panel")),
+    ...layers.filter((l) => !!l.sfx || freeIn("sfx")(l)),
+    ...layers.filter((l) => !!l.bubble || freeIn("bubble")(l)),
+  ];
 }
 
 /** 컷 번호 — 읽는 차례대로 1부터 (컷 레이어 id → 번호) */

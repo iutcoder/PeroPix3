@@ -120,6 +120,10 @@ type S = {
   addLayer: () => void;
   dupLayer: () => void;
   mergeDown: () => void;
+  /** 컷의 「그리기」 레이어를 골라 돌려준다 — 없으면 `make` 일 때 만든다 (그 컷 그림 위, 컷 모양으로 잘린다). 컷이 아니면 null */
+  panelDraw: (panelId: string, make: boolean) => Layer | null;
+  /** 글자·말풍선·효과음을 보통 그림 레이어로 바꾼다 (원문을 떼어 낸다 — 붓으로 그리기 전에, 한 걸음) */
+  rasterize: (id: string) => void;
   /** 레이어를 거둔다 — 주면 그것, 안 주면 **고른 것 전부** (한 걸음). 컷을 거두면 그 컷에 든 그림도 함께 — 그때는 묻는다 */
   removeLayer: (id?: string) => Promise<void>;
   /** 레이어 차례를 통째로 (아래가 먼저인 id 목록). 화면 목록의 끌기(`useReorder`)가 새 차례를 셈해 넘긴다 */
@@ -210,6 +214,16 @@ const DEFAULT_H = 832;
 const docOf = (s: S) => s.docs.find((d) => d.id === s.cur) ?? null;
 /** 고른 것 가운데 으뜸 — 마지막에 고른 것 */
 export const primaryOf = (d: { sel: string[] }): string | null => d.sel[d.sel.length - 1] ?? null;
+/** 「아래와 합치기」가 합칠 레이어 — 못 합치면 null (버튼이 꺼진다).
+ *  ★말풍선·효과음·글자는 위에서 합칠 수 있다 (합치면 보통 그림이 된다, 사용자 결정 2026-09-28). 컷과, 아래의 말풍선에는 합치지 않는다
+ *  (컷 테두리는 페이지 값에서 다시 굽고, 말풍선에 합치면 몸통을 옮길 때 합친 것이 떨어져 나간다) */
+export function mergeBelow(d: { layers: Layer[]; sel: string[] }): Layer | null {
+  const i = d.layers.findIndex((x) => x.id === primaryOf(d));
+  if (i <= 0) return null;
+  const top = d.layers[i];
+  const below = d.layers[i - 1];
+  return top.panel || below.panel || below.bubble ? null : below;
+}
 
 export const useEditor = create<S>((set, get) => {
   /** 한 걸음 — 직전 상태를 적고 바꾼다 (그 문서에) */
@@ -564,8 +578,11 @@ export const useEditor = create<S>((set, get) => {
     },
     addLayer() {
       commit((d) => {
-        const l = mkLayer(makeCanvas(d.w, d.h), layerName(d), { x: 0, y: 0, w: d.w, h: d.h });
         const i = d.layers.findIndex((x) => x.id === primaryOf(d));
+        // ★고른 것 바로 위에 둔다. 만화 페이지에서 컷에 든 그림을 골라 두었으면 새 레이어도 그 컷에 든다 (그 컷 모양으로 잘린다)
+        const at = d.layers[i];
+        const clip = d.comic && at && !at.panel && at.clip && d.layers.some((x) => x.id === at.clip && x.panel) ? at.clip : undefined;
+        const l: Layer = { ...mkLayer(makeCanvas(d.w, d.h), layerName(d), { x: 0, y: 0, w: d.w, h: d.h }), ...(clip ? { clip } : {}) };
         const layers = [...d.layers];
         layers.splice(i < 0 ? layers.length : i + 1, 0, l);
         return { layers, sel: [l.id] };
@@ -585,16 +602,45 @@ export const useEditor = create<S>((set, get) => {
     mergeDown() {
       commit((d) => {
         const i = d.layers.findIndex((x) => x.id === primaryOf(d));
-        if (i <= 0) return null;
         const top = d.layers[i];
-        const below = d.layers[i - 1];
-        // ★컷·말풍선은 원문에서 굽는 레이어라 합치지 않는다 (합치면 원문을 잃는다)
-        if (top.panel || top.bubble || below.panel || below.bubble) return null;
+        const below = mergeBelow(d);
+        if (!top || !below) return null;
         // ★합친 결과는 보통 레이어다 — 아래가 글자 레이어였어도 원문을 떼어 낸다 (남기면 다음 고치기가 합친 것을 지운다).
         //   위가 컷에 든 그림이면 그 컷 모양으로 잘라 넣는다
         const merged: Layer = { ...below, text: undefined, sfx: undefined, cv: mergeInto(below, top, top.clip !== below.clip ? clipOf(d.layers, top) : null) };
         const layers = d.layers.filter((_, k) => k !== i).map((x) => (x.id === below.id ? merged : x));
         return { layers, sel: [below.id] };
+      });
+    },
+    panelDraw(panelId, make) {
+      const d = docOf(get());
+      const p = d?.layers.find((l) => l.id === panelId && l.panel);
+      if (!d || !p?.panel) return null;
+      const had = d.layers.find((l) => l.draw && l.clip === panelId);
+      if (had) {
+        get().selectLayer(had.id);
+        return had;
+      }
+      if (!make) return null;
+      // ★컷 상자 크기 그대로 (1:1) — 그 컷의 그림들 위, 테두리 바로 아래에 둔다 (`comicStack` 이 컷 묶음 안의 차례를 지킨다)
+      const b = bboxOf(panelPts(p, p.panel.pts));
+      const box = { x: Math.floor(b.x), y: Math.floor(b.y), w: Math.max(1, Math.ceil(b.w)), h: Math.max(1, Math.ceil(b.h)) };
+      const l: Layer = { ...mkLayer(makeCanvas(box.w, box.h), t("editor.panelDraw"), box), clip: panelId, draw: true };
+      commit((dd) => {
+        const at = dd.layers.findIndex((x) => x.id === panelId);
+        const layers = [...dd.layers];
+        layers.splice(at < 0 ? layers.length : at, 0, l);
+        return { layers, sel: [l.id] };
+      });
+      return docOf(get())?.layers.find((x) => x.id === l.id) ?? null;
+    },
+    rasterize(id) {
+      if (get().textEdit?.id === id) get().endTextEdit(true);
+      commit((d) => {
+        const l = d.layers.find((x) => x.id === id);
+        if (!l || !(l.text || l.bubble || l.sfx)) return null;
+        // 픽셀은 지금 구운 그대로 — 원문만 떼어 낸다. 만화 페이지의 자리는 그대로다 (`comicTiers`: 아래에 있는 것의 묶음을 따른다)
+        return { layers: d.layers.map((x) => (x.id === id ? { ...x, text: undefined, bubble: undefined, sfx: undefined } : x)) };
       });
     },
     async removeLayer(id) {

@@ -15,10 +15,10 @@ import { Hint, Line, Sec, box, dropFocus, num, on } from "../panels/censor/ui";
 import { NO_ADJUST, hasAdjust, withRatio } from "./model";
 import { fxThumb, thumbOf, type Layer } from "./pixels";
 import { FX_AMT, FX_KINDS, FX_SEEDED, newSeed, type Fx, type FxKind } from "./fx";
-import { primaryOf, saveName, useEditor, whereOf, type Doc } from "./store";
+import { mergeBelow, primaryOf, saveName, useEditor, whereOf, type Doc } from "./store";
 import { CanvasSizeDialog, ExportPagesDialog, ImageSizeDialog } from "./dialogs";
 import { BubbleKindIcon, CAST_COLORS } from "./comicUi";
-import { bendable, castSpot, comicGroupId, defaultTail, hasTails, panelNumbers, panelPts, pointInPoly, type BubbleMeta, type PanelGen } from "./comic";
+import { bendable, castSpot, comicGroupId, comicTiers, defaultTail, hasTails, panelNumbers, panelPts, pointInPoly, type BubbleMeta, type PanelGen, type Tier } from "./comic";
 import { cutCost, cutRoute, generateCuts, inpaintCuts, pickTake, sizeOf } from "./cutGen";
 import { EnhanceDialog } from "../panels/EnhanceDialog";
 import { useImageInput } from "../store/imageInput";
@@ -99,7 +99,7 @@ export function Side({ doc }: { doc: Doc }) {
           <div style={{ display: "flex", gap: "var(--sp-2)" }}>
             <IconBtn mark="editor-layer-add" tip={t("editor.addLayer")} onClick={() => s.addLayer()}>{Icon.plus}</IconBtn>
             <IconBtn mark="editor-layer-dup" tip={t("editor.dupLayer")} disabled={!sel} onClick={() => s.dupLayer()}>{Icon.duplicate}</IconBtn>
-            <IconBtn mark="editor-layer-merge" tip={t("editor.mergeDown")} disabled={!sel || doc.layers.findIndex((l) => l.id === sel.id) <= 0} onClick={() => s.mergeDown()}>{Icon.merge}</IconBtn>
+            <IconBtn mark="editor-layer-merge" tip={t("editor.mergeDown")} disabled={!sel || !mergeBelow(doc)} onClick={() => s.mergeDown()}>{Icon.merge}</IconBtn>
             <span style={{ flex: 1 }} />
             <IconBtn mark="editor-layer-del" tip={t("editor.delLayer")} disabled={!sel} onClick={() => s.removeLayer()} danger>{Icon.trash}</IconBtn>
           </div>
@@ -164,8 +164,9 @@ export function Side({ doc }: { doc: Doc }) {
         </Sec>
         )}
 
-        {/* ── 보정 — 레이어의 속성이라 슬라이더 값이 **언제나** 걸린다 (사용자 지시 2026-09-22: 「적용」 없음, 초기화만) ── */}
-        {!(sel && !many && (sel.panel || sel.bubble)) && (
+        {/* ── 보정 — 레이어의 속성이라 슬라이더 값이 **언제나** 걸린다 (사용자 지시 2026-09-22: 「적용」 없음, 초기화만).
+             말풍선에도 걸린다 (사용자 결정 2026-09-28). 컷은 그 안의 그림을 골라서 건다 ── */}
+        {!(sel && !many && sel.panel) && (
         <div style={{ display: "flex", flexDirection: "column", gap: "var(--sp-2)" }}>
           <span style={{ display: "flex", alignItems: "center", gap: "var(--sp-2)", fontSize: "var(--text-xs)", fontWeight: "var(--w-semi)", color: "var(--ink-soft)" }}>
             {t("editor.adjust")}
@@ -202,7 +203,7 @@ export function Side({ doc }: { doc: Doc }) {
         )}
 
         {/* ── 효과 — 보정과 같은 규칙이다 (레이어의 속성, 언제나 걸림) ── */}
-        {!(sel && !many && (sel.panel || sel.bubble)) && <FxSection sel={sel} many={many} n={doc.sel.length} />}
+        {!(sel && !many && sel.panel) && <FxSection sel={sel} many={many} n={doc.sel.length} />}
 
         {/* ── 페이지 (만화 페이지만) ── */}
         {doc.comic && <PageSection doc={doc} onExport={() => setDlg("pages")} />}
@@ -424,12 +425,13 @@ function LayerList({ doc }: { doc: Doc }) {
   const move = (from: number, to: number) => s.orderLayers(moveTo(rows, from, to).map((l) => l.id).reverse());
   const { register, handleProps, dragIdx, overIdx } = useReorder(rows.length, move, { tapSafe: true, within: listRef });
 
-  // ★만화 페이지는 묶음으로 보인다 — 말풍선 · 컷(그 컷에 든 그림이 아래로 들여 쓰인다) · 그 밖 (설계 4번 · 목업 ①).
-  //   차례는 스토어가 묶음대로 맞춰 두므로(`comicStack`) 줄 사이에 머리만 끼우면 된다
+  // ★만화 페이지는 묶음으로 보인다 — 말풍선 · 효과음 · 컷(그 컷에 든 그림이 아래로 들여 쓰인다) · 그 밖 (설계 4번 · 목업 ①).
+  //   차례는 스토어가 묶음대로 맞춰 두므로(`comicStack`) 줄 사이에 머리만 끼우면 된다. 보통 레이어는 제가 든 묶음에 보인다 (`comicTiers`)
   const nums = doc.comic ? panelNumbers(doc.layers, doc.comic.dir, doc.h) : null;
-  const groupOf = (l: Layer) => (l.bubble ? "bubble" : l.sfx ? "sfx" : l.panel || (l.clip && doc.layers.some((p) => p.id === l.clip && p.panel)) ? "panel" : "other");
-  const counts = { bubble: doc.layers.filter((l) => l.bubble).length, sfx: doc.layers.filter((l) => l.sfx).length, panel: doc.layers.filter((l) => l.panel).length, other: 0 };
-  counts.other = doc.layers.length - counts.bubble - counts.sfx - doc.layers.filter((l) => groupOf(l) === "panel").length;
+  const tiers = comicTiers(doc.layers);
+  const GROUP_OF = { bubble: "bubble", sfx: "sfx", panel: "panel", base: "other" } as const satisfies Record<Tier, string>;
+  const groupOf = (l: Layer) => GROUP_OF[tiers.get(l.id) ?? "base"];
+  const counts = { bubble: doc.layers.filter((l) => l.bubble).length, sfx: doc.layers.filter((l) => l.sfx).length, panel: doc.layers.filter((l) => l.panel).length, other: doc.layers.filter((l) => groupOf(l) === "other").length };
   const GROUP_KEY = { bubble: "editor.groupBubbles", sfx: "editor.groupSfx", panel: "editor.groupPanels", other: "editor.groupOther" } as const;
   const head = (g: "bubble" | "sfx" | "panel" | "other") => (
     <div data-editor-layer-group={g} style={{ display: "flex", alignItems: "center", gap: 6, padding: "4px var(--sp-2) 2px", fontSize: "var(--text-3xs)", color: "var(--ink-faint)", letterSpacing: ".02em" }}>
@@ -468,18 +470,22 @@ function LayerList({ doc }: { doc: Doc }) {
 }
 
 /** 목록의 줄 차례 — 위가 앞(스토어 차례를 뒤집은 것). 만화 페이지는 컷 묶음만 **컷 번호 차례**로 보인다
- *  (컷의 쌓임 차례는 겹칠 때만 뜻이 있고, 목록에서 찾는 것은 번호다). 끌어 바꾸면 이 차례가 스토어로 간다 */
+ *  (컷의 쌓임 차례는 겹칠 때만 뜻이 있고, 목록에서 찾는 것은 번호다). 컷 위에 둔 레이어는 컷 묶음 맨 위에 온다.
+ *  끌어 바꾸면 이 차례가 스토어로 간다 */
 function listRows(doc: Doc): Layer[] {
   const rows = [...doc.layers].reverse();
   if (!doc.comic) return rows;
   const nums = panelNumbers(doc.layers, doc.comic.dir, doc.h);
+  const tiers = comicTiers(doc.layers);
   const panels = rows.filter((l) => l.panel).sort((a, b) => (nums.get(a.id) ?? 0) - (nums.get(b.id) ?? 0));
   const inPanel = (l: Layer) => !l.panel && !l.bubble && !l.sfx && !!l.clip && panels.some((p) => p.id === l.clip);
+  const freeIn = (g: Tier) => (l: Layer) => !l.panel && !inPanel(l) && tiers.get(l.id) === g;
   return [
-    ...rows.filter((l) => l.bubble),
-    ...rows.filter((l) => l.sfx),
+    ...rows.filter((l) => tiers.get(l.id) === "bubble"),
+    ...rows.filter((l) => tiers.get(l.id) === "sfx"),
+    ...rows.filter(freeIn("panel")),
     ...panels.flatMap((p) => [p, ...rows.filter((l) => inPanel(l) && l.clip === p.id)]),
-    ...rows.filter((l) => !l.bubble && !l.sfx && !l.panel && !inPanel(l)),
+    ...rows.filter(freeIn("base")),
   ];
 }
 
@@ -551,7 +557,7 @@ function LayerRow({
           style={{ width: 44, height: 30, borderRadius: 3, flexShrink: 0, background: "conic-gradient(#3a3a44 25%, #2a2a32 0 50%, #3a3a44 0 75%, #2a2a32 0) 0 0/8px 8px" }}
         />
       )}
-      {/* 글자 레이어 표식 — 붓이 안 먹는 이유가 목록에서 보인다 */}
+      {/* 글자 레이어 표식 — 원문에서 굽는 레이어라는 것이 목록에서 보인다 */}
       {l.text && <span style={{ display: "grid", color: "var(--ink-faint)", flexShrink: 0 }}>{Icon.typeT12}</span>}
       {/* 컷의 이름은 읽는 차례 번호다 (고칠 이름이 아니다) */}
       {l.panel ? (
@@ -810,8 +816,9 @@ function CutSection({ doc, panel }: { doc: Doc; panel: Layer }) {
   const cur = doc.layers.find((l) => l.clip === panel.id && l.take)?.take ?? null;
   const group = comicGroupId(doc.id);
   // 빈 컷 — 그림도 없고 대기도 없는 컷 (「빈 컷 전부 생성」이 도는 것)
+  // ★그리기 레이어만 든 컷도 빈 컷이다 (밑그림은 그림이 아니다)
   const empty = doc.layers.filter(
-    (l) => l.panel && l.on && !doc.layers.some((x) => x.clip === l.id) && !pending.some((q) => q.groupId === group && q.cellId === l.id),
+    (l) => l.panel && l.on && !doc.layers.some((x) => x.clip === l.id && !x.draw) && !pending.some((q) => q.groupId === group && q.cellId === l.id),
   );
   const emptyCost = cutCost(empty, 1, doc.comic?.addon);
   const inpaintCost = cutCost([panel], count, doc.comic?.addon, useImageInput.getState().baseInpaintStrength ?? 1);

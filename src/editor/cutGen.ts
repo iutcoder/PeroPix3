@@ -20,7 +20,7 @@ import { useSub } from "../store/sub";
 import { toast } from "../store/toast";
 import { wildcardPools } from "../store/wildcards";
 import { useWs } from "../store/workspace";
-import { bboxOf, castCenter, comicGroupId, cutSize, docOfGroup, panelNumbers, panelPts, type ComicAddon, type CutTake, type Handed } from "./comic";
+import { bboxOf, castCenter, comicGroupId, comicTiers, cutSize, docOfGroup, panelNumbers, panelPts, type ComicAddon, type CutTake, type Handed } from "./comic";
 import { loadItem } from "./io";
 import { composite, makeCanvas, type Layer } from "./pixels";
 import { useImageInput } from "../store/imageInput";
@@ -177,13 +177,18 @@ export async function generateCuts(doc: Doc, ids: string[], count: number, extra
 }
 
 /** 컷 인페인트의 베이스 — 그 컷 상자를 잘라 생성 크기로 (말풍선·효과음·컷 테두리는 뺀다) + **컷 모양 마스크**(사각이 아니다, 설계 8번).
- *  ★컷에 든 그림은 컷 모양으로 잘려 합성되므로 컷 레이어는 끈 채로 목록에 둔다 (`clipOf` 가 그 모양을 찾는다) */
+ *  ★컷에 든 그림은 컷 모양으로 잘려 합성되므로 컷 레이어는 끈 채로 목록에 둔다 (`clipOf` 가 그 모양을 찾는다)
+ *  ★싣는 것은 **그 밖 묶음과 컷 묶음**뿐이다 (`comicTiers`). 컷 위·말풍선 위에 둔 레이어(래스터화한 말풍선 포함)는 말풍선처럼 뺀다.
+ *    컷의 그리기 레이어는 그 컷에 든 것이라 실린다 — 대충 그려 두고 인페인트로 보내는 밑그림이다 */
 export function cutBase(doc: Doc, p: Layer): { image: string; mask: string } {
   const size = sizeOf(p);
   const poly = panelPts(p, p.panel!.pts);
   const b = bboxOf(poly);
   const full = makeCanvas(doc.w, doc.h);
-  composite({ w: doc.w, h: doc.h, layers: doc.layers.filter((l) => !l.bubble && !l.sfx).map((l) => (l.panel ? { ...l, on: false } : l)) }, full, 1);
+  const tiers = comicTiers(doc.layers);
+  const cuts = new Set(doc.layers.filter((l) => l.panel).map((l) => l.id));
+  const under = (l: Layer) => tiers.get(l.id) === "base" || !!l.panel || (!l.bubble && !l.sfx && !!l.clip && cuts.has(l.clip));
+  composite({ w: doc.w, h: doc.h, layers: doc.layers.filter(under).map((l) => (l.panel ? { ...l, on: false } : l)) }, full, 1);
   const img = makeCanvas(size.w, size.h);
   const g = img.getContext("2d")!;
   g.fillStyle = "#ffffff";

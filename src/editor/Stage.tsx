@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useI18n } from "../i18n";
 import { toast } from "../store/toast";
+import { ask } from "../store/ask";
 import { useUi } from "../store/ui";
 import { canPan, centerPan, clampPan, drawSize, keepCenter, stepZoom, zoomFrom, ZOOM_MAX, ZOOM_MIN, type Pan, type Size } from "../lib/zoomView";
 import { boxInside, brushScale, centerOf, cornersOf, docToLayer, hitLayer, keepAnchor, normRect, rad, rectFrom, resizeCursor, type Rect } from "./model";
@@ -379,12 +380,24 @@ export function Stage({ doc }: { doc: Doc }) {
     }
 
     if (tool === "brush" || tool === "eraser" || tool === "bucket") {
-      const l = s.layer();
+      let l = s.layer();
       if (!l) return toast(t("editor.noLayer"), "warn");
+      // ★컷을 고른 채 그리면 그 컷의 「그리기」 레이어에 그린다 — 그 컷 그림 위, 컷 모양으로 잘린다 (사용자 결정 2026-09-28).
+      //   처음 그을 때 생기고 골라진다. 지우개는 있는 것에서만 지운다 (컷 그림을 지우려면 그림 레이어를 고른다)
+      if (l.panel) {
+        const dl = s.panelDraw(l.id, tool !== "eraser");
+        if (!dl) return toast(t("editor.panelNoDraw"), "warn");
+        l = dl;
+      }
       if (!l.on) return toast(t("editor.layerOff"), "warn");
-      // ★글자 레이어에는 안 그린다 — 그리면 원문과 어긋난다. 아래와 합치면 보통 레이어가 된다
-      if (l.text) return toast(t("editor.textNoPaint"), "warn");
-      if (l.sfx || l.bubble || l.panel) return toast(t("editor.vectorNoPaint"), "warn");
+      // ★글자·말풍선·효과음은 원문에서 굽는 레이어다 — 그 레이어에 그리려면 보통 그림으로 바꾼다 (사용자 결정 2026-09-28).
+      //   바꾸면 글을 더 고칠 수 없으므로 묻는다. 바꾼 뒤 다시 그으면 그려진다 (포토샵의 래스터화와 같다)
+      if (l.text || l.bubble || l.sfx) {
+        const id = l.id;
+        const what = l.bubble ? "editor.rasterBubble" : l.sfx ? "editor.rasterSfx" : "editor.rasterText";
+        void ask({ title: t("editor.rasterTitle"), body: t(what), ok: t("editor.raster"), cancel: t("common.cancel") }).then((ok) => ok && s.rasterize(id));
+        return;
+      }
       // 페인트통 — 누른 자리와 이어진 같은 색을 채운다 (한 걸음)
       if (tool === "bucket") { s.fillAt(p); return; }
       const b = tool === "eraser" ? useUi.getState().editorBrush.eraser : useUi.getState().editorBrush.brush;
