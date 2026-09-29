@@ -827,6 +827,8 @@ function handle(m: Record<string, any>, set: Setter, get: () => S) {
       toast(queueErrorText(String(m.error ?? "")), "warn");
       bump(String(m.account ?? ""), "err");
       takeProgress(m.progress, set);
+      // ★잡이 통째로 죽으면 `job_done` 이 안 온다 — 그때까지 나간 몫이 화면 잔액에 들게 여기서 묻는다 (`settleBatch` 의 ★★주)
+      if (m.type === "job_error") void useSub.getState().load(String(m.account ?? "") || undefined);
       break;
   }
 }
@@ -883,6 +885,13 @@ function settleBatch(cancelled: boolean, account: string | null, set: Setter, ge
         : "done";
   const done = okN;
   set({ phase });
+
+  /* ★★**취소·실패로 끝나도 잔액을 다시 묻는다** (사용자 제보 2026-09-30: 5장 중 2장째에 취소하고
+     다시 5장을 뽑으니 「25 로 보였는데 40 이 나갔다」). 예전에는 `job_done` 에서만 물어서, 취소한
+     배치가 이미 쓴 몫(끝난 장 + 나가 있던 한 장)이 화면 잔액에 안 들어갔다. 그 옛 잔액이 다음 배치의
+     기준선이 되어(`anlasMeter.arm`) 앞 배치 몫까지 다음 배치의 청구로 잡혔다. 청구 자체는 맞았다.
+     ★끝난 배치(`done`)는 `job_done` 이 이미 물었고 `settle` 도 묻는다 — 여기서는 나머지만 묻는다. */
+  if (phase !== "done") void useSub.getState().load(account ?? undefined);
 
   // ★**실제로 청구된 Anlas 를 잰다** (`store/anlasMeter`). 잰다는 것은 잔액 차이다.
   //   ★온전히 끝난 배치에서만 잰다. 취소·실패·일부 실패는 몇 장이 실제로 나갔는지
