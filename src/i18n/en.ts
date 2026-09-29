@@ -30,6 +30,9 @@ export const en = {
     generating: "A scene here is still generating. Move it once that finishes.",
     movingTab: "Moving tab \"{name}\"…",
     movingGroup: "Moving scene group \"{name}\"…",
+    renaming: "Moving images to the \"{name}\" folder…",
+    renameWait: "Rename it once the other move finishes.",
+    generatingRename: "A scene here is still generating. Rename it once that finishes.",
     tooLong: "This move is taking a while. The screen is unlocked; the work continues.",
   },
 
@@ -593,6 +596,7 @@ export const en = {
     lastOne: "The last tab cannot be deleted.",
     movedTo: "Moved tab \"{name}\" to \"{ws}\" ({n} images)",
     moveFailed: "Could not move tab \"{name}\": {why}",
+    renameFailed: "Could not rename tab \"{name}\": {why}",
   },
 
   update: {
@@ -1390,6 +1394,7 @@ export const en = {
   sceneGroup: {
     movedTo: "Moved scene group \"{name}\" to tab \"{tab}\" ({n} images)",
     moveFailed: "Could not move scene group \"{name}\": {why}",
+    renameFailed: "Could not rename scene group \"{name}\": {why}",
     closeConfirm: "Close scene group \"{name}\" ({n} images)",
     closeConfirmBody: "The image files stay in the trash. Items older than 24 hours are cleared on app start.",
     closeSet: "Close scene group",

@@ -1174,6 +1174,73 @@ class Store:
         self.save(ws, spec)
         return {"ok": True, "moved": len(moves), "spec": spec, "records": self.live_records(ws)}
 
+    # ── 탭·씬 그룹 이름 바꾸기 — 그림이 새 이름의 폴더로 따라간다 ─────
+    def rename_place(self, ws: str, kind: str, place_id: str, name: str) -> dict:
+        """탭(`kind="tab"`)이나 씬 그룹(`kind="sceneGroup"`)의 이름을 바꾸고, 그 그림을
+        **새 이름의 폴더로 옮긴다** (사용자 결정 2026-09-29).
+
+        ★★예전에는 이름만 바꿨다. 저장 자리는 이름으로 짓는데(`out_dir`) 이미 만든 그림은 옛 폴더에
+          남아, 한 탭의 그림이 두 폴더로 갈렸다. 비워진 옛 이름을 나중에 다른 탭(「복제 3」 같은
+          기본 이름)이 다시 받으면 **남의 탭 그림과 한 폴더에 섞였다** (사용자 데이터 실측 2026-09-29:
+          한 폴더를 탭 셋이 나눠 썼다).
+        ★옮기는 것은 씬 그룹 옮기기와 같은 `_relocate` 다. 그 그룹의 줄을 **어디 있든** 모으므로
+          전에 갈려 있던 그림도 이번에 한 폴더로 모인다.
+        ★씬 그룹 이름이 바뀌면 색인에 적힌 세트 이름(`scene_group`)도 함께 바꾼다 — id 가 없는
+          옛 줄은 그 이름으로 묶인다 (`lib/takes.ts` 의 `takesOf`).
+        ★생성 중인지는 부르는 쪽이 본다 (`server.py` 의 `_refuse_if_generating`)."""
+        name = str(name or "").strip()
+        if not name:
+            raise ValueError("이름이 비어 있습니다")
+        with self.locked(ws):
+            spec = self.load(ws)
+            if not spec:
+                raise ValueError("워크스페이스를 찾지 못했습니다")
+            tabs = spec.get("tabs") or []
+            groups = spec.get("sceneGroups") or []
+            if kind == "tab":
+                place = next((t for t in tabs if t.get("id") == place_id), None)
+                if not place:
+                    raise ValueError("그 탭이 없습니다")
+                targets = [g for g in groups if g.get("tabId") == place_id]
+            elif kind == "sceneGroup":
+                place = next((g for g in groups if g.get("id") == place_id), None)
+                if not place:
+                    raise ValueError("그 씬 그룹이 없습니다")
+                targets = [place]
+            else:
+                raise ValueError(f"모르는 대상입니다: {kind}")
+            was = str(place.get("name") or "")
+            place["name"] = name
+            tab_names = {t.get("id"): str(t.get("name") or "") for t in tabs}
+
+            rows_all = self.records(ws)
+            files_all = {str(r.get("file") or "") for r in rows_all}
+            moves: dict[str, str] = {}
+            renamed: set[str] = set()      # 이름이 바뀐 그룹의 줄 — 세트 이름을 새로 적는다
+            for g in targets:
+                gid = g.get("id")
+                # ★id 가 없는 옛 줄은 **그룹의 옛 이름**으로 묶는다. idOnly 그룹은 폴백을 안 쓴다 (`takesOf`)
+                gname_was = was if kind == "sceneGroup" else str(g.get("name") or "")
+                mine = [
+                    r for r in rows_all
+                    if r.get("scene_group_id") == gid
+                    or (not r.get("scene_group_id") and not g.get("idOnly") and r.get("scene_group") == gname_was)
+                ]
+                ours = {str(r.get("file") or "") for r in mine}
+                if kind == "sceneGroup":
+                    renamed |= ours
+                moves.update(self._relocate(ws, mine, ws, tab_names.get(g.get("tabId"), ""),
+                                            str(g.get("name") or ""), files_all - ours))
+            # ★세트 이름은 **옮기지 않은 줄에도** 적는다 — 이미 새 이름의 폴더에 있던 것(이름을
+            #   되돌린 경우)도 id 없는 폴백이 새 이름으로 찾아야 한다
+            rewrite = {**{f: f for f in renamed}, **moves}
+            if rewrite:
+                self._rewrite_paths(ws, rewrite, {"scene_group": name} if kind == "sceneGroup" else None)
+                self._carry_selection(spec, moves)   # ★별표도 새 경로로 (그 함수의 ★★주)
+            self.save(ws, spec)
+            return {"ok": True, "moved": len(moves), "moves": moves, "spec": spec,
+                    "records": self.live_records(ws)}
+
     # ── 탭을 다른 워크스페이스로 ─────────────────────────────
     def move_tab(self, src_ws: str, tab_id: str, dst_ws: str, fill: dict | None = None) -> dict:
         """탭 하나를 **다른 워크스페이스로 옮긴다** — `_move_tab_locked` 를 두 워크스페이스의 잠금 안에서.

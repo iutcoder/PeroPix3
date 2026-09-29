@@ -345,7 +345,8 @@ type S = {
    *  ★한 번에 하나만 돈다 — 자세한 것은 구현부의 ★★주. */
   renumberSet: (groupId: string) => Promise<void>;
   closeSet: (id: string) => void;
-  renameSceneGroup: (id: string, name: string) => void;
+  /** 이름을 바꾸고 그림을 새 이름의 폴더로 옮긴다 (`renamePlace`). 못 바꿨으면 그 이유를 준다 */
+  renameSceneGroup: (id: string, name: string) => Promise<string | null>;
 
   /** ★**무엇이 사라지나** — 부작용 없는 계산 (`lib/delPlan`). 확인 창·승인 카드의 문구가 이걸 쓴다 */
   planRemove: (target: DelTarget) => DelPlan;
@@ -391,7 +392,8 @@ type S = {
   activeTabOf: () => WsTab | undefined;
   switchTab: (id: string) => void;
   addTab: (name?: string) => void;
-  renameTab: (id: string, name: string) => void;
+  /** 이름을 바꾸고 그 탭의 그림을 새 이름의 폴더로 옮긴다 (`renamePlace`). 못 바꿨으면 그 이유를 준다 */
+  renameTab: (id: string, name: string) => Promise<string | null>;
   removeTab: (id: string) => void;
   /** 이 워크스페이스가 쓸 NAI 계정 (`Spec.account`). ★이미 큐에 넣은 것은 안 따라온다 */
   setAccount: (id: string) => void;
@@ -559,6 +561,83 @@ function withGroupMoved(spec: Spec, groupId: string, toTabId: string, fillGroup:
       ? (left[0]?.id ?? fresh)
       : spec.activeSceneGroup;
   return { ...spec, sceneGroups, activeSceneGroup };
+}
+
+/** 탭·씬 그룹의 **이름을 바꾸고 그림을 새 이름의 폴더로 옮긴다** (사용자 결정 2026-09-29).
+ *
+ *  ★★저장 자리는 이름으로 짓는다 (`output/멀티/<탭>/<씬 그룹>/`). 예전에는 이름만 바꿔서 이미 만든
+ *    그림이 옛 폴더에 남았고, 비워진 옛 이름을 나중에 다른 탭이 받으면 한 폴더에 섞였다.
+ *    옮기는 것은 서버다 (`Store.rename_place`). 배선은 `moveGroupToTab` 과 같다 — 밀린 편집을 먼저
+ *    쓰고, 이름은 바로 바꿔 보이고, 끝날 때까지 조작과 자동 저장을 멈추고, 답은 화면이 아직 이
+ *    워크스페이스일 때만 대입한다.
+ *  ★생성 중이거나 큐에 걸린 씬이 있으면 **바꾸지 않는다** — 큐는 넣을 때의 이름을 들고 가서,
+ *    도착한 그림이 옛 폴더로 간다 (`generating` 의 ★★주).
+ *  ★옮길 그림이 없으면 서버를 안 부른다 — 이름만 바뀌는 것은 예전과 같다.
+ *  ★되돌리기 기록은 **비우지 않는다** (`lib/undo` 의 ★★주 — 씬 번호 개명 `runRenumber` 도 같다).
+ *  @returns 못 바꿨으면 그 이유 (조수가 그대로 전한다) */
+async function renamePlace(
+  get: () => S,
+  set: (p: Partial<S>) => void,
+  kind: "tab" | "sceneGroup",
+  id: string,
+  name: string,
+): Promise<string | null> {
+  const cur = get().current;
+  const spec = get().spec;
+  const nm = name.trim();
+  if (!cur || !spec || !nm) return null;
+  const place = kind === "tab"
+    ? (spec.tabs ?? []).find((c) => c.id === id)
+    : spec.sceneGroups.find((x) => x.id === id);
+  if (!place || place.name === nm) return null;
+  const groups = spec.sceneGroups.filter(
+    (x) => x.kind === "sceneGroup" && (kind === "tab" ? x.tabId === id : x.id === id),
+  );
+  const refuse = (why: string) => {
+    toast(why, "warn");
+    return why;
+  };
+  // ★다른 옮기기가 도는 동안에는 화면이 잠겨 있다 — 여기 오는 것은 조수뿐이다
+  if (moveBusy) return refuse(t("busy.renameWait"));
+  if (await generating(new Set(groups.map((x) => x.id)))) return refuse(t("busy.generatingRename"));
+  const named = (s: Spec): Spec =>
+    kind === "tab"
+      ? { ...s, tabs: (s.tabs ?? []).map((c) => (c.id === id ? { ...c, name: nm } : c)) }
+      : { ...s, sceneGroups: s.sceneGroups.map((x) => (x.id === id ? { ...x, name: nm } : x)) };
+  // ★옮길 그림이 없다 — 이름만 바꾼다
+  if (!groups.some((g) => takesOf(get().records, { id: g.id, name: g.name, idOnly: g.idOnly }).length)) {
+    set({ spec: named(spec) });
+    queueSave(get);
+    return null;
+  }
+  for (const fn of beforeWsSwitch) fn();
+  await flushSave(get);
+  if (get().current !== cur || !get().spec) return null;
+  const before = get().spec!;
+  set({ spec: named(before) });
+  moveBusy = cur;
+  try {
+    const r = await withBusy(t("busy.renaming", { name: nm }), () =>
+      api<{ spec: Spec; records: Rec[]; moved: number; moves: Record<string, string> }>(
+        `/api/workspaces/${encodeURIComponent(cur)}/${kind === "tab" ? "tabs" : "scene-groups"}/${encodeURIComponent(id)}/rename`,
+        { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name: nm }) },
+      ));
+    if (get().current === cur) {
+      set({ spec: keepView(migrate(r.spec), get().spec), records: dedupeByFile(r.records ?? []) });
+      // ★보던 장·고른 장도 경로로 적혀 있다 — 안 옮기면 씬에서 보던 자리를 잃는다
+      if (r.moved) useSceneFocus.getState().remap(r.moves ?? {});
+    }
+    return null;
+  } catch (e) {
+    if (get().current === cur) set({ spec: before });
+    return refuse(t(kind === "tab" ? "tab.renameFailed" : "sceneGroup.renameFailed", { name: place.name, why: String(e) }));
+  } finally {
+    moveBusy = null;
+    if (saveHeld) {
+      saveHeld = false;
+      queueSave(get);
+    }
+  }
 }
 
 /** 개명이 도는 중인가 — ★**한 번에 하나만** (`renumberSet` 의 ★★주) */
@@ -1556,12 +1635,7 @@ export const useWs = create<S>((set, get) => ({
   },
 
   renameTab(id, name) {
-    const spec = get().spec;
-    if (!spec || !name.trim()) return;
-    set({
-      spec: { ...spec, tabs: (spec.tabs ?? []).map((c) => (c.id === id ? { ...c, name: name.trim() } : c)) },
-    });
-    queueSave(get);
+    return renamePlace(get, set, "tab", id, name);
   },
 
   /* ── 줄의 차례 바꾸기 (사용자 지시 2026-08-24) ────────────────────────
@@ -2037,12 +2111,7 @@ export const useWs = create<S>((set, get) => ({
   },
 
   renameSceneGroup(id, name) {
-    const spec = get().spec;
-    if (!spec || !name.trim()) return;
-    set({
-      spec: { ...spec, sceneGroups: spec.sceneGroups.map((t) => (t.id === id ? { ...t, name } : t)) },
-    });
-    queueSave(get);
+    return renamePlace(get, set, "sceneGroup", id, name);
   },
 }));
 

@@ -747,7 +747,9 @@ defineAction({
         return err(found.miss.code, found.miss.message, { what: "tab", given: key, candidates: found.miss.candidates });
       const hit = found.hit;
       const wasTab = { name: hit.name };
-      ws.renameTab(hit.id, String(patch.name));
+      // ★이름을 바꾸면 그림이 새 이름의 폴더로 옮겨진다 — 생성 중이면 거절된다 (`renamePlace`)
+      const why = await ws.renameTab(hit.id, String(patch.name));
+      if (why) return err("blocked", why, { retry: "never" });
       return { ok: true, did: `탭 「${hit.name}」 → ${done}`,
         at: { kind: "prompt", workspace: ws.current ?? undefined, tab: hit.id },
         before: undoApply("tab", hit.id, wasTab) };
@@ -759,7 +761,8 @@ defineAction({
       const { hit, miss } = findSet(key, String(a.tab ?? ""));
       if (!hit) return miss!;
       const wasSet = { name: hit.name };
-      ws.renameSceneGroup(hit.id, String(patch.name));
+      const why = await ws.renameSceneGroup(hit.id, String(patch.name));
+      if (why) return err("blocked", why, { retry: "never" });
       return { ok: true, did: `씬 그룹 「${hit.name}」 → ${done}`,
         at: { kind: "prompt", workspace: ws.current ?? undefined, sceneGroup: hit.id },
         before: undoApply("sceneGroup", hit.id, wasSet) };

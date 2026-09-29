@@ -37,6 +37,8 @@ type S = Spot & {
   clear: () => void;
   /** 탭을 옮긴다 — 떠나는 탭 것을 담고, 가는 탭 것을 되살린다 */
   switchTab: (from: string | undefined, to: string | undefined) => void;
+  /** 그림이 다른 폴더로 옮겨졌다 — 보던 장·고른 장·탭마다 담아 둔 장의 경로를 새것으로 */
+  remap: (moves: Record<string, string>) => void;
 };
 
 const EMPTY: Spot = { cell: "", file: null, pending: null };
@@ -65,5 +67,11 @@ export const useSceneFocus = create<S>((set) => ({
       /* ★가는 탭에 담아 둔 것이 없으면 **빈 자리**로 시작한다 (예전과 같다)
          ★고른 것은 **안 담아 둔다** — 탭을 옮겼다 오면 풀려 있는 것이 맞다 */
       return { memo, picked: [], ...(to ? memo[to] ?? EMPTY : EMPTY) };
+    }),
+  remap: (moves) =>
+    set((s) => {
+      const to = (f: string | null) => (f && moves[f]) || f;
+      const memo = Object.fromEntries(Object.entries(s.memo).map(([k, v]) => [k, { ...v, file: to(v.file) }]));
+      return { file: to(s.file), picked: s.picked.map((f) => moves[f] ?? f), memo };
     }),
 }));

@@ -1445,11 +1445,12 @@ async def copy_to_tab(ws: str, body: CopyBody):
         raise HTTPException(404, str(e))
 
 
-def _refuse_if_generating(ws: str, group_ids: set[str]) -> None:
+def _refuse_if_generating(ws: str, group_ids: set[str],
+                          why: str = "생성 중인 씬이 있습니다. 끝난 뒤에 옮겨 주세요.") -> None:
     """그 세트들 중 하나라도 생성 중이면 거절한다 (`generating_targets` 의 ★★주)."""
     busy = {g for (w, g) in genqueue.generating_targets(Q) if w == ws and g in group_ids}
     if busy:
-        raise HTTPException(409, "생성 중인 씬이 있습니다. 끝난 뒤에 옮겨 주세요.")
+        raise HTTPException(409, why)
 
 
 class MoveTabBody(BaseModel):
@@ -1483,6 +1484,36 @@ async def move_scene_group_api(ws: str, group_id: str, body: MoveGroupBody):
     _refuse_if_generating(ws, {group_id})   # ★생성 중이면 거절 (`generating_targets` 의 ★★주)
     try:
         return await asyncio.to_thread(store.move_scene_group, ws, group_id, body.to_tab, body.fill)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+class RenamePlaceBody(BaseModel):
+    name: str
+
+
+async def _rename_place(ws: str, kind: str, place_id: str, group_ids: set[str], name: str):
+    """탭·씬 그룹 이름 바꾸기 (`Store.rename_place`). 그림을 새 이름의 폴더로 옮기므로 스레드로.
+    ★생성 중이면 거절한다 — 큐는 넣을 때의 이름을 들고 가서, 도착한 그림이 옛 폴더로 간다
+      (`generating_targets` 의 ★★주)."""
+    _refuse_if_generating(ws, group_ids, "생성 중인 씬이 있습니다. 끝난 뒤에 이름을 바꿔 주세요.")
+    return await asyncio.to_thread(store.rename_place, ws, kind, place_id, name)
+
+
+@app.post("/api/workspaces/{ws}/tabs/{tab_id}/rename")
+async def rename_tab_api(ws: str, tab_id: str, body: RenamePlaceBody):
+    spec = store.load(ws) or {}
+    groups = {str(g.get("id")) for g in (spec.get("sceneGroups") or []) if g.get("tabId") == tab_id}
+    try:
+        return await _rename_place(ws, "tab", tab_id, groups, body.name)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.post("/api/workspaces/{ws}/scene-groups/{group_id}/rename")
+async def rename_scene_group_api(ws: str, group_id: str, body: RenamePlaceBody):
+    try:
+        return await _rename_place(ws, "sceneGroup", group_id, {group_id}, body.name)
     except ValueError as e:
         raise HTTPException(400, str(e))
 

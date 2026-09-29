@@ -30,6 +30,9 @@ export const ko: Dict = {
     generating: "생성 중인 씬이 있습니다. 끝난 뒤에 옮겨 주세요.",
     movingTab: "「{name}」 탭을 옮기는 중…",
     movingGroup: "「{name}」 씬 그룹을 옮기는 중…",
+    renaming: "「{name}」 폴더로 그림을 옮기는 중…",
+    renameWait: "다른 옮기기가 끝난 뒤에 이름을 바꿔 주세요.",
+    generatingRename: "생성 중인 씬이 있습니다. 끝난 뒤에 이름을 바꿔 주세요.",
     tooLong: "옮기기가 오래 걸립니다. 화면 잠금을 풀었습니다. 작업은 계속됩니다.",
   },
 
@@ -614,6 +617,7 @@ export const ko: Dict = {
     lastOne: "마지막 탭은 지울 수 없습니다.",
     movedTo: "「{name}」 탭을 「{ws}」로 옮겼습니다 (그림 {n}장)",
     moveFailed: "「{name}」 탭을 옮기지 못했습니다: {why}",
+    renameFailed: "「{name}」 탭의 이름을 바꾸지 못했습니다: {why}",
   },
 
   update: {
@@ -1432,6 +1436,7 @@ export const ko: Dict = {
   sceneGroup: {
     movedTo: "「{name}」 씬 그룹을 「{tab}」 탭으로 옮겼습니다 (그림 {n}장)",
     moveFailed: "「{name}」 씬 그룹을 옮기지 못했습니다: {why}",
+    renameFailed: "「{name}」 씬 그룹의 이름을 바꾸지 못했습니다: {why}",
     closeConfirm: "「{name}」 씬 그룹을 닫습니다 (그림 {n}장)",
     closeConfirmBody: "그림 파일은 휴지통에 남습니다. 앱을 켤 때 24시간 지난 것부터 비웁니다.",
     closeSet: "씬 그룹 닫기",
