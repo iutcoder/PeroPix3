@@ -3779,6 +3779,35 @@ async def plugins_remove(pid: str):
     return r
 
 
+#: 실제로 잡을 포트를 껍데기에 알리는 줄의 머리. `src-tauri/src/backend.rs` 의 `PORT_MARK` 와 같아야 한다
+PORT_MARK = "[backend] port = "
+
+
+def pick_port(want: int, fallback: bool) -> int:
+    """이번에 잡을 포트를 **여기서** 고른다 (사용자 제보 2026-09-29: 개발본이 「백엔드가 안 떴다」로 멈춤).
+
+    ★★껍데기가 고르면 두 앱이 몇 초 차이로 켜질 때 둘 다 8770 을 고른다. 껍데기는 비어 있는지만 보고
+      곧바로 놓는데, 파이썬이 실제로 잡는 것은 모듈을 다 읽은 뒤(수 초 뒤)라서 그 사이에 먼저 켠 쪽의
+      파이썬이 잡는다 (실측: 설치본을 켜고 7초 뒤 켠 개발본이 WinError 10013 으로 멈췄다).
+      여기서 고르면 고르는 것과 잡는 것 사이는 uvicorn 이 뜨는 잠깐뿐이다.
+    ★기본 옵션 그대로 bind 해 본다. 남이 듣고 있으면 10048 로 막히고, 닫힌 연결(TIME_WAIT)은
+      막지 않는다 (둘 다 실측).
+    ★`fallback` 이 없으면 `want` 를 그대로 돌려준다. 못 잡으면 uvicorn 이 눈에 보이게 실패한다
+      (QA 가 정해 둔 8771 · 판정이 띄운 서버가 그렇다)."""
+    import socket
+
+    for p in ((want, 0) if fallback else (want,)):
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            s.bind(("127.0.0.1", p))
+            return s.getsockname()[1]
+        except OSError:
+            continue
+        finally:
+            s.close()
+    return want
+
+
 def main():
     import uvicorn
 
@@ -3786,8 +3815,12 @@ def main():
 
     ap = argparse.ArgumentParser()
     ap.add_argument("--port", type=int, default=8770)
+    # ★껍데기가 넣는다. `--port` 가 차 있으면 빈 포트로 옮겨 간다 (`pick_port`)
+    ap.add_argument("--port-fallback", action="store_true")
     args = ap.parse_args()
-    CURRENT_PORT = args.port
+    CURRENT_PORT = pick_port(args.port, args.port_fallback)
+    # ★★껍데기가 이 줄을 기다렸다가 화면에 주소를 알려 준다. 파이프라서 바로 흘려 보내야 한다
+    print(f"{PORT_MARK}{CURRENT_PORT}", flush=True)
     # ★**여기부터가 진짜 서비스다** — 주소 파일은 이 표식이 있을 때만 쓰인다 (위 ★★주).
     #   리로드 워커는 환경을 물려받으므로 그쪽에서도 켜져 있다.
     os.environ["PEROPIX_SERVING"] = "1"
@@ -3813,15 +3846,15 @@ def main():
                 real = sub.resolve()
                 if real != sub.absolute() and real.is_dir():
                     watch.append(str(real))
-        os.environ["PEROPIX_BACKEND_PORT"] = str(args.port)  # 워커가 읽는다
+        os.environ["PEROPIX_BACKEND_PORT"] = str(CURRENT_PORT)  # 워커가 읽는다
         print(f"[backend] dev reload on - watching {' · '.join(watch)}")
-        uvicorn.run("server:app", host="127.0.0.1", port=args.port, log_level="info",
+        uvicorn.run("server:app", host="127.0.0.1", port=CURRENT_PORT, log_level="info",
                     reload=True, reload_dirs=watch, app_dir=here)
     else:
         # ★★접근 로그는 끈다 — 주소 앞머리에 **이번 실행의 열쇠**가 들어 있어 매 요청마다
         #   로그에 남고(제보로 오가는 파일이다), 썸네일 요청까지 전부 찍혀 정작 봐야 할
         #   오류가 묻힌다. 의미 있는 일은 우리가 `say()` 로 적는다.
-        uvicorn.run(app, host="127.0.0.1", port=args.port, log_level="info", access_log=False)
+        uvicorn.run(app, host="127.0.0.1", port=CURRENT_PORT, log_level="info", access_log=False)
 
 
 if __name__ == "__main__":

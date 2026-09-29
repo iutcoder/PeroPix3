@@ -9,29 +9,111 @@ use std::fs::File;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 pub const DEFAULT_PORT: u16 = 8770;
 
-/// 백엔드 포트 — **한 번 정하고 그대로 쓴다** (`OnceLock`).
+/// 파이썬에게 **먼저 잡아 보라고** 건네는 포트와, 차 있으면 빈 포트로 옮겨 가도 되는지.
 ///
 /// ★**환경변수로 갈아 끼운다** (사용자 지시 2026-08-08). 예전엔 상수라, QA 인스턴스와
 /// 사용자 앱이 같은 8770 을 다퉜다 — 나중에 켠 쪽은 사이드카를 못 띄워 창은 뜨는데
 /// API 가 없는 상태(502)가 됐고, 원인이 화면에 안 나왔다.
-/// `qa\host.cmd` 가 `PEROPIX_BACKEND_PORT=8771` 을 넣어 준다.
+/// `qa\host.cmd` 가 `PEROPIX_BACKEND_PORT=8771` 을 넣어 준다. 그때는 옮겨 가지 않는다 (하네스가 그 번호로 붙는다).
 ///
 /// ★★**비어 있는 포트를 스스로 찾는다** (사용자 지시 2026-08-26, 포터블 배포 준비).
 ///   포터블은 **여러 벌을 다른 폴더에 풀어 두고 함께 쓰는** 형식이라, 번호를 하나로 박아
 ///   두면 나중에 켠 쪽이 남의 백엔드에 붙는다 — 창은 이쪽인데 데이터는 저쪽이 된다.
 ///   ★그래도 **8770 이 비어 있으면 그것을 쓴다** — 로그·문서·MCP 설정에 익숙한 번호가
 ///     유지되는 편이 낫고, 혼자 켤 때가 대부분이다.
-///   ★잡았다 놓는 사이에 남이 채 갈 수는 있다. 그때는 사이드카가 못 떠서 **눈에 보이게**
-///     실패한다 (조용히 남의 것에 붙는 지금보다 낫다).
+/// ★★**고르는 것은 파이썬이다** (사용자 제보 2026-09-29: 개발본이 「백엔드가 뜨지 않았습니다」로 멈춤).
+///   여기서 비어 있는지 보고 놓으면, 파이썬이 실제로 잡는 수 초 뒤까지 비어 있다는 보장이 없다.
+///   두 앱을 몇 초 차이로 켜면 둘 다 8770 을 골라 나중 것이 멈췄다. 파이썬은 잡기 직전에 고르고
+///   `PORT_MARK` 줄로 알려 준다 (`backend/server.py` 의 `pick_port`). 화면은 그 번호를 받는다 (`backend_port`).
 /// ★★**CSP 도 함께 열어 두어야 한다** (`tauri.conf.json` 의 `app.security.csp`).
 ///   거기 포트를 번호로 박아 두면(예전에는 `127.0.0.1:8770`), 다른 포트로 뜬 인스턴스는
 ///   웹뷰가 **제 백엔드를 막아** 창만 뜨고 아무것도 못 한다. 그래서 `127.0.0.1:*` 이다.
 ///   ★그 설정 파일에는 주석을 못 단다 (스키마가 모르는 열쇠를 거부한다) — 그래서 여기 적는다.
+pub fn wanted_port() -> (u16, bool) {
+    match std::env::var("PEROPIX_BACKEND_PORT")
+        .ok()
+        .and_then(|s| s.trim().parse::<u16>().ok())
+    {
+        Some(p) => (p, false),
+        None => (DEFAULT_PORT, true),
+    }
+}
+
+/// 파이썬이 실제로 잡을 포트를 알리는 줄의 머리. `backend/server.py` 의 `PORT_MARK` 와 같아야 한다.
+pub const PORT_MARK: &str = "[backend] port = ";
+
+/// 파이썬이 포트를 알려 오기를 기다리는 한도. 넘으면 건넨 포트로 답하고, 화면이 거기서 못 붙으면
+/// 실패 화면으로 간다 (`App.tsx` 의 15초).
+const PORT_WAIT: Duration = Duration::from_secs(15);
+
+/// 지금 띄운 백엔드가 알려 온 것. `gen` 은 띄울 때마다 오른다. 내린 백엔드의 중계 스레드가 뒤늦게
+/// 끝나도 새로 띄운 쪽의 값을 건드리지 못하게 한다 (`restart_backend`).
+struct Live {
+    gen: u64,
+    port: Option<u16>,
+    /// 자식이 끝났다 (파이프가 닫혔다). 알려 온 것이 없으면 더 기다릴 것도 없다.
+    ended: bool,
+}
+
+static LIVE: Mutex<Live> = Mutex::new(Live { gen: 0, port: None, ended: false });
+static LIVE_CV: Condvar = Condvar::new();
+
+fn live() -> std::sync::MutexGuard<'static, Live> {
+    LIVE.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// 새로 띄운다. 모르는 상태로 되돌리고 이번 차례의 번호를 준다.
+fn live_begin() -> u64 {
+    let mut g = live();
+    g.gen += 1;
+    g.port = None;
+    g.ended = false;
+    g.gen
+}
+
+fn live_port(gen: u64, port: u16) {
+    let mut g = live();
+    if g.gen == gen {
+        g.port = Some(port);
+        LIVE_CV.notify_all();
+    }
+}
+
+fn live_end(gen: u64) {
+    let mut g = live();
+    if g.gen == gen {
+        g.ended = true;
+        LIVE_CV.notify_all();
+    }
+}
+
+/// 지금 백엔드가 **실제로 잡은** 포트. 파이썬이 알려 줄 때까지 기다린다 (많아야 `PORT_WAIT`).
+/// ★못 들었으면(자식이 끝났거나 한도를 넘었으면) 건넨 포트로 답한다.
+/// ★기다리는 함수다. 명령에서 부를 때는 따로 돌린다 (`lib.rs` 의 `backend_url`).
+pub fn backend_port() -> u16 {
+    let want = wanted_port().0;
+    let until = Instant::now() + PORT_WAIT;
+    let mut g = live();
+    loop {
+        if let Some(p) = g.port {
+            return p;
+        }
+        if g.ended {
+            return want;
+        }
+        let left = until.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return want;
+        }
+        g = LIVE_CV.wait_timeout(g, left).unwrap_or_else(|e| e.into_inner()).0;
+    }
+}
+
 /// 이번 실행의 **열쇠** — 주소 앞머리(`/k/<열쇠>`)로 실려 나간다.
 ///
 /// ★★**왜 있나** (2026-08-26, 첫 공개 배포 점검에서 잡았다): 백엔드는 `127.0.0.1` 에만
@@ -66,26 +148,6 @@ pub fn backend_key() -> &'static str {
             s.push_str(&format!("{:016x}", h.finish()));
         }
         s
-    })
-}
-
-pub fn backend_port() -> u16 {
-    use std::sync::OnceLock;
-    static PORT: OnceLock<u16> = OnceLock::new();
-    *PORT.get_or_init(|| {
-        if let Some(p) = std::env::var("PEROPIX_BACKEND_PORT")
-            .ok()
-            .and_then(|s| s.trim().parse::<u16>().ok())
-        {
-            return p;
-        }
-        let free = |port: u16| {
-            std::net::TcpListener::bind(("127.0.0.1", port))
-                .and_then(|l| l.local_addr())
-                .map(|a| a.port())
-                .ok()
-        };
-        free(DEFAULT_PORT).or_else(|| free(0)).unwrap_or(DEFAULT_PORT)
     })
 }
 
@@ -148,7 +210,7 @@ fn adopt_into_job(_child: &Child) {}
 
 /// 자식 프로세스 핸들.
 ///
-/// ★종료는 `kill()` 을 종료 이벤트에서 **명시적으로** 부르는 것이 정본이다.
+/// ★종료는 `kill()` 을 종료 이벤트에서 **명시적으로** 부르는 것이 기준이다.
 /// `Drop` 은 process::exit 경로에서 실행되지 않아 백엔드가 고아로 남는다 — 실측으로 확인됨.
 /// Drop 은 마지막 안전망으로만 둔다.
 pub struct Backend(pub Mutex<Option<Child>>);
@@ -491,9 +553,11 @@ impl<W: Write> Sink<W> {
 /// ★**바이트째** 받아 `from_utf8_lossy` 로 옮긴다. `lines()` 를 쓰면 UTF-8 이 아닌 바이트
 ///   하나에 그 줄이 통째로 오류가 되어 사라진다 (자식에게 `PYTHONIOENCODING=utf-8` 을 주지만,
 ///   파이썬을 거치지 않고 나오는 줄도 있다).
+/// ★포트를 알리는 줄(`PORT_MARK`)도 여기서 듣는다. 로그를 못 열었으면(`sink` 없음) 적지 않고 읽기만 한다.
 fn relay(
     pipe: impl std::io::Read + Send + 'static,
-    sink: Arc<Mutex<Sink<File>>>,
+    sink: Option<Arc<Mutex<Sink<File>>>>,
+    gen: u64,
 ) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
         let mut r = BufReader::new(pipe);
@@ -506,11 +570,15 @@ fn relay(
             }
             let text = String::from_utf8_lossy(&buf);
             let line = text.trim_end_matches(|c| c == '\r' || c == '\n');
-            if let Ok(mut s) = sink.lock() {
+            if let Some(p) = line.strip_prefix(PORT_MARK).and_then(|s| s.trim().parse::<u16>().ok()) {
+                live_port(gen, p);
+            }
+            if let Some(Ok(mut s)) = sink.as_ref().map(|s| s.lock()) {
                 s.line(line, Instant::now());
             }
         }
-        if let Ok(mut s) = sink.lock() {
+        live_end(gen);
+        if let Some(Ok(mut s)) = sink.as_ref().map(|s| s.lock()) {
             s.flush_repeats();
         }
     })
@@ -550,14 +618,15 @@ pub fn spawn() -> std::io::Result<Child> {
     print!("{head}");
 
     // ★★**파일 핸들을 자식에게 물려주지 않는다** — 파이프로 받아 우리가 적는다 (`Sink` 주석).
-    //   ★로그를 못 열었으면 **파이프를 열지 않는다.** 아무도 안 읽는 파이프는 버퍼가 차는
-    //     순간 자식을 멈춰 세운다.
-    let piped = log.is_some();
-
+    //   ★로그를 못 열었어도 **파이프는 연다.** 포트를 알리는 줄이 이 파이프로 오고(`PORT_MARK`),
+    //     중계 스레드가 늘 읽어 비우므로 버퍼가 차서 자식이 멈출 일이 없다.
+    let (want, fallback) = wanted_port();
     let mut cmd = Command::new(&python);
-    cmd.arg(&script)
-        .arg("--port")
-        .arg(backend_port().to_string())
+    cmd.arg(&script).arg("--port").arg(want.to_string());
+    if fallback {
+        cmd.arg("--port-fallback");
+    }
+    cmd
         // ★열쇠는 **환경변수로만** 넘긴다 — 명령줄에 실으면 작업 관리자에서 그대로 보인다
         .env("PEROPIX_KEY", backend_key())
         // ★★파이썬의 출력은 **UTF-8 로** — 안 주면 윈도우 콘솔 코드페이지(cp949)로 찍어 로그에
@@ -565,8 +634,8 @@ pub fn spawn() -> std::io::Result<Child> {
         .env("PYTHONIOENCODING", "utf-8")
         .env("PYTHONUTF8", "1")
         .current_dir(&root)
-        .stdout(if piped { Stdio::piped() } else { Stdio::null() })
-        .stderr(if piped { Stdio::piped() } else { Stdio::null() });
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
 
     // 콘솔 창이 따로 뜨지 않게 (Windows)
     #[cfg(windows)]
@@ -576,21 +645,67 @@ pub fn spawn() -> std::io::Result<Child> {
         cmd.creation_flags(CREATE_NO_WINDOW);
     }
 
-    let mut child = cmd.spawn()?;
+    // ★띄우기 **전에** 모르는 상태로 되돌린다. 띄우지 못했으면 기다리는 쪽을 바로 풀어 준다
+    let gen = live_begin();
+    let mut child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(e) => {
+            live_end(gen);
+            return Err(e);
+        }
+    };
     adopt_into_job(&child); // ★부모가 어떻게 죽든 함께 내려가게
 
     // ★두 물줄기가 **창구 하나**를 나눠 쓴다 — 억제 장부와 이번 실행의 누적량이 한 벌이라야
     //   stdout 으로 온 줄과 stderr 로 온 줄이 서로를 센다.
-    if let Some(f) = log {
-        let sink = Arc::new(Mutex::new(Sink::new(f, head.len() as u64)));
-        if let Some(o) = child.stdout.take() {
-            let _ = relay(o, sink.clone()); // 스레드는 자식이 끝나면 스스로 끝난다
-        }
-        if let Some(e) = child.stderr.take() {
-            let _ = relay(e, sink);
-        }
+    let sink = log.map(|f| Arc::new(Mutex::new(Sink::new(f, head.len() as u64))));
+    if let Some(o) = child.stdout.take() {
+        let _ = relay(o, sink.clone(), gen); // 스레드는 자식이 끝나면 스스로 끝난다
+    }
+    if let Some(e) = child.stderr.take() {
+        let _ = relay(e, sink, gen);
     }
     Ok(child)
+}
+
+/// ★★**두 앱을 몇 초 차이로 켜도 나중 것이 멈추지 않는다** (사용자 제보 2026-09-29).
+///   전역 상태(`LIVE`)를 쓰므로 판정은 한 함수에 모은다 (나누면 병렬로 돌며 서로를 덮는다).
+#[cfg(test)]
+mod port_tests {
+    use super::{backend_port, live_begin, live_end, live_port, relay, wanted_port, PORT_MARK};
+    use std::io::Cursor;
+    use std::time::Duration;
+
+    #[test]
+    fn 파이썬이_알려_온_포트로_답한다() {
+        // 파이썬과 줄 머리가 같아야 한다. 한쪽만 고치면 화면이 언제나 건넨 포트로 붙는다
+        let py = include_str!("../../backend/server.py");
+        assert!(py.contains(&format!("PORT_MARK = \"{PORT_MARK}\"")), "server.py 의 PORT_MARK 가 다르다");
+
+        // 중계 스레드가 그 줄을 듣는다 (앞뒤 줄은 그냥 로그다)
+        let g1 = live_begin();
+        let out = format!("[plugins] loaded []\n{PORT_MARK}51676\r\nINFO: started\n");
+        relay(Cursor::new(out.into_bytes()), None, g1).join().unwrap();
+        assert_eq!(backend_port(), 51676);
+
+        // 백엔드를 다시 띄운 뒤 옛 스레드가 뒤늦게 끝나거나 줄을 내도 새 쪽은 그대로 기다린다
+        let g2 = live_begin();
+        live_end(g1);
+        live_port(g1, 1);
+        let t = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(150));
+            live_port(g2, 51677);
+        });
+        assert_eq!(backend_port(), 51677, "옛 차례의 줄을 받았거나, 새 줄을 기다리지 않았다");
+        t.join().unwrap();
+
+        // 알리기 전에 끝났으면 기다리지 않고 건넨 포트로 답한다
+        let g3 = live_begin();
+        let at = std::time::Instant::now();
+        live_end(g3);
+        assert_eq!(backend_port(), wanted_port().0);
+        assert!(at.elapsed() < Duration::from_secs(1), "끝난 자식을 한도까지 기다렸다");
+    }
 }
 
 #[cfg(test)]
@@ -730,7 +845,8 @@ mod log_tests {
             .stderr(Stdio::null())
             .spawn()
             .unwrap();
-        let h = super::relay(child.stdout.take().unwrap(), sink.clone());
+        // 차례 번호는 아무 백엔드의 것도 아닌 값이다 (`port_tests` 의 상태를 건드리지 않게)
+        let h = super::relay(child.stdout.take().unwrap(), Some(sink.clone()), u64::MAX);
         let _ = child.wait();
         h.join().unwrap();
 

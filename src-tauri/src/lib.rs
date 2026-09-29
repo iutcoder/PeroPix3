@@ -26,10 +26,15 @@ fn uptime_ms() -> u128 {
 /// ★★**이번 실행의 열쇠가 주소 앞머리로 붙는다** (`/k/<열쇠>`, 2026-08-26). 화면이 쓰는
 ///   주소는 전부 이 값에 경로를 이어 붙여 만들어지므로, 여기 한 번 붙이면 그림 태그와
 ///   웹소켓까지 함께 덮인다 — 왜 필요한지는 `backend::backend_key` 의 ★★주에 있다.
+/// ★★**포트는 파이썬이 알려 온 것이다** (2026-09-29, `backend::wanted_port` 의 ★★주). 알려 올 때까지
+///   기다리므로 명령 스레드를 붙잡지 않게 따로 돌린다.
 #[tauri::command]
-fn backend_url() -> String {
+async fn backend_url() -> String {
     let key = backend::backend_key();
-    let base = format!("http://127.0.0.1:{}", backend::backend_port());
+    let port = tauri::async_runtime::spawn_blocking(backend::backend_port)
+        .await
+        .unwrap_or(backend::DEFAULT_PORT);
+    let base = format!("http://127.0.0.1:{port}");
     if key.is_empty() { base } else { format!("{base}/k/{key}") }
 }
 
@@ -107,14 +112,15 @@ fn apply_update(app: tauri::AppHandle) -> Result<(), String> {
 /// **백엔드만 다시 띄운다** — 플러그인을 설치·삭제·업데이트·켜고 끈 뒤 붙이려고 (사용자 지시 2026-09-08).
 /// 화면은 이어서 `location.reload()` 로 새로 읽는다 (확장 JS·캔버스는 페이지가 뜰 때 붙는다).
 /// ★앱 프로세스를 통째로 다시 띄우지 않는다 — 개발 중(`tauri dev`)에는 exe 가 나가는 순간 `tauri dev` 가 Vite 를
-///   내려서, 새로 뜬 exe 가 `localhost:1420` 연결 거부 화면을 봤다 (사용자 보고 2026-09-08). 포트·열쇠는 `OnceLock`
-///   이라 그대로이므로 화면은 같은 주소로 다시 붙는다.
+///   내려서, 새로 뜬 exe 가 `localhost:1420` 연결 거부 화면을 봤다 (사용자 보고 2026-09-08). 열쇠는 `OnceLock`
+///   이라 그대로다. 포트는 새 파이썬이 다시 고르므로 바뀔 수 있고, 화면은 새로 읽으면서 주소를 다시 묻는다
+///   (「백엔드가 뜨지 않았습니다」의 「다시 시도」가 듣는 이유가 이것이다).
 #[tauri::command]
 fn restart_backend(app: tauri::AppHandle) -> Result<(), String> {
     let state = app.try_state::<backend::Backend>().ok_or("백엔드 상태가 없습니다")?;
     state.kill();
     let child = backend::spawn().map_err(|e| format!("백엔드를 다시 띄우지 못했습니다: {e}"))?;
-    backend::log_line(&format!("[backend] respawned on port {}", backend::backend_port()));
+    backend::log_line(&format!("[backend] respawned, asking port {}", backend::wanted_port().0));
     if let Ok(mut g) = state.0.lock() {
         *g = Some(child);
     }
@@ -284,7 +290,7 @@ pub fn run() {
             match backend::spawn() {
                 Ok(child) => {
                     app.manage(backend::Backend(Mutex::new(Some(child))));
-                    backend::log_line(&format!("[backend] spawned on port {}", backend::backend_port()));
+                    backend::log_line(&format!("[backend] spawned, asking port {}", backend::wanted_port().0));
                 }
                 Err(e) => {
                     // 백엔드가 안 떠도 창은 띄운다 — 프론트가 상태를 표시하고 로그를 안내한다.
