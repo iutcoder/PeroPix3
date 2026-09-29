@@ -21,6 +21,7 @@ import { Icon } from "../components/Icon";
 import { onNearBottom } from "../lib/nearBottom";
 import { COLOR_HEX } from "../lib/blocks";
 import { normTag } from "../lib/tagSearch";
+import { sendToEditor } from "../editor/sendTo";
 
 /** 옮길 곳 드롭다운에서 **최상위**를 가리키는 값. 서버가 쓰는 값은 빈 문자열인데,
  *  그것은 이 드롭다운에서 「고르지 않음」자리표시자가 이미 쓰고 있다. 보낼 때 되돌린다. */
@@ -910,7 +911,6 @@ async function toCensor(files: string[]) {
 /** 「이미지 편집으로 보내기」 — 보관함 그림은 절대 경로로 넘긴다 (검열과 같다). 여러 장이면 한 문서에 전부 (사용자 지시 2026-09-22) */
 async function toEdit(files: string[]) {
   const items = await keepPaths(files);
-  const { sendToEditor } = await import("../editor/sendTo");
   await sendToEditor(items);
 }
 

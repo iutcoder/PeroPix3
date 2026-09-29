@@ -27,6 +27,7 @@ import { usePrompt } from "../store/prompt";
 import { MAX_VIBES, useImageInput } from "../store/imageInput";
 import { costNow, countNow } from "./costNow.ts";
 import { t } from "../i18n";
+import { addComicBackground, addComicPage, editComicCut, readComic } from "../editor/comicAgent";
 
 /* ── 삭제 ──────────────────────────────────────────────────────
    ★한 벌은 스토어에 있다 (`removeAt`) — 여기서는 **찾아 주고 말로 옮길** 뿐이다.
@@ -1385,7 +1386,7 @@ defineAction({
 });
 
 /* ── 만화 캔버스 (AI 콘티, 설계 `docs/comic-editor-design.md` 10번) ──────────────────
-   ★실행은 `editor/comicAgent` 가 한다 — 편집기는 지연 로드라 부를 때 싣는다 (첫 화면이 편집기를 싣지 않게).
+   ★실행은 `editor/comicAgent` 가 한다.
    ★공통의 화풍 · 외형은 **고치는 액션이 없다** (설계 10-3). 배경만 더할 수 있다.
    ★되돌리기는 이미지 편집의 Ctrl+Z 다 — 조수의 `undo_change` 로는 못 돌린다 (그렇게 적어 돌려준다). */
 
@@ -1397,7 +1398,7 @@ defineAction({
     + "AI 콘티가 도는 중이면 그 캔버스, 아니면 지금 보고 있는 만화 캔버스를 읽는다.",
   args: {},
   confirm: "none",
-  run: async () => (await import("../editor/comicAgent")).readComic(),
+  run: async () => readComic(),
 });
 
 defineAction({
@@ -1416,7 +1417,7 @@ defineAction({
     new_backgrounds: { type: "array", items: { type: "object" }, desc: "공통에 더할 배경 — {name, tags}" },
   },
   confirm: "none",
-  run: async (a) => (await import("../editor/comicAgent")).addComicPage(a),
+  run: async (a) => addComicPage(a),
 });
 
 defineAction({
@@ -1433,7 +1434,7 @@ defineAction({
     cast: { type: "array", items: { type: "object" }, desc: "캐릭터 칸 전부 — {who, tags, x, y}" },
   },
   confirm: "none",
-  run: async (a) => (await import("../editor/comicAgent")).editComicCut(a),
+  run: async (a) => editComicCut(a),
 });
 
 defineAction({
@@ -1446,5 +1447,5 @@ defineAction({
     tags: { type: "string", desc: "장소 · 시간 · 조명 · 날씨 태그 (쉼표로)", required: true },
   },
   confirm: "none",
-  run: async (a) => (await import("../editor/comicAgent")).addComicBackground(a),
+  run: async (a) => addComicBackground(a),
 });

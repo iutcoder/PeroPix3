@@ -27,7 +27,7 @@ import { ensureComicFonts, stackOf, useComicFonts } from "./comicFonts";
  *  ★남겨 둔 캔버스를 다 읽기 전(`hydrated`)에는 안 그린다 — 빈 화면이 잠깐 떴다가 캔버스가 나타나는 것을 막는다.
  *  ★무대 아래 빠른 줄은 갤러리·크게 보기와 **같은 부품**(`ImageActions`)이라 i2i·인페인트·보내기가 그대로 온다.
  *    그림은 합성 결과를 **누를 때** 굽는다 (`getUrl`) — 매 편집마다 PNG 를 굽지 않는다.
- *  ★★이 모드는 **지연 로드**된다 (`App.tsx` 의 `lazy`) — 픽셀 편집기가 다른 화면의 첫 그림을 늦추지 않게. */
+ *  ★★이 모드도 앱을 켤 때 실린다 (`App.tsx`). 남겨 둔 캔버스는 부팅이 뒤에서 되살린다 (`store.hydrate`). */
 export default function Editor() {
   const t = useI18n((s) => s.t);
   const s = useEditor();

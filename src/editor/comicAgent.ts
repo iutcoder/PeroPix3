@@ -1,7 +1,7 @@
 /** AI 조수의 **만화 캔버스 액션** — 실행하는 쪽 (설계 `docs/comic-editor-design.md` 10번).
  *
  *  ★★이름 · 설명 · 인자는 `lib/appActions.ts` 에 있다 (조수의 도구 목록은 그 파일 하나에서 뽑힌다, `scripts/gen-actions.mjs`).
- *    여기는 그 액션이 부르는 실행이다 — 편집기는 지연 로드라 액션이 부를 때 이 모듈을 싣는다.
+ *    여기는 그 액션이 부르는 실행이다.
  *  ★★사람이 누르는 것과 **같은 스토어 함수**를 부른다 (`appendConti` · `setPanelGen` · `patchCommon`). 그래서 AI 가 채운 것과
  *    직접 적은 것이 구별이 없고 (설계 10-3), 되돌리기(Ctrl+Z)도 같다.
  *  ★공통의 화풍과 외형은 **읽기만** 한다 — 고치는 액션이 없다 (설계 10-3). 배경만 더할 수 있다.
@@ -43,8 +43,7 @@ Tags: Danbooru spelling, lowercase, comma separated. No sentences, quality tags,
 
 /** 콘티를 깔 캔버스 — AI 콘티가 도는 중이면 그 캔버스, 아니면 지금 보고 있는 만화 캔버스 */
 async function target(): Promise<Doc | { error: ReturnType<typeof err>["error"] }> {
-  const s = useEditor.getState();
-  await s.ready;
+  await useEditor.getState().hydrate();
   const st = useEditor.getState();
   const d = st.docs.find((x) => x.id === st.contiBusy) ?? st.doc();
   if (!d?.comic) return err("not_found", "만화 캔버스가 열려 있지 않습니다. 이미지 편집에서 만화 캔버스를 연 뒤에 다시 시켜 주세요.", { retry: "never" });

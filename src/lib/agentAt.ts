@@ -12,6 +12,7 @@
  */
 import { useUi } from "../store/ui";
 import { useWs } from "../store/workspace";
+import { useEditor } from "../editor/store";
 
 export type AgentAt =
   | { kind: "card"; cardKind: string; id: string; log?: string }
@@ -67,10 +68,8 @@ export async function openAt(at: AgentAt): Promise<void> {
   }
   if (at.kind === "comic") {
     ui.setMode("editor");
-    // ★편집기는 지연 로드라 그때 싣는다 — 캔버스를 그것으로 바꾸고 그 페이지로 무대를 옮긴다
-    const { useEditor } = await import("../editor/store");
-    const ed = useEditor.getState();
-    await ed.ready;
+    // 캔버스를 그것으로 바꾸고 그 페이지로 무대를 옮긴다
+    await useEditor.getState().hydrate();
     if (at.doc && useEditor.getState().docs.some((d) => d.id === at.doc)) useEditor.getState().setCur(at.doc);
     if (at.page) useEditor.getState().revealPage(at.page);
     return;

@@ -1,7 +1,7 @@
 /** 이미지 편집 — **상태** (캔버스·레이어·도구·이력). 계산은 `model.ts`, 픽셀은 `pixels.ts`, 남기는 것은 `persist.ts`.
  *
  *  ★★열어 둔 캔버스는 **재실행 뒤에도 남는다** (사용자 지시 2026-09-22): 레이어 픽셀은 `data/editor/<캔버스>/<키>.png`,
- *    나머지는 `state.json`. 바뀔 때마다 1초 뒤 `persist.ts` 가 적고, 처음 쓸 때 `loadDocs` 로 되살린다. 이력은 안 남긴다.
+ *    나머지는 `state.json`. 바뀔 때마다 1초 뒤 `persist.ts` 가 적고, 앱을 켤 때 `loadDocs` 로 되살린다 (`hydrate`). 이력은 안 남긴다.
  *    다 읽기 전(`hydrated`)에는 적지 않는다 — 빈 상태로 덮어쓰면 남긴 것이 휴지통으로 간다.
  *  ★★한 번의 편집은 `commit` 한 번이다: 직전 상태(크기·레이어 목록·고른 레이어)를 이력에 적고 바꾼다.
  *    레이어 픽셀은 불변이라(`pixels.ts` 머리) 이력이 든 것은 참조뿐이고, 되돌리기는 그 참조를 도로 놓는 것이다.
@@ -30,7 +30,6 @@ import { makeBlock, type Block } from "../lib/blocks";
 import { loadItem, saveImage } from "./io";
 import { loadDocs, scheduleFlush } from "./persist";
 import { whenFontsLoad } from "./comicFonts";
-import { useComicOn } from "./comicFlag";
 
 export type Tool = "select" | "brush" | "eraser" | "bucket" | "text" | "crop" | "pan" | "panel" | "bubble" | "sfx";
 
@@ -106,7 +105,8 @@ type S = {
   busy: boolean;
   /** 남겨 둔 캔버스를 다 읽었나 — 그 전에는 화면도 안 그리고(`Editor`) 적지도 않는다(`persist`) */
   hydrated: boolean;
-  ready: Promise<void>;
+  /** 남겨 둔 캔버스를 되살린다. 이미 시작했으면 그것을 기다린다. 부팅이 백엔드를 확인한 뒤 부른다 (`App`) */
+  hydrate: () => Promise<void>;
   /** 글자 도구로 고치는 중인 글자 레이어. `fresh` 는 방금 만든 것 — 빈 채로 끝나면 레이어를 거둔다.
    *  ★치는 글(`value`)은 **여기**에 있다 — 글 상자가 사라지는 경로(도구 바꾸기·캔버스 옮기기·개발 모드의 이중 마운트)가
    *    여럿이라, 화면의 정리 효과가 아니라 스토어의 `endTextEdit` 하나가 마무리한다 (사용자 지적 2026-09-22: 눌러도 안 생겼다) */
@@ -409,16 +409,18 @@ export const useEditor = create<S>((set, get) => {
     return { layers, sel: left.length ? left : next ? [next] : [] };
   };
 
-  // ★처음 쓸 때 남겨 둔 캔버스를 되살린다. 그 전에 연 것(빠르게 보낸 그림)은 뒤에 붙인다
-  const ready = (async () => {
-    try {
-      const { docs, cur } = await loadDocs();
-      set((s) => ({ docs: [...docs, ...s.docs], cur: s.cur ?? (docs.some((d) => d.id === cur) ? cur : (docs[0]?.id ?? null)), hydrated: true }));
-    } catch (e) {
-      console.warn("[editor] 남겨 둔 캔버스를 못 읽었다", e);
-      set({ hydrated: true });
-    }
-  })();
+  // ★남겨 둔 캔버스를 되살린다 (한 번만). 그 전에 연 것(빠르게 보낸 그림)은 뒤에 붙인다
+  let hydrating: Promise<void> | null = null;
+  const hydrate = () =>
+    (hydrating ??= (async () => {
+      try {
+        const { docs, cur } = await loadDocs();
+        set((s) => ({ docs: [...docs, ...s.docs], cur: s.cur ?? (docs.some((d) => d.id === cur) ? cur : (docs[0]?.id ?? null)), hydrated: true }));
+      } catch (e) {
+        console.warn("[editor] 남겨 둔 캔버스를 못 읽었다", e);
+        set({ hydrated: true });
+      }
+    })());
 
   return {
     docs: [],
@@ -429,7 +431,7 @@ export const useEditor = create<S>((set, get) => {
     rev: 0,
     busy: false,
     hydrated: false,
-    ready,
+    hydrate,
     textEdit: null,
     reveal: null,
     contiBusy: null,
@@ -1248,12 +1250,6 @@ export const useEditor = create<S>((set, get) => {
 
 // ★만화 글꼴을 다 실으면 말풍선·효과음을 다시 굽는다 — 그동안은 앱 글꼴로 그려져 있었다 (설계 9-3)
 whenFontsLoad(() => useEditor.getState().refreshGlyphs());
-
-// ★지금 캔버스가 만화인가 — 앱 뼈대가 왼쪽 패널을 세울지 본다 (`comicFlag`)
-useEditor.subscribe((s) => {
-  const on = !!s.docs.find((d) => d.id === s.cur)?.comic;
-  if (useComicOn.getState().on !== on) useComicOn.setState({ on });
-});
 
 // ★캔버스가 바뀌면 남긴다 — 다 읽은 뒤부터 (`persist.ts` 머리)
 useEditor.subscribe((s, prev) => {

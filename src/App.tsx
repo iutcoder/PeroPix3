@@ -1,5 +1,5 @@
 import { useI18n, t as tGlobal } from "./i18n";
-import { Suspense, lazy, useEffect, useState } from "react";
+import { useEffect, useState } from "react";
 import { api } from "./lib/backend";
 import { mark, flushBootTime } from "./lib/bootTime";
 import { watchErrors } from "./lib/report";
@@ -34,13 +34,12 @@ import { CanvasTabs } from "./panels/CanvasTabs";
 import { Gallery } from "./panels/Gallery";
 import { Censor } from "./panels/Censor";
 import { Tools } from "./panels/Tools";
-/* ★★이미지 편집은 **지연 로드** (사용자 지시 2026-09-22: "이미지 편집이 크다고 하니까 분리"). 픽셀 편집기가
-   다른 화면의 첫 그림을 늦추지 않게, 그 모드에 처음 들어갈 때 받는다. */
-const Editor = lazy(() => import("./editor/Editor"));
-/* ★만화 캔버스의 왼쪽 패널(공통 · 컷 편집)과 컷 생성 푸터 — 편집기와 같은 덩이로 늦게 받는다 (설계 8-1) */
-const ComicLeft = lazy(() => import("./editor/ComicPanel").then((m) => ({ default: m.ComicLeft })));
-const ComicFooter = lazy(() => import("./editor/ComicPanel").then((m) => ({ default: m.ComicFooter })));
-import { useComicOn } from "./editor/comicFlag";
+/* ★★이미지 편집도 **앱을 켤 때 싣는다** (사용자 지시 2026-09-29: 모드를 처음 쓸 때 받게 만들지 않는다).
+   2026-09-22 의 「이미지 편집이 크니까 분리」는 코드를 파일로 나누라는 것이었지 늦게 받으라는 것이 아니었다. */
+import Editor from "./editor/Editor";
+/* 만화 캔버스의 왼쪽 패널(공통 · 컷 편집)과 컷 생성 푸터 (설계 8-1) */
+import { ComicFooter, ComicLeft } from "./editor/ComicPanel";
+import { useEditor } from "./editor/store";
 import { Plugins } from "./panels/Plugins";
 import { PluginPanel } from "./panels/PluginPanel";
 import { usePlugins } from "./lib/pluginHost";
@@ -84,7 +83,7 @@ export function App() {
   const dead = useHealth((s) => s.dead);
   const mode = useUi((s) => s.mode);
   /** 이미지 편집에서 만화 캔버스를 보고 있나 — 그때만 왼쪽 패널(공통 · 컷 편집)이 선다 */
-  const comicLeft = useComicOn((s) => s.on) && mode === "editor";
+  const comicLeft = useEditor((s) => !!s.docs.find((d) => d.id === s.cur)?.comic) && mode === "editor";
   // ★여기서 구독해야 언어를 바꿨을 때 패널 머리글이 따라 바뀐다 (tGlobal 은 구독이 아니다)
   const tr = useI18n((s) => s.t);
   const initGen = useGen((s) => s.init);
@@ -199,6 +198,8 @@ export function App() {
           });
           await initWs();
           mark("워크스페이스");
+          // ★이미지 편집의 남겨 둔 캔버스를 뒤에서 되살린다. 백엔드가 뜬 것을 확인한 뒤라야 한다 (못 읽으면 빈 상태로 덮어쓴다)
+          void useEditor.getState().hydrate();
           // ★큐는 앱 전체가 공유한다 — 워크스페이스를 고르기 전에 붙어 둔다
           void connectQueue();
           // 카드는 워크스페이스와 무관한 공용 저장소라 여기서 한 번만 읽는다
@@ -322,9 +323,7 @@ export function App() {
           mode === "gallery" ? (
             <GalleryFolders />
           ) : comicLeft ? (
-            <Suspense fallback={null}>
-              <ComicLeft />
-            </Suspense>
+            <ComicLeft />
           ) : (
             <LeftPanel onThumb={(section, img) => setThumbAsk({ type: "section", section, img })} />
           )
@@ -345,8 +344,8 @@ export function App() {
           ) : undefined
         }
         /* 최종 프롬프트 바로 아래, 패널 맨 밑에 **고정**. 접어도 버튼은 레일에 남는다 */
-        leftFooter={mode === "generate" ? <GenerateFooter /> : comicLeft ? <Suspense fallback={null}><ComicFooter /></Suspense> : undefined}
-        leftFooterCompact={mode === "generate" ? <GenerateFooter compact /> : comicLeft ? <Suspense fallback={null}><ComicFooter compact /></Suspense> : undefined}
+        leftFooter={mode === "generate" ? <GenerateFooter /> : comicLeft ? <ComicFooter /> : undefined}
+        leftFooterCompact={mode === "generate" ? <GenerateFooter compact /> : comicLeft ? <ComicFooter compact /> : undefined}
         right={
           mode === "gallery" ? (
             <GalleryMeta />
@@ -379,9 +378,7 @@ export function App() {
           ) : mode === "censor" ? (
             <Censor />
           ) : mode === "editor" ? (
-            <Suspense fallback={null}>
-              <Editor />
-            </Suspense>
+            <Editor />
           ) : mode === "utility" ? (
             <Tools />
           ) : mode === "plugins" ? null : (

@@ -11,7 +11,7 @@ import { useEditor } from "./store";
 
 export async function sendToEditor(items: Dropped[]): Promise<void> {
   if (!items.length) return;
-  await useEditor.getState().ready;
+  await useEditor.getState().hydrate();
   const s = useEditor.getState();
   let how: "new" | "layer" = "new";
   if (s.cur) {

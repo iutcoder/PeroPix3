@@ -36,6 +36,7 @@ import { bumpZoom, setZoom, usePreviewBox } from "../store/previewBox";
 import { applyMetaParams, applyMetaVibes } from "./GalleryMeta";
 import { hasMeta } from "../lib/metaApply";
 import { CharPositioner } from "./CharPositioner";
+import { sendToEditor } from "../editor/sendTo";
 
 /** 캔버스 — 씬 세트 줄 + 씬 무대 (마스크를 칠하는 동안에는 그 자리가 편집기다).
  *
@@ -429,7 +430,6 @@ function SceneActions() {
         onEdit={async () => {
           const files = multiFiles.length > 1 ? multiFiles : [await ensureSaved()].filter((x): x is string => !!x);
           if (!files.length) return;
-          const { sendToEditor } = await import("../editor/sendTo");
           await sendToEditor(files.map((f) => ({ name: f.split("/").pop() ?? f, rel: `${ws}/${f}` })));
         }}
         extra={
