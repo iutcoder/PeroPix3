@@ -8,7 +8,7 @@ import { Ratio } from "../components/Ratio";
 import { Help } from "../components/Tip";
 import { ImageInputPanel } from "./ImageInputPanel";
 import { useImageInput, type ImageInputStore } from "../store/imageInput";
-import { planFor } from "../lib/inference";
+import { fitPlan, planFor } from "../lib/inference";
 import { flashStyle, useFlash, useUi } from "../store/ui";
 
 const SAMPLERS = ["k_euler_ancestral", "k_euler", "k_dpmpp_2m", "k_dpmpp_2m_sde", "k_dpmpp_2s_ancestral", "k_dpmpp_sde"];
@@ -231,7 +231,8 @@ function SizePicker({ w, h, infer, onPick }: {
   w: number;
   h: number;
   /** ★★인퍼런스 참조의 크기. 있으면 줄마다 **그 프리셋으로 나오는 결과 크기**를 보인다 (사용자 결정 2026-09-29:
-   *  넣은 참조로 제대로 뽑히는 크기를 보여 주고 그중 고르게). 고르는 값은 그대로 프리셋이다 (`lib/inference` 의 `planFor`) */
+   *  넣은 참조로 제대로 뽑히는 크기를 보여 주고 그중 고르게). 고르는 값은 그대로 프리셋이다 (`lib/inference` 의 `planFor`).
+   *  ★그 참조로 못 쓰는 줄(참조가 너무 작아지는 것)은 안 보인다. 켜진 줄과 탭은 **실제로 쓰는 배치**(`fitPlan`)를 따른다 */
   infer?: { w: number; h: number } | null;
   onPick: (w: number, h: number) => void;
 }) {
@@ -239,7 +240,10 @@ function SizePicker({ w, h, infer, onPick }: {
   const sizeLast = useUi((u) => u.sizeLast);
   const setSizeLast = useUi((u) => u.setSizeLast);
   const dirOf = (a: number, b: number): SizeDir => (a > b ? "landscape" : a === b ? "square" : "portrait");
-  const tab = dirOf(w, h);
+  const presets = SIZE_PRESETS.flatMap((g) => g.items.map(([pw, ph]) => [pw, ph] as [number, number]));
+  /** 인퍼런스가 실제로 쓰는 배치. 해상도 칸 값으로 못 쓰면 대신 고른 프리셋의 것이다 */
+  const cur = infer ? fitPlan(infer.w, infer.h, w, h, presets) : null;
+  const tab = cur ? dirOf(cur.pick[0], cur.pick[1]) : dirOf(w, h);
 
   /** 고르면 그 방향의 마지막 값으로 적어 둔다 — 탭을 오갈 때 이것이 돌아온다 */
   const pick = (pw: number, ph: number) => {
@@ -247,7 +251,6 @@ function SizePicker({ w, h, infer, onPick }: {
     onPick(pw, ph);
   };
 
-  const cur = infer ? planFor(infer.w, infer.h, w, h) : null;
   const seen = new Set<string>();
   const shown = SIZE_PRESETS.flatMap((g) => g.items.map((it) => ({ group: g.group, item: it })))
     .filter((x) => dirOf(x.item[0], x.item[1]) === tab)
@@ -255,9 +258,11 @@ function SizePicker({ w, h, infer, onPick }: {
       const plan = infer ? planFor(infer.w, infer.h, x.item[0], x.item[1]) : null;
       return { ...x, out: plan ? ([plan.crop.w, plan.crop.h] as const) : null };
     })
+    // ★인퍼런스면 그 참조로 못 쓰는 줄은 뺀다 (사용자 결정 2026-09-29: 참조가 640 미만이 되는 줄)
     // ★결과 크기가 같은 줄은 한 번만 보인다. 1MP 아래 프리셋은 예산이 같아 같은 비율이면 같은 결과가 나온다
     .filter((x) => {
-      if (!x.out) return true;
+      if (!infer) return true;
+      if (!x.out) return false;
       const key = x.out.join("x");
       if (seen.has(key)) return false;
       seen.add(key);
@@ -270,12 +275,14 @@ function SizePicker({ w, h, infer, onPick }: {
         {(["landscape", "portrait", "square"] as const).map((d) => {
           const on = tab === d;
           const [lw, lh] = sizeLast[d] ?? DIR_FALLBACK[d];
+          // ★인퍼런스면 그 값으로 못 쓸 때 비율이 가장 가까운 쓸 수 있는 줄을 건다 (목록에 없는 값이 걸리지 않게)
+          const [tw, th] = (infer && fitPlan(infer.w, infer.h, lw, lh, presets)?.pick) || [lw, lh];
           return (
             <button
               key={d}
               data-size-tab={d}
               // ★누르는 순간 그 방향이 걸린다 — 목록은 그 결과로 따라 바뀐다
-              onClick={() => pick(lw, lh)}
+              onClick={() => pick(tw, th)}
               style={{
                 flex: 1,
                 display: "flex",

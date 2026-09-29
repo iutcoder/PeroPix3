@@ -4,9 +4,9 @@ import { canFocus, defaultRect, focusedPlan, wholeRectMask } from "../lib/focuse
 import { sizeForBase } from "../lib/baseSize";
 import { toast } from "./toast";
 import { t } from "../i18n";
-import { modelCaps, useGen } from "./gen";
+import { SIZE_PRESETS, modelCaps, useGen } from "./gen";
 import { api } from "../lib/backend";
-import { INFERENCE_MODEL, planFor, type InferencePlan } from "../lib/inference";
+import { INFERENCE_MODEL, fitPlan, type FittedPlan } from "../lib/inference";
 
 /** 이미지 입력 — Vibe Transfer · Precise Reference · 베이스 이미지(i2i·인페인트).
  *
@@ -125,7 +125,7 @@ type S = {
   setInfer: (image: string, name: string) => void;
   clearInfer: () => void;
   /** ★★**지금 실리는 인퍼런스의 배치**. 없으면 null. 요금·결과 크기 표시·보내는 것이 전부 이것을 본다 */
-  inferPlan: () => InferencePlan | null;
+  inferPlan: () => FittedPlan | null;
 
   setBase: (image: string, name: string) => void;
   setTileRect: (r: { x: number; y: number; w: number; h: number } | null) => void;
@@ -169,6 +169,10 @@ export type ImageSnap = Pick<
   | "baseImage" | "baseName" | "baseMode" | "baseStrength" | "baseInpaintStrength"
   | "baseNoise" | "baseMask" | "baseSize" | "focused" | "tileRect"
 >;
+
+/** 인퍼런스가 해상도 칸 값으로 못 쓸 때 대신 고르는 후보 (`lib/inference` 의 `fitPlan`).
+ *  ★쓸 때 읽는다. `gen.ts` 와 서로를 가져오므로 모듈이 뜰 때 읽으면 순서에 따라 아직 없다 */
+const presetSizes = (): [number, number][] => SIZE_PRESETS.flatMap((g) => g.items.map(([w, h]) => [w, h] as [number, number]));
 
 /** v2 제한 그대로 (index.html:18376) */
 export const MAX_VIBES = 16;
@@ -348,7 +352,7 @@ export function makeImageInput(modelOf: () => string) {
     const on = get().riding().infer;
     if (!on?.size) return null;
     const p = useGen.getState().params;
-    return planFor(on.size.w, on.size.h, p.width, p.height);
+    return fitPlan(on.size.w, on.size.h, p.width, p.height, presetSizes());
   },
 
   setBase: (image, name) => {
@@ -469,7 +473,6 @@ export function makeImageInput(modelOf: () => string) {
     if (plan && ride.infer) {
       // ★★인퍼런스는 **베이스 이미지 대신** 나간다. 둘 다 인페인트 경로다. 캔버스와 마스크는
       //   서버가 이 숫자대로 그린다 (`server._inference_canvas`). 크기는 **캔버스**로 나간다
-      const p = useGen.getState().params;
       const r = (x: { x: number; y: number; w: number; h: number }) => [x.x, x.y, x.w, x.h];
       return {
         vibe_transfer: ride.vibes,
@@ -488,8 +491,8 @@ export function makeImageInput(modelOf: () => string) {
         inference: {
           image: ride.infer.image,
           name: ride.infer.name,
-          // 해상도 칸의 값. 「설정 불러오기」가 이것으로 되돌린다 (캔버스 크기가 아니다)
-          pick: [p.width, p.height],
+          // 이 배치를 낸 해상도 값. 「설정 불러오기」가 이것으로 해상도 칸을 되돌린다 (캔버스 크기가 아니다)
+          pick: plan.pick,
           canvas: [plan.canvas.w, plan.canvas.h],
           ref: r(plan.ref),
           keep: r(plan.keep),
