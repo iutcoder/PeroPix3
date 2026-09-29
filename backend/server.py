@@ -1053,7 +1053,8 @@ async def _session_for(agent: str, exe: str, backend: str, chat: str,
         #   ★어느 CLI 인지 함께 실어야 화면이 어느 모양으로 읽을지 안다 (모양이 서로 다르다).
         #   ★★번호를 붙여 **남기고** 내보낸다. 소켓이 잠깐 끊겨도 되받을 수 있어야 한다
         #     (`genqueue` 머리 주석 — 안 그러면 「일하는 중…」에서 영원히 멈춘다).
-        await Q.broadcast(Q.add_cli_event(agent, ev))
+        # ★그림 데이터는 떼고 보낸다 — 화면은 도구 결과의 글만 쓴다 (`agentsession.drop_images`)
+        await Q.broadcast(Q.add_cli_event(agent, agentsession.drop_images(ev)))
 
     # ★워크스페이스가 아니라 **앱 안의 빈 폴더**(`data/agent/`)에서 돌린다
     _sess = agentsession.make(agent, exe, cliagent.work_dir(DATA_DIR), backend, emit)

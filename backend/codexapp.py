@@ -40,6 +40,11 @@ from typing import Any, Callable
 
 import cliagent
 
+#: ★★CLI 출력 한 줄의 읽기 한도 — 파이썬 기본값(64KB)이면 그림이 든 도구 결과 한 줄에 읽기 스레드가 죽는다
+#  (2026-09-22 설치본: `read_image` 두 장이 약 10만 자 한 줄로 왔다). 그 뒤로는 중단도 다음 말도 오류였다.
+#  클로드 코드 세션(`agentsession`)도 이 값을 쓴다.
+LINE_LIMIT = 32 * 1024 * 1024
+
 
 def thread_config(backend: str, open: bool = True) -> dict:
     """`thread/start` 에 실어 보내는 설정 — **여기 하나뿐이다.**
@@ -113,6 +118,7 @@ class Rpc:
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            limit=LINE_LIMIT,
         )
         self._ready.set()
         assert self.proc.stdout is not None

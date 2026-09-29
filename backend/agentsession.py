@@ -33,6 +33,21 @@ import codexapp
 Emit = Callable[[dict], Awaitable[None]]
 
 
+def drop_images(v: Any) -> Any:
+    """그림 데이터를 뗀 사본 — 화면으로 넘기기 전에 거친다 (`server._session_for` 의 `emit`).
+
+    ★CLI 는 도구 결과를 **그림째** 한 줄로 되돌려 보낸다 (`read_image` 두 장이면 약 10만 자). 화면
+      (`llm.ts` 의 `cliEvent`)은 그 결과에서 글만 뽑으므로, 그림은 웹소켓과 되받기 버퍼만 채우고 버려진다.
+    ★모양을 가리지 않는다 — 앤트로픽 모양(`source.data`)도 MCP 모양(`data`)도 `type: "image"` 인 칸 안에 있다."""
+    if isinstance(v, dict):
+        if v.get("type") == "image":
+            return {"type": "image"}
+        return {k: drop_images(x) for k, x in v.items()}
+    if isinstance(v, list):
+        return [drop_images(x) for x in v]
+    return v
+
+
 class Session:
     """CLI 한 명. ★한 번에 하나만 산다 (화면이 하나라 둘이 앱을 만지면 뒤엉킨다)."""
 
@@ -260,7 +275,7 @@ class ClaudeSession(Session):
             self.exe, *args, cwd=str(self.cwd),
             env={**os.environ, "MCP_TIMEOUT": "1800000"},
             stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE)
+            stderr=asyncio.subprocess.PIPE, limit=codexapp.LINE_LIMIT)
         self._main.call_soon_threadsafe(self._up.set)
         assert self.proc.stdout is not None
 
