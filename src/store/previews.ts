@@ -55,6 +55,9 @@ type S = {
   add: (m: Record<string, any>) => PreviewTake;
   /** 미리보기를 버린다 (파일이 아니라 메모리에서 없어질 뿐이다) */
   drop: (file: string) => void;
+  /** 여러 장을 버리고 **도로 넣는 함수**를 돌려준다 — `Del`·삭제 버튼의 되돌리기가 부른다
+   *  (`lib/sceneTakes.removeTakes`). 저장된 그림이 휴지통을 거쳐 `Ctrl+Z` 로 돌아오는 것과 같게 한다. */
+  discard: (files: string[]) => () => void;
   /** **파일로 저장** — 보통 생성과 같은 이름 규칙을 쓴다 (`/api/save-preview`).
    *  성공하면 그 미리보기는 목록에서 빠지고, 진짜 레코드가 그 자리를 잇는다. */
   save: (file: string) => Promise<Rec>;
@@ -92,6 +95,17 @@ export const usePreviews = create<S>((set, get) => ({
 
   drop(file) {
     set({ items: get().items.filter((x) => x.file !== file) });
+  },
+
+  discard(files) {
+    const gone = new Set(files);
+    const taken = get().items.filter((x) => gone.has(x.file));
+    set({ items: get().items.filter((x) => !gone.has(x.file)) });
+    return () => {
+      // ★그 사이 같은 것이 돌아와 있으면 두 번 넣지 않는다
+      const have = new Set(get().items.map((x) => x.file));
+      set({ items: [...get().items, ...taken.filter((x) => !have.has(x.file))] });
+    };
   },
 
   async save(file) {

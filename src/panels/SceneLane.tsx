@@ -25,7 +25,7 @@ import { useThumbView } from "./PromptSections";
 import { DragGhost } from "../cards/DragGhost";
 import { useLaneReorder, type LaneDrop } from "../lib/useReorder";
 import { useSceneFocus } from "../store/sceneFocus";
-import { removeTakes, stepScene, stepTake, visibleTakes } from "../lib/sceneTakes";
+import { removeTakes, saveTake, stepScene, stepTake, visibleTakes } from "../lib/sceneTakes";
 import { clearUndo, undoLast } from "../lib/undo";
 // ★`t` 는 **모듈 것**을 쓴다 — 이 파일 안에서 `t` 는 이벤트 대상 이름으로 자주 가려진다
 import { t as tr } from "../i18n";
@@ -630,7 +630,7 @@ export function SceneLane() {
    *    정할 수가 없다. 그때는 누른 것 하나만 넣는다.
    *  ★차례는 **화면에 보이는 그대로**여야 한다 (`visibleTakes`) — 저장 차례로 세면
    *    눈에 보이는 사이의 것과 실제로 들어가는 것이 갈린다.
-   *  ★미저장(파일 없는 그림)은 뺀다 — 고른 것에 걸리는 일이 전부 파일 경로를 보낸다. */
+   *  ★미저장(파일 없는 그림)도 든다 — 고른 것에 걸리는 일이 미저장을 먼저 저장하거나 메모리에서 뺀다 (`tap` 의 ★★주). */
   const pick = (file: string, cellId: string, range: boolean) => {
     const f = useSceneFocus.getState();
     const next = new Set(f.picked);
@@ -641,7 +641,7 @@ export function SceneLane() {
     if (!next.size && f.file) next.add(f.file);
     if (!range) next.has(file) ? next.delete(file) : next.add(file);
     else {
-      const list = visibleTakes(cellId).filter((r) => !r.preview).map((r) => r.file);
+      const list = visibleTakes(cellId).map((r) => r.file);
       const to = list.indexOf(file);
       const from = f.cell === cellId && f.file ? list.indexOf(f.file) : -1;
       if (to < 0) return;
@@ -967,7 +967,17 @@ export function SceneLane() {
                 takes={takesOfCell}
                 stepOf={(id) => steps[stepKey(ws, id)] ?? ""}
                 isStarred={isStarred}
-                onStar={toggleStar}
+                /* ★미저장이면 **먼저 파일로 남기고** 그 경로에 켠다 (별의 ★★주) */
+                onStar={(f) =>
+                  isPreviewFile(f)
+                    ? void saveTake(f)
+                        .then((nf) => {
+                          toggleStar(nf);
+                          toast(t("scenes.savedToast", { name: nf.split("/").pop() ?? nf }));
+                        })
+                        .catch((e) => toast(String(e), "warn"))
+                    : toggleStar(f)
+                }
                 queuedOf={(cellId) => queued.filter((p) => p.cellId === cellId)}
                 /* ★★**서버가 말하는 씬**의 대기 칸에 「생성 중」을 붙인다 (2026-08-25).
                    예전에는 `queued[0]`(내 목록의 맨 앞)을 찍었는데, 배치가 겹치면 그 순서가
@@ -2063,11 +2073,11 @@ function SceneRow(
                 //   같은 이유로 한 번 죽었던 것과 같은 함정이다.
                 if ((e.target as HTMLElement).closest("[data-take-star]")) return;
                 const tap = () => {
-                  // ★미저장은 **여러 장 고르기에서 뺀다.** 고른 것에 걸리는 일(휴지통·강화)이
-                  //   전부 파일 경로를 서버로 보내는 것이라, 섞이면 조용히 실패한다.
-                  //   버리는 것도 저장하는 것도 큰 그림 아래 줄에서 한다 (`SceneActions`)
-                  if (!un && (e.ctrlKey || e.metaKey)) p.onPick(r.file, c.id, false);
-                  else if (!un && e.shiftKey) p.onPick(r.file, c.id, true);
+                  // ★★미저장도 **여러 장 고르기에 든다** (사용자 지시 2026-09-30: *"자동저장을 하든
+                  //   안 하든 최대한 UI 동일하게"*). 고른 것에 걸리는 일은 미저장을 먼저 저장하거나
+                  //   (강화·보관 — `SceneActions` 의 `ensureAll`) 메모리에서 뺀다 (삭제 — `removeTakes`).
+                  if (e.ctrlKey || e.metaKey) p.onPick(r.file, c.id, false);
+                  else if (e.shiftKey) p.onPick(r.file, c.id, true);
                   else {
                     /* ★★**그냥 누르면 여러 장 고르기가 풀린다** (사용자 지시 2026-08-22).
                        ★푸는 것은 **여기서** 한다 — 수식키가 없다는 것을 아는 자리가 여기뿐이다.
@@ -2148,7 +2158,7 @@ function SceneRow(
                            pointerEvents: "none" }}
                 />
               )}
-              {un ? (
+              {un && (
                 /* ★「미저장」이 칸에서 바로 보여야 한다 (v2 는 파일명 자리에 `미저장` 을 넣었다 —
                     `index.html:12156`). 우리 칸에는 파일명 줄이 없으므로 아래에 작은 표로 얹는다. */
                 <span
@@ -2168,13 +2178,15 @@ function SceneRow(
                 >
                   {t("scenes.unsaved")}
                 </span>
-              ) : (
+              )}
+              {
                 /* ★★**썸네일 위의 별** (2026-08-22 에 걷었다가 되살렸다 2026-08-25).
                    ★평소에는 **안 보이고**(`opacity: 0`), 커서를 올리거나 별이 달려 있을 때만
                      보인다 — 늘 떠 있으면 수십 장이 별 밭이 된다 (`.thumb-star` 규칙).
                    ★12px 은 썸네일 위에서 작았다 → 18px (사용자 지시 2026-08-18).
-                   ★미저장 그림에는 안 붙는다 — 별표는 **파일 경로**로 저장되므로 아직
-                     파일이 아닌 것에는 달 자리가 없다 (위 갈래가 그것을 가른다). */
+                   ★★미저장 그림에도 붙는다 (사용자 지시 2026-09-30: *"자동저장을 하든 안 하든 최대한
+                     UI 동일하게"*). 별표는 **파일 경로**로 저장되므로, 누르면 먼저 파일로 남기고 그
+                     경로에 켠다 (`onStar` 가 가른다 — 강화·보관이 미저장을 먼저 저장하는 것과 같은 규칙). */
                 <span
                   data-take-star={r.file}
                   onClick={(e) => {
@@ -2203,7 +2215,7 @@ function SceneRow(
                 >
                   {p.isStarred(r.file) ? Icon.star18On : Icon.star18}
                 </span>
-              )}
+              }
             </button>
           );
         })}

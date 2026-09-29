@@ -330,7 +330,11 @@ type S = {
   ) => Promise<{ file: string; cell: string } | null>;
   /** ★지우기 = **휴지통으로 이동**. 파일이 실제로 자리에서 없어지고, `Ctrl+Z` 로 되돌아온다.
    *  비우는 것은 앱을 켤 때 (24시간 지난 것) — `backend/trash.py` 머리 주석. */
-  deleteFiles: (files: string[], opts?: { undo?: boolean }) => Promise<void>;
+  deleteFiles: (
+    files: string[],
+    /** `also` — 같은 되돌리기 한 걸음에 함께 되살릴 것 (함께 지운 미저장 그림, `lib/sceneTakes.removeTakes`) */
+    opts?: { undo?: boolean; also?: () => void },
+  ) => Promise<void>;
   /** 화면이 그림을 못 읽었다 — **정말 없으면** 그 장을 목록에서 뺀다 (`forgetMissing` 의 ★★주) */
   forgetMissing: (file: string) => Promise<void>;
   activeSceneGroup: () => SceneGroup | undefined;
@@ -1474,7 +1478,10 @@ export const useWs = create<S>((set, get) => ({
        이미 없어 **갈 자리 없는 그림**이 된다 (`removeAt` 의 ★★주).
        ★그림 자체는 휴지통에 있으므로 24시간 안에 꺼낼 수 있다 — 잃는 것은 없다. */
     if (opts.undo !== false)
-      pushUndo(t("common.undoImages"), () => void get().restoreFiles(r.moved, before));
+      pushUndo(t("common.undoImages"), () => {
+        opts.also?.();
+        void get().restoreFiles(r.moved, before);
+      });
   },
 
   toggleStar(file) {

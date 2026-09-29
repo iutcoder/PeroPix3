@@ -2,9 +2,11 @@ import { useUi } from "../store/ui";
 import { nextAfter } from "./pickNext";
 import { newestFirst, takesOfScene, type Rec } from "./takes";
 import { allCells, useWs } from "../store/workspace";
-import { usePreviews, withPreviews } from "../store/previews";
+import { isPreviewFile, usePreviews, withPreviews } from "../store/previews";
 import { useSceneFocus } from "../store/sceneFocus";
 import { useQueue } from "../store/queue";
+import { pushUndo } from "./undo";
+import { t } from "../i18n";
 
 /** 씬 칸에 **보이는 그대로**의 장 목록과, 그 위를 오가는 규칙.
  *
@@ -152,7 +154,11 @@ export function pickAfterRemoving(cellId: string, file: string | string[]): stri
  *    하나 더 생겼으므로 아예 여기로 모은다 (사용자 지시 2026-08-22).
  *  ★**고른 것을 먼저 푼다.** 지워진 파일을 고른 채로 두면 그 뒤의 `Ctrl+Z` 로 되살아나기
  *    전까지 없는 파일을 가리킨다.
- *  @returns 실제로 보낸 파일 (없으면 빈 배열) */
+ *  ★★**미저장 그림도 같은 창구로 지운다** (사용자 지시 2026-09-30: *"자동저장을 하든 안 하든 최대한
+ *    UI 동일하게"*). 예전에는 미저장의 표식(`preview:3`)까지 서버 휴지통으로 보내서, 서버에서는 아무
+ *    일도 안 일어나고 화면에서도 안 빠졌다 (`Del` 이 안 먹었다). 미저장은 메모리에서 빼고, 섞여 있으면
+ *    `Ctrl+Z` 한 번이 둘 다 되살린다.
+ *  @returns 실제로 지운 것 (없으면 빈 배열) */
 export function removeTakes(): string[] {
   const f = useSceneFocus.getState();
   // ★고른 것이 있으면 **그것 전부**, 없으면 지금 보고 있는 한 장
@@ -160,7 +166,33 @@ export function removeTakes(): string[] {
   if (!target.length) return [];
   const next = pickAfterRemoving(f.cell, target);   // ★지우기 **전에** 정한다
   useSceneFocus.getState().setPicked([]);           // ★없어진 파일을 고른 채로 두지 않는다
-  void useWs.getState().deleteFiles(target);
+  const files = target.filter((x) => !isPreviewFile(x));
+  const drops = target.filter(isPreviewFile);
+  const back = drops.length ? usePreviews.getState().discard(drops) : undefined;
+  if (files.length)
+    void useWs.getState().deleteFiles(files, { also: back }).catch(() => back && pushUndo(t("common.undoImages"), back));
+  else if (back) pushUndo(t("common.undoImages"), back);
   useSceneFocus.getState().focus(f.cell, next);
   return target;
+}
+
+/** 미저장 그림을 **파일로 남긴다** — 파일이 있어야 하는 일(강화·보관·별표…) 앞에 부른다.
+ *  이미 파일이면 그대로 돌려준다.
+ *  ★저장하면 그 장을 가리키던 자리(보고 있는 장 · 고른 것)가 **새 경로**를 따라간다. 안 그러면
+ *    방금 저장한 장이 화면에서 빠진 자리를 가리킨다. */
+export async function saveTake(file: string): Promise<string> {
+  if (!isPreviewFile(file)) return file;
+  const rec = await usePreviews.getState().save(file);
+  useWs.getState().addRecord(rec);
+  const f = useSceneFocus.getState();
+  if (f.picked.includes(file)) f.setPicked(f.picked.map((x) => (x === file ? rec.file : x)));
+  if (f.file === file) f.focus(f.cell, rec.file);
+  return rec.file;
+}
+
+/** 여러 장을 차례로 `saveTake` — ★한 장씩 기다린다 (같은 씬의 번호열이 고른 차례대로 붙게) */
+export async function saveTakes(files: string[]): Promise<string[]> {
+  const out: string[] = [];
+  for (const file of files) out.push(await saveTake(file));
+  return out;
 }

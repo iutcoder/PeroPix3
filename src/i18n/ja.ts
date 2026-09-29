@@ -1351,7 +1351,7 @@ export const ja: Dict = {
     emptyHint: "空です · シーンカードを置くとシーンができます",
     unsaved: "未保存",
     saveToFile: "ファイルに保存",
-    dropPreview: "プレビューを消す",
+    dropPreview: "プレビューを消します (Ctrl+Z で戻せます)",
     sweepHint: "整理: このシーングループの未保存画像 {n} 枚をすべて消す",
     sweepAsk: "未保存の画像 {n} 枚を消しますか？",
     sweepBody: "このシーングループでファイルに保存していない画像をすべて破棄します。元に戻せません。",

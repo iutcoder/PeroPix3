@@ -1353,7 +1353,7 @@ export const en = {
     emptyHint: "Empty · drop a scene card here to get scenes",
     unsaved: "Unsaved",
     saveToFile: "Save to file",
-    dropPreview: "Discard preview",
+    dropPreview: "Discards the preview (Ctrl+Z undoes)",
     sweepHint: "Sweep: discard all {n} unsaved images in this scene group",
     sweepAsk: "Discard {n} unsaved images?",
     sweepBody: "Every image in this scene group that was not saved to a file will be discarded. This cannot be undone.",

@@ -43,6 +43,7 @@ export function ImageActions({
   loadEnv,
   loadBase,
   ensureFile,
+  ensureFiles,
   hideSettings,
   dims,
   revealPath,
@@ -78,6 +79,9 @@ export function ImageActions({
   /** 파일이 있어야 하는 일 **앞에** 부른다 — 미저장 그림이면 저장하고 새 경로를 돌려준다.
    *  ★없으면 지금 경로를 그대로 쓴다 (갤러리·저장된 그림). 이 갈래를 부르는 쪽이 안다. */
   ensureFile?: () => Promise<string | null>;
+  /** 여러 장 골랐을 때(`upscale.files`)의 `ensureFile` — 미저장이 섞였으면 저장하고 **경로들**을 돌려준다.
+   *  ★없으면 `upscale.files` 를 그대로 쓴다 */
+  ensureFiles?: () => Promise<string[]>;
   /** 생성할 때 남겨 둔 **그때 구조** (`gen.ts` 의 `env`). 있으면 설정 불러오기가 이걸 먼저 쓴다 */
   loadEnv?: () => Promise<ShotEnv | null>;
   /** 그 그림을 뽑을 때의 **베이스 이미지**(i2i·인페인트). 워크스페이스 그림에만 있다 */
@@ -238,23 +242,26 @@ export function ImageActions({
     if (!upscale || busy || cost < 0) return;
     setBusy(true);
     try {
-      // ★미저장이면 **먼저 파일로 남긴다** — 업스케일은 서버가 그 파일을 연다
-      const target = ensureFile ? await ensureFile() : upscale.file;
-      if (!target) return;
       // ★여러 장 골랐으면 **전부** (사용자 지시 2026-08-29) — 한 장씩 차례로 보낸다
-      const list = upscale.files?.length ? upscale.files : [target];
+      const many = upscale.files?.length ?? 0;
       /* ★다중일 때만 묻는다 (사용자 결정 2026-08-29) — 장수만큼 Anlas 가 한 번에 나간다.
-         한 장은 공홈처럼 즉시다 (버튼의 비용 표기가 안내다). */
+         한 장은 공홈처럼 즉시다 (버튼의 비용 표기가 안내다).
+         ★저장보다 **먼저** 묻는다 — 취소했는데 미저장이 저장돼 있으면 안 된다 */
       if (
-        list.length > 1 &&
+        many > 1 &&
         !(await ask({
-          title: t("upscale.confirmMany", { n: list.length }),
+          title: t("upscale.confirmMany", { n: many }),
           body: t("upscale.confirmManyBody"),
           ok: t("upscale.button"),
           cancel: t("common.cancel"),
         }))
       )
         return;
+      // ★미저장이면 **먼저 파일로 남긴다** — 업스케일은 서버가 그 파일을 연다
+      const list = many
+        ? ensureFiles ? await ensureFiles() : upscale.files!
+        : [ensureFile ? await ensureFile() : upscale.file].filter((f): f is string => !!f);
+      if (!list.length) return;
       for (const f of list) {
         const r = await api<{ file: string; record: Rec }>("/api/upscale", {
           method: "POST",
@@ -310,7 +317,7 @@ export function ImageActions({
       // ★여러 장 골랐으면 전부 싣는다 (사용자 지시 2026-08-29: "다중 선택도 대응")
       const files =
         isMulti && upscale.files?.length
-          ? upscale.files
+          ? ensureFiles ? await ensureFiles() : upscale.files
           : [ensureFile ? await ensureFile() : upscale.file];
       const items = files
         .filter((f): f is string => !!f)

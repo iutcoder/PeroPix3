@@ -6,7 +6,7 @@ import { useWs, takesOfScene, allCells, allScenes, type ShotEnv } from "../store
 import { SceneLane, takeSrc } from "./SceneLane";
 import { useSceneFocus } from "../store/sceneFocus";
 import { runningPendingId, stepKey, useQueue } from "../store/queue";
-import { removeTakes, stepTake } from "../lib/sceneTakes";
+import { removeTakes, saveTake, saveTakes, stepTake } from "../lib/sceneTakes";
 import { useUi } from "../store/ui";
 import { CanvasTabs } from "./CanvasTabs";
 import { imgUrl } from "../lib/imgUrl";
@@ -18,7 +18,7 @@ import { MaskEditor } from "../components/MaskEditor";
 import { useImageInput } from "../store/imageInput";
 import { EnhanceDialog } from "./EnhanceDialog";
 import { useGallery, type ImageMeta } from "../store/gallery";
-import { usePreviews, withPreviews, isPreviewFile } from "../store/previews";
+import { usePreviews, withPreviews } from "../store/previews";
 import { api } from "../lib/backend";
 import { wheelIsOver } from "../lib/wheelAt";
 import {
@@ -197,14 +197,12 @@ function SceneActions() {
   /** 씬을 오른쪽에 두는 모드인가 — 아래 여백이 그때만 필요하다 (반환 자리의 ★★주) */
   const vert = useUi((u) => u.laneSide === "right");
   const { base } = useGen();
-  const { current: ws, records, addRecord } = useWs();
+  const { current: ws, records } = useWs();
   const file = useSceneFocus((s) => s.file);
   /** 지금 지우면 몇 장이 가나 — ★**구독해서 읽는다.** 씬 줄에서 고른 것이 늘고 줄면
    *  이 줄의 안내도 따라 바뀌어야 한다 (`getState()` 로만 읽으면 다시 안 그린다). */
   const picked = useSceneFocus((s) => s.picked);
   const many = picked.length;
-  /** ★다중 처리 대상 — 미저장(미리보기)은 파일이 없어 뺀다 (사용자 지시 2026-08-29) */
-  const multiFiles = picked.filter((f) => !isPreviewFile(f));
   const previews = usePreviews((s) => s.items);
   const [enhance, setEnhance] = useState<string[] | null>(null);
   /* ★★**해상도는 프리뷰가 잰 값 그대로**다 (`store/previewBox` 의 `nat`, 2026-08-25).
@@ -216,36 +214,28 @@ function SceneActions() {
   const [saving, setSaving] = useState(false);
   if (!file) return null;
 
-  /** ★★미저장 그림에도 **같은 줄**이 붙는다 (사용자 지시 2026-08-19).
+  /** ★★미저장 그림에도 **같은 줄**이 붙는다 (사용자 지시 2026-08-19 · 2026-09-30 *"자동저장을 하든
+   *  안 하든 최대한 UI 동일하게"*).
    *
-   *  예전에는 「파일로 저장 · 미리보기 지우기」 둘만 냈다. 미저장은 **아직 파일이 아닐 뿐**
-   *  같은 그림이라, 할 수 있는 일도 같아야 한다. 갈리는 것은 둘뿐이다:
-   *    · 「삭제」 자리에 **「저장」** 이 선다 (저장하면 그 줄이 그대로 「삭제」가 된다)
-   *    · 저장 안 한 동안만 **「미리보기 지우기」**가 하나 더 선다
+   *  미저장은 **아직 파일이 아닐 뿐** 같은 그림이라, 할 수 있는 일도 같아야 한다. 갈리는 것은 하나뿐이다:
+   *    · 저장 안 한 동안만 **「저장」** 이 삭제 옆에 하나 더 선다
+   *  ★삭제는 같은 자리·같은 규칙이다 (`removeTakes`: 옆 장으로 넘어가고 `Ctrl+Z` 로 돌아온다).
+   *    예전에는 「삭제」 자리에 「저장」이 서고 지우개(「미리보기 지우기」)가 따로 있었는데, 지우개는
+   *    되돌릴 수 없었고 큰 자리를 비웠으며 `Del` 은 아예 안 먹었다.
    *  ★서버의 파일을 다루는 것(강화·업스케일·보관·탐색기·새 탭으로 복제)은 **먼저 저장하고**
-   *    이어서 한다 (`ensureSaved`). 눌러야 실패하는 단추를 두지 않는다는 규칙 그대로다.
+   *    이어서 한다 (`ensureSaved` · 여러 장이면 `ensureAll`). 눌러야 실패하는 단추를 두지 않는다는
+   *    규칙 그대로다. 예전에는 여러 장 고르기에서 미저장을 조용히 뺐다.
    *  ★읽기만 하는 것(프롬프트 보기·설정)은 **저장하지 않는다** — 바이트를 그대로 보내
    *    메타데이터만 읽는다 (`/api/tools/meta-upload`). 훑어보다 저장돼 버리면
    *    「자동 저장 끄기」의 뜻이 사라진다. */
   const un = previews.find((x) => x.file === file);
-  const dropPreview = () => {
-    usePreviews.getState().drop(file);
-    useSceneFocus.getState().focus(useSceneFocus.getState().cell, null);
-  };
-  const savePreview = async () => {
-    const rec = await usePreviews.getState().save(file);
-    // ★저장한 그 장을 **그대로 보고 있게** 한다 — 미리보기가 빠지면서 화면이 비면
-    //   방금 무엇을 저장했는지 알 수 없다
-    addRecord(rec);
-    useSceneFocus.getState().focus(useSceneFocus.getState().cell, rec.file);
-    return rec.file;
-  };
-  /** 파일이 있어야 하는 일 앞에 부른다. 미저장이면 저장하고 **새 경로**를 돌려준다 */
+  /** 파일이 있어야 하는 일 앞에 부른다. 미저장이면 저장하고 **새 경로**를 돌려준다
+   *  ★저장한 그 장을 **그대로 보고 있게** 한다 (`saveTake`) — 화면이 비면 방금 무엇을 저장했는지 모른다 */
   const ensureSaved = async (): Promise<string | null> => {
     if (!un) return file;
     setSaving(true);
     try {
-      const f = await savePreview();
+      const f = await saveTake(file);
       toast(tr("scenes.savedToast", { name: f.split("/").pop() ?? f }));
       return f;
     } catch (e) {
@@ -255,6 +245,21 @@ function SceneActions() {
       setSaving(false);
     }
   };
+  /** 여러 장 골랐을 때 — 미저장이 섞였으면 **먼저 전부 저장**하고 경로들을 돌려준다 (`ensureSaved` 와 같은 규칙) */
+  const ensureAll = async (): Promise<string[]> => {
+    setSaving(true);
+    try {
+      return await saveTakes(useSceneFocus.getState().picked);
+    } catch (e) {
+      toast(String(e), "warn");
+      return [];
+    } finally {
+      setSaving(false);
+    }
+  };
+  /** 다중 처리의 대상 — 여러 장 골랐으면 전부, 아니면 보고 있는 한 장 (사용자 지시 2026-08-29) */
+  const targets = async (): Promise<string[]> =>
+    many > 1 ? ensureAll() : [await ensureSaved()].filter((x): x is string => !!x);
 
   const rec = records.find((r) => r.file === file);
   /** ★미저장이면 **바이트를 보내** 읽는다 — 저장하지 않는다 (위 주석) */
@@ -293,11 +298,13 @@ function SceneActions() {
     /* ★여러 장 골랐으면 **한 새 탭의 같은 씬**에 테이크로 쌓인다 (사용자 지시 2026-08-29).
        구조·설정은 첫 장이 세운다 — 메타데이터 적용(apply)은 보는 장과 첫 장이 다를 수 있어
        건너뛴다 (환경 스냅샷이 있는 그림은 그것으로 충분하다). */
-    if (multiFiles.length > 1) {
+    if (many > 1) {
       try {
-        const landed = await useWs.getState().cloneToNewTab(multiFiles[0], {
+        const files = await ensureAll();
+        if (!files.length) return;
+        const landed = await useWs.getState().cloneToNewTab(files[0], {
           excludeNo: useGen.getState().params.exclude_slot_number,
-          extraFiles: multiFiles.slice(1),
+          extraFiles: files.slice(1),
         });
         if (!landed) return;
         useSceneFocus.getState().focus(landed.cell, landed.file);
@@ -346,7 +353,8 @@ function SceneActions() {
            미저장 그림에는 레코드가 없어 스냅샷도 없다 — 그때는 메타데이터로 떨어진다. */
         loadEnv={
           un
-            ? undefined
+            ? // ★미저장은 뽑을 때의 구조를 메모리에 들고 있다 (`PreviewTake.env`) — 저장된 그림과 같게 쓴다
+              async () => (un.env as ShotEnv | null | undefined) ?? null
             : async () =>
                 (
                   await api<{ env: ShotEnv | null }>(
@@ -356,10 +364,13 @@ function SceneActions() {
         }
         /* ★★베이스 이미지도 **그때 것**을 되살린다 (사용자 지시 2026-08-22). 그림에는 안 남고
              보낸 페이로드 기록에만 있다 (`GalleryMeta` 의 `applyRecordedBase` ★주).
-           ★미저장 그림에는 레코드가 없어 가져올 것도 없다 — `loadEnv` 와 같은 규칙이다. */
+           ★미저장 그림은 i2i 베이스를 안 들고 있다 (생성 응답에 페이로드가 안 실린다) — 인퍼런스만
+             들고 있어 그것만 되살린다 (서버 `gallery_base` 와 같은 모양). 없으면 베이스를 건드리지 않는다. */
         loadBase={
           un
-            ? undefined
+            ? (un.inference as { image?: string } | null | undefined)?.image
+              ? async () => ({ image: "", inference: un.inference as { image?: string; name?: string; pick?: number[]; aux?: string | null } })
+              : undefined
             : async () =>
                 await api<{ image?: string }>(
                   `/api/workspaces/${encodeURIComponent(ws)}/base?file=${encodeURIComponent(file)}`,
@@ -374,18 +385,18 @@ function SceneActions() {
         ensureFile={un ? ensureSaved : undefined}
         /* ★여러 장 골랐으면 **전부** (사용자 지시 2026-08-29) — 인핸스 대화상자는 원래 배치다 */
         onEnhance={async () => {
-          if (multiFiles.length > 1) return setEnhance(multiFiles);
-          const f = await ensureSaved();
-          if (f) setEnhance([f]);
+          const files = await targets();
+          if (files.length) setEnhance(files);
         }}
-        upscale={{ ws, file, files: multiFiles.length > 1 ? multiFiles : undefined }}
-        multi={multiFiles.length}
+        upscale={{ ws, file, files: many > 1 ? picked : undefined }}
+        ensureFiles={ensureAll}
+        multi={many}
         onKeep={async () => {
           /* ★누르면 언제나 보관이다 — 무르기(토글)는 걷어냈다 (사용자 결정 2026-08-29:
              *"넣기가 빼기로 변하는 게 비직관적"*). 여러 장 골랐으면 전부 보관한다.
              보관한 뒤에는 갤러리로 데려간다 — 일괄 변환 보내기와 같은 어법. */
           try {
-            const files = multiFiles.length > 1 ? multiFiles : [await ensureSaved()].filter((x): x is string => !!x);
+            const files = await targets();
             if (!files.length) return;
             // ★갤러리에서 고른 폴더로 (`BottomNav` 의 ★★주와 같은 규칙)
             const folder = useGallery.getState().folder;
@@ -404,7 +415,7 @@ function SceneActions() {
            ★메타 제거 여부는 변환 도구의 체크가 정한다 (설정이 저장되므로 한 번 켜면 유지). */
         onConvert={async () => {
           // ★여러 장 골랐으면 전부 싣는다 (사용자 지시 2026-08-29)
-          const files = multiFiles.length > 1 ? multiFiles : [await ensureSaved()].filter((x): x is string => !!x);
+          const files = await targets();
           if (!files.length) return;
           const had = new Set(useConvertQueue.getState().items.map((i) => i.rel ?? i.path ?? i.name));
           const add = files
@@ -418,7 +429,7 @@ function SceneActions() {
            워크스페이스 이름을 앞에 붙인다 (`appActions` 의 censor_add 와 같은 규칙). 같은 장은
            `addImages` 가 걸러 준다. 담은 뒤 검열 화면의 「검열 전」 탭으로 데려간다. */
         onCensor={async () => {
-          const files = multiFiles.length > 1 ? multiFiles : [await ensureSaved()].filter((x): x is string => !!x);
+          const files = await targets();
           if (!files.length) return;
           const { useCensor } = await import("../store/censor");
           await useCensor.getState().addImages(files.map((f) => ({ name: f.split("/").pop() ?? f, rel: `${ws}/${f}` })));
@@ -428,14 +439,38 @@ function SceneActions() {
         /* ★이미지 편집으로 보내기 (사용자 지시 2026-09-22) — 검열과 같은 `rel`(아웃풋 루트 기준). 여러 장이면 전부.
            열린 문서가 있으면 편집기가 한 번 묻는다 (새 문서 / 레이어로 추가). */
         onEdit={async () => {
-          const files = multiFiles.length > 1 ? multiFiles : [await ensureSaved()].filter((x): x is string => !!x);
+          const files = await targets();
           if (!files.length) return;
           await sendToEditor(files.map((f) => ({ name: f.split("/").pop() ?? f, rel: `${ws}/${f}` })));
         }}
         extra={
           <>
-            {/* ★미저장이면 「삭제」 자리에 **「저장」** — 저장하면 이 줄이 그대로 「삭제」가 된다 */}
-            {un ? (
+            <button
+              data-scene-delete
+              /* ★★**여러 장 골랐으면 전부 지운다** (사용자 지시 2026-08-22).
+                   씬 줄의 「숨김」 단추를 걷은 자리가 여기다 — 지우는 창구를 하나로 모은다.
+                 ★★`Del` 키와 **같은 규칙**으로 옆 장을 고른다 (`lib/sceneTakes.removeTakes`).
+                   전에는 여기서만 `null` 로 비워서, 단추로 지우면 큰 자리가 텅 비었다
+                   (사용자 지적 2026-08-21). 규칙은 한 곳에만 둔다.
+                 ★★미저장도 **같은 단추**다 (위 `un` 의 ★★주) — 미저장은 휴지통이 아니라 메모리에서
+                   빠지므로 한 장일 때만 툴팁이 다르다. */
+              onClick={() => removeTakes()}
+              /* ★★**문구를 코드에서 잇지 않는다** (사용자 지적 2026-08-26: *"코드에서 조합하는
+                   툴팁이 존재해? 그럼 언어 대응이 안 되는 거 아니야?"*). 조각은 번역돼도
+                   **잇는 기호와 어순은 코드에 박혀** 언어를 안 탄다. 갈래마다 열쇠 하나씩이다. */
+              data-tip={
+                many > 1
+                  ? tr("canvas.hideManyHint", { n: many })
+                  : un
+                    ? tr("scenes.dropPreview")
+                    : tr("canvas.hideHint")
+              }
+              style={{ ...rowBtn, color: "var(--err-ink)", minWidth: 28, justifyContent: "center" }}
+            >
+              {Icon.trash}
+            </button>
+            {/* ★저장 안 한 동안만 — 저장하면 이 단추만 사라지고 줄은 그대로다 */}
+            {un && (
               <button
                 data-save-preview
                 disabled={saving}
@@ -444,36 +479,6 @@ function SceneActions() {
                 style={{ ...rowBtn, color: "var(--warn)", minWidth: 28, justifyContent: "center" }}
               >
                 {Icon.save}
-              </button>
-            ) : (
-              <button
-                data-scene-delete
-                /* ★★**여러 장 골랐으면 전부 지운다** (사용자 지시 2026-08-22).
-                     씬 줄의 「숨김」 단추를 걷은 자리가 여기다 — 지우는 창구를 하나로 모은다.
-                   ★★`Del` 키와 **같은 규칙**으로 옆 장을 고른다 (`lib/sceneTakes.removeTakes`).
-                     전에는 여기서만 `null` 로 비워서, 단추로 지우면 큰 자리가 텅 비었다
-                     (사용자 지적 2026-08-21). 규칙은 한 곳에만 둔다. */
-                onClick={() => removeTakes()}
-                /* ★★**문구를 코드에서 잇지 않는다** (사용자 지적 2026-08-26: *"코드에서 조합하는
-                     툴팁이 존재해? 그럼 언어 대응이 안 되는 거 아니야?"*). 조각은 번역돼도
-                     **잇는 기호와 어순은 코드에 박혀** 언어를 안 탄다. 갈래마다 열쇠 하나씩이다. */
-                data-tip={many > 1 ? tr("canvas.hideManyHint", { n: many }) : tr("canvas.hideHint")}
-                style={{ ...rowBtn, color: "var(--err-ink)", minWidth: 28, justifyContent: "center" }}
-              >
-                {Icon.trash}
-              </button>
-            )}
-            {/* 저장 안 한 동안만 — 파일이 아니라 **화면의 미리보기**를 버린다.
-                ★지우개다 — 파일을 지우는 휴지통과 **다른 일**이라 모양도 달라야 한다
-                  (v2 도 「미리보기 지우기」에 지우개를 썼다) */}
-            {un && (
-              <button
-                data-drop-preview
-                onClick={dropPreview}
-                data-tip={tr("scenes.dropPreview")}
-                style={{ ...rowBtn, minWidth: 28, justifyContent: "center" }}
-              >
-                {Icon.eraser}
               </button>
             )}
           </>
