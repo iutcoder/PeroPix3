@@ -6,7 +6,7 @@ import { toast } from "./toast";
 import { t } from "../i18n";
 import { SIZE_PRESETS, modelCaps, useGen } from "./gen";
 import { api } from "../lib/backend";
-import { INFERENCE_MODEL, fitPlan, type FittedPlan } from "../lib/inference";
+import { INFERENCE_MODEL, INFER_AUX, fitPlan, type FittedPlan } from "../lib/inference";
 
 /** 이미지 입력 — Vibe Transfer · Precise Reference · 베이스 이미지(i2i·인페인트).
  *
@@ -72,6 +72,8 @@ type S = {
    *  실리는 동안은 **베이스 이미지가 안 나간다.** 둘 다 인페인트 경로를 쓴다 (`payload`) */
   inferOn: boolean;
   infer: InferRef | null;
+  /** 보조 프롬프트(`lib/inference` 의 `INFER_AUX`)를 싣나. 처음은 켜짐 */
+  inferAux: boolean;
 
   /** 베이스 이미지 (base64). 있으면 i2i, 마스크까지 있으면 인페인트 */
   baseImage: string;
@@ -121,6 +123,7 @@ type S = {
   removeRef: (i: number) => void;
 
   setInferOn: (v: boolean) => void;
+  setInferAux: (v: boolean) => void;
   /** 참조를 넣고 켠다. 크기는 여기서 한 번 잰다 */
   setInfer: (image: string, name: string) => void;
   clearInfer: () => void;
@@ -165,7 +168,7 @@ type S = {
  *  ★`editing`(마스크를 칠하는 중인가)은 **안 담는다** — 그것은 화면 상태다. */
 export type ImageSnap = Pick<
   S,
-  | "vibeOn" | "vibes" | "normalizeVibe" | "refOn" | "refs" | "inferOn" | "infer"
+  | "vibeOn" | "vibes" | "normalizeVibe" | "refOn" | "refs" | "inferOn" | "infer" | "inferAux"
   | "baseImage" | "baseName" | "baseMode" | "baseStrength" | "baseInpaintStrength"
   | "baseNoise" | "baseMask" | "baseSize" | "focused" | "tileRect"
 >;
@@ -216,6 +219,7 @@ export function makeImageInput(modelOf: () => string) {
   refs: [],
   inferOn: false,
   infer: null,
+  inferAux: true,
   baseImage: "",
   baseName: "",
   baseMode: "img2img",
@@ -337,6 +341,7 @@ export function makeImageInput(modelOf: () => string) {
   removeRef: (i) => set((s) => ({ refs: s.refs.filter((_, k) => k !== i) })),
 
   setInferOn: (v) => set({ inferOn: v }),
+  setInferAux: (v) => set({ inferAux: v }),
   setInfer: (image, name) => {
     set({ infer: { image, name, size: null }, inferOn: true });
     // ★크기는 **여기서 한 번만** 잰다 (`setBase` 와 같다). 배치가 전부 이 값을 본다
@@ -378,13 +383,13 @@ export function makeImageInput(modelOf: () => string) {
           baseStrength: 0.7, baseInpaintStrength: 1, baseNoise: 0,
           baseSize: null, tileRect: null, focused: false, editing: false,
           vibeOn: false, vibes: [], normalizeVibe: true, refOn: false, refs: [],
-          inferOn: false, infer: null }),
+          inferOn: false, infer: null, inferAux: true }),
 
   snapshot() {
     const s = get();
     return {
       vibeOn: s.vibeOn, vibes: s.vibes, normalizeVibe: s.normalizeVibe,
-      refOn: s.refOn, refs: s.refs, inferOn: s.inferOn, infer: s.infer,
+      refOn: s.refOn, refs: s.refs, inferOn: s.inferOn, infer: s.infer, inferAux: s.inferAux,
       baseImage: s.baseImage, baseName: s.baseName, baseMode: s.baseMode,
       baseStrength: s.baseStrength, baseInpaintStrength: s.baseInpaintStrength,
       baseNoise: s.baseNoise, baseMask: s.baseMask, baseSize: s.baseSize,
@@ -394,7 +399,8 @@ export function makeImageInput(modelOf: () => string) {
   load(snap) {
     if (!snap) return get().resetAll();
     // ★`editing` 은 담지 않은 값이라 여기서 끈다 — 칠하던 중에 탭을 옮겼어도 새 탭은 평소 화면이다
-    set({ ...snap, editing: false });
+    // ★보조 프롬프트 스위치가 생기기 전에 담은 한 벌에는 이 값이 없다. 처음 값(켜짐)으로 읽는다
+    set({ ...snap, inferAux: snap.inferAux ?? true, editing: false });
     if (snap.vibes.length) void get().syncVibeCache();
   },
   setTileRect: (r) => set({ tileRect: r }),
@@ -497,6 +503,8 @@ export function makeImageInput(modelOf: () => string) {
           ref: r(plan.ref),
           keep: r(plan.keep),
           crop: r(plan.crop),
+          // 보조 프롬프트. 서버가 베이스 프롬프트 맨 앞에 넣는다 (`server._apply_inference`). 끄면 안 싣는다
+          ...(s.inferAux ? { aux: INFER_AUX } : null),
         },
       };
     }

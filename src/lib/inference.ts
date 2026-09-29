@@ -11,6 +11,11 @@ import { FREE_PIXELS } from "./baseSize.ts";
 /** 인퍼런스를 켤 수 있는 모델 (사용자 결정 2026-09-29). V5 Curated 는 인페인트가 V4.5 로 떨어져 그림체가 달라진다 */
 export const INFERENCE_MODEL = "nai-diffusion-5-full";
 
+/** ★보조 프롬프트 — 켜 두면 서버가 베이스 프롬프트 맨 앞에 넣는다 (사용자 지시 2026-09-29).
+ *  인페인트는 캔버스 전체를 보므로, 나뉜 화면이라고 적어 주면 참조 칸과 그릴 칸을 갈라 그린다 (사용자 실측).
+ *  ★고칠 수 없고 켜고 끄기만 한다. 글은 여기 하나이고 화면이 이것을 보여 주고 요청에 싣는다 (`imageInput.payload`) */
+export const INFER_AUX = "split screen, 2koma, -2::border::";
+
 /** NAI 가 받는 가장 큰 넓이 */
 const MAX_PIXELS = 3_145_728;
 /** 결과 칸 ÷ 참조 칸 상한. 옆으로는 2.0 에서 반이 나뉘었고, 위아래로는 2.0 에서 18장 모두 한 장이었다 */

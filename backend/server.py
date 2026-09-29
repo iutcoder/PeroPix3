@@ -1421,7 +1421,7 @@ async def gallery_base(ws: str, file: str):
     #   그것을 베이스로 되살리면 다음 생성이 캔버스 전체를 인페인트한다. 참조와 해상도 칸 값을 돌려준다
     inf = heavy.get("inference")
     if isinstance(inf, dict) and inf.get("image"):
-        return {"image": "", "inference": {k: inf.get(k) for k in ("image", "name", "pick")}}
+        return {"image": "", "inference": {k: inf.get(k) for k in ("image", "name", "pick", "aux")}}
     par = (heavy.get("resolved") or {}).get("parameters") or {}
     img = par.get("image")
     if not isinstance(img, str) or not img:
@@ -1736,16 +1736,20 @@ def _inference_of(body: GenBody) -> dict | None:
         raise HTTPException(400, "인퍼런스 캔버스 크기가 잘못되었습니다")
     crop = _rect(inf.get("crop"), W, H)
     x, y, w, h = crop
+    aux = inf.get("aux")
     return {"image": inf["image"], "canvas": (W, H), "ref": _rect(inf.get("ref"), W, H),
             "keep": _rect(inf.get("keep"), W, H), "crop": crop,
+            # 보조 프롬프트 (화면의 `INFER_AUX`). 끄면 안 온다
+            "aux": aux.strip() if isinstance(aux, str) and aux.strip() else None,
             # 중간 그림은 크기가 다를 수 있어 비율로 자른다 (`imgutil.preview_jpeg`)
             "frac": (x / W, y / H, (x + w) / W, (y + h) / H)}
 
 
 def _apply_inference(req: nai.GenRequest, inf: dict) -> None:
-    """요청을 인퍼런스로 바꾼다: 캔버스·마스크 · 캔버스 크기 · `reference inset` · 캐릭터 좌표.
+    """요청을 인퍼런스로 바꾼다: 캔버스·마스크 · 캔버스 크기 · `reference inset` · 보조 프롬프트 · 캐릭터 좌표.
 
-    ★프롬프트·UC·프리셋은 그 밖에 건드리지 않는다 (사용자 결정 2026-09-29, 설계 문서 4-3).
+    ★보조 프롬프트는 켜 두었을 때만 온다. 글은 화면 한 곳(`lib/inference` 의 `INFER_AUX`)에 있다 (사용자 지시 2026-09-29).
+    ★프롬프트·UC·프리셋은 그 밖에 건드리지 않는다 (사용자 결정 2026-09-29, 설계 문서 4번 3).
     ★캐릭터 좌표는 **결과 칸 기준**으로 온다 (배치 판이 해상도 칸의 비율을 쓴다). 캔버스 좌표로 옮긴다.
       좌표를 안 쓰는 캐릭터가 하나뿐이면 결과 칸 가운데에 둔다 (실험이 그렇게 쟀다, 설계 문서 6번).
       여럿이면 좌표 없이 둔다. 마스크가 결과 칸만 열어 두므로 거기 그려진다."""
@@ -1755,8 +1759,10 @@ def _apply_inference(req: nai.GenRequest, inf: dict) -> None:
     req.base_inpaint_strength = 1.0
     req.base_noise = 0.0
     req.width, req.height = W, H
-    if INFERENCE_TAG not in req.prompt:
-        req.prompt = f"{INFERENCE_TAG}, {req.prompt}" if req.prompt.strip() else INFERENCE_TAG
+    # 베이스 프롬프트 맨 앞에 `reference inset` · 보조 프롬프트 차례로 (이미 있으면 안 넣는다)
+    head = [t for t in (INFERENCE_TAG, inf.get("aux")) if t and t not in req.prompt]
+    if head:
+        req.prompt = ", ".join(head + ([req.prompt] if req.prompt.strip() else []))
     cx, cy, cw, ch = inf["crop"]
     lone = len([c for c in req.characters if (c.prompt or "").strip()]) == 1
     for c in req.characters:
@@ -1770,7 +1776,7 @@ def _apply_inference(req: nai.GenRequest, inf: dict) -> None:
 
 def _inference_record(inf: dict) -> dict:
     """레코드에 남기는 인퍼런스 (참조 원본 · 이름 · 해상도 칸 값 · 배치)"""
-    return {k: inf.get(k) for k in ("image", "name", "pick", "canvas", "ref", "keep", "crop")}
+    return {k: inf.get(k) for k in ("image", "name", "pick", "canvas", "ref", "keep", "crop", "aux")}
 
 
 def _req_of(body: GenBody) -> nai.GenRequest:

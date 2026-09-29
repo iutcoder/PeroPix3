@@ -422,9 +422,10 @@ export const ko: Dict = {
     refHint: "V4.5 전용 · 레퍼런스당 5 Anlas. Vibe와 함께 못 씁니다.",
     refAdd: "레퍼런스 추가",
     inference: "Inference",
-    inferenceHint: "참조 그림을 캔버스 한쪽에 붙이고 나머지를 인페인트합니다. 결과는 참조 칸을 뺀 자리를 잘라 낸 것입니다. V5 Full 전용이고 요금은 캔버스 전체 크기로 셉니다.",
+    inferenceHint: "인페인트+레퍼런스. 같은 캔버스에 레퍼런스로 삼을 이미지를 올리고 나머지 영역을 인페인트해서 유사 레퍼런스 효과를 냅니다. 대신 생성되는 이미지 사이즈가 작아집니다. V5 Full 전용.",
     inferAdd: "참조 그림 넣기",
     inferOut: "결과 {w} × {h}",
+    inferAux: "보조 프롬프트",
     inferNoBase: "Inference 를 켜 둔 동안에는 베이스 이미지가 실리지 않습니다.",
     /** 씬·큰 그림을 끌어 이 칸 위에 올렸을 때 (`ImageInputPanel` 의 `DropSlot`) */
     dropBase: "베이스 이미지로",

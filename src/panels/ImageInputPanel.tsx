@@ -13,7 +13,7 @@ import {
   type ImageInputStore,
 } from "../store/imageInput";
 import { canFocus } from "../lib/focused";
-import { INFERENCE_MODEL } from "../lib/inference";
+import { INFERENCE_MODEL, INFER_AUX } from "../lib/inference";
 import { fitSizeToBase, modelCaps, useGen } from "../store/gen";
 import { flashStyle, useFlashAt } from "../store/ui";
 import { toast } from "../store/toast";
@@ -331,6 +331,29 @@ export function ImageInputPanel({
                 {t("imgIn.inferOut", { w: plan.crop.w, h: plan.crop.h })}
               </span>
             )}
+            {/* ★보조 프롬프트는 켜고 끄기만 한다. 글은 고칠 수 없고, 무엇이 들어가는지 그대로 보인다 (사용자 지시 2026-09-29) */}
+            <Check
+              label={t("imgIn.inferAux")}
+              checked={s.inferAux}
+              onChange={s.setInferAux}
+              data-infer-aux={s.inferAux ? "on" : "off"}
+            />
+            <code
+              data-infer-aux-text
+              style={{
+                fontFamily: "var(--font-mono)",
+                fontSize: "var(--text-2xs)",
+                lineHeight: 1.5,
+                padding: "var(--sp-1) var(--sp-2)",
+                borderRadius: "var(--r-1)",
+                background: "var(--bg)",
+                color: "var(--ink-soft)",
+                wordBreak: "break-word",
+                opacity: s.inferAux ? 1 : 0.45,
+              }}
+            >
+              {INFER_AUX}
+            </code>
           </Card>
         ) : (
           <Pick
