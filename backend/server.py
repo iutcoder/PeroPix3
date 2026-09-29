@@ -270,8 +270,9 @@ def _split_records() -> None:
             continue
         try:
             n = store.split_records(ws_dir.name)
-        except OSError as e:
-            print(f"[레코드] {ws_dir.name} 을 못 쪼갰습니다 ({e}) — 다음에 다시 시도합니다")
+        # ★`OSError` 만 잡으면 `MemoryError` 같은 것이 임포트를 통째로 죽여 **백엔드가 안 뜬다**
+        except Exception as e:
+            print(f"[레코드] {ws_dir.name} 을 못 쪼갰습니다 ({e!r}) — 다음에 다시 시도합니다")
             continue
         if n:
             print(f"[레코드] {ws_dir.name}: {n}줄의 무거운 값을 records-env.jsonl 로 옮김")
@@ -300,7 +301,8 @@ for _d in sorted(WS_ROOT.iterdir()) if WS_ROOT.is_dir() and not _SKIP_MIGRATIONS
             if _n:
                 print(f"[열쇠 이전] {_d.name}: {_n}줄")
         except Exception as _e:            # ★한 워크스페이스가 실패해도 앱은 뜬다
-            print(f"[열쇠 이전] {_d.name}: 실패 ({_e})")
+            # ★`repr` 로 찍는다 — `MemoryError` 는 `str` 이 비어 「실패 ()」만 남았다 (사용자 제보 2026-09-30)
+            print(f"[열쇠 이전] {_d.name}: 실패 ({_e!r})")
 
 for _line in (migrate_thumbs.run(cards, store, pins) if not _SKIP_MIGRATIONS else []):
     print(f"[썸네일 이전] {_line}")
@@ -1780,6 +1782,23 @@ def _inference_record(inf: dict) -> dict:
     return {k: inf.get(k) for k in ("image", "name", "pick", "canvas", "ref", "keep", "crop", "aux")}
 
 
+#: ★★기록에 남기지 않는 페이로드 값 — 바이브(`reference_image_multiple`)와 정밀 레퍼런스
+#:  (`director_reference_images`)로 보낸 **그림 그 자체**다. 요청을 짤 때만 쓰이고(`nai.build_payload`)
+#:  기록에서 다시 읽는 곳이 없다 (`gallery_base` 는 `image`·`mask`, `_sent_from_record` 는 모델·프리셋만 읽는다).
+#:  ★남겨 두면 같은 레퍼런스를 쓰는 동안 그림마다 몇 MB 가 곁파일에 쌓인다
+#:  (사용자 제보 2026-09-30: records-env.jsonl 2.86GB 중 99% 가 이 값이었고 부팅이 멈췄다).
+#:  ★세기·설명 같은 짝 배열은 몇 바이트라 그대로 둔다 (어떤 설정으로 뽑았는지는 남는다).
+_UNRECORDED = ("reference_image_multiple", "director_reference_images")
+
+
+def _recorded(payload: dict) -> dict:
+    """기록에 남길 페이로드 — `_UNRECORDED` 만 뺀 얕은 사본. 보낸 페이로드는 건드리지 않는다."""
+    par = payload.get("parameters")
+    if not isinstance(par, dict) or not any(k in par for k in _UNRECORDED):
+        return payload
+    return {**payload, "parameters": {k: v for k, v in par.items() if k not in _UNRECORDED}}
+
+
 def _req_of(body: GenBody) -> nai.GenRequest:
     return nai.GenRequest(
         prompt=body.prompt,
@@ -2054,8 +2073,8 @@ async def _generate_one(body: GenBody) -> dict:
     #   화면이 자기 시계로 찍던 때는 `toISOString()`(UTC) 과 여기 지역시각이 섞여서,
     #   방금 만든 그림이 **문자열 비교로 더 옛것**이 되어 줄 오른쪽으로 밀렸다.
     ts = datetime.now().isoformat(timespec="seconds")
-    # ★records 는 append-only. resolved 에 그 시점의 완전한 요청을 남겨
-    #   나중에 spec 이 바뀌어도 재현·비교가 가능하게 한다.
+    # ★records 는 append-only. resolved 에 그 시점의 요청을 남겨
+    #   나중에 spec 이 바뀌어도 재현·비교가 가능하게 한다. 레퍼런스 그림만 뺀다 (`_UNRECORDED`).
     store.append_record(
         body.workspace,
         {
@@ -2067,7 +2086,7 @@ async def _generate_one(body: GenBody) -> dict:
             "cell_id": body.cell_id,
             "enhance_of": body.enhance_of,
             "seed": seed,
-            "resolved": payload,
+            "resolved": _recorded(payload),
             # ★위에서 한 번 정한 것을 쓴다 (`shot_env` 의 ★주) — 미저장으로 돌려준 것과 같아야 한다
             "env": shot_env,
             # ★인퍼런스였으면 참조와 배치를 남긴다. 「설정 불러오기」가 이것으로 인퍼런스 칸을 되살린다 (`gallery_base`)

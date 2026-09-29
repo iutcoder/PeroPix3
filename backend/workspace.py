@@ -44,6 +44,9 @@ RECORDS_NAME = "records.jsonl"
 ENV_NAME = "records-env.jsonl"
 #: 색인에서 빼고 곁파일로 보내는 필드
 HEAVY_KEYS = ("resolved", "env", "inference")
+#: 곁줄의 머리 — 열쇠를 **맨 앞에** 적으므로(`append_record`) 이것으로 시작하면 풀지 않고도
+#  열쇠가 있는 줄임을 안다 (`ensure_keys` 가 수 GB 곁파일을 줄마다 풀지 않게)
+_KEY_HEAD = b'{"key": '
 #: ★★**별표의 이력** (사용자 결정 2026-08-28). 별표는 `workspace.json` 한 곳에만 적혀서, 그 파일이
 #:  덮어써지면(실사고 2026-08-28: 다른 워크스페이스의 spec 이 이 이름으로 저장됐다) 되살릴 재료가
 #:  없었다. 저장할 때 별표 목록이 **바뀌었을 때만** 한 줄 덧붙인다 — 되돌릴 때는 마지막 줄을 본다.
@@ -833,51 +836,80 @@ class Store:
         곁파일을 안 건드린다 (`_rewrite_paths`).
         ★**줄을 버리지 않는다** — 못 읽는 줄은 그대로 흘려 쓴다. 임시 파일에 쓰고 바꿔치기한다.
         ★색인에 없는 곁줄(옛 그림의 잔여)은 제 열쇠를 새로 받는다 — 아무도 안 찾지만 버리지 않는다.
-        ★이미 다 달려 있으면 아무 파일도 안 쓴다 (0 을 돌려준다)."""
+        ★이미 다 달려 있으면 아무 파일도 안 쓴다 (0 을 돌려준다).
+        ★★**곁파일을 통째로 읽지 않는다** (사용자 제보 2026-09-30: 곁파일 2.86GB 에서 부팅이 멈췄다).
+          이 함수는 부팅마다 돈다. 예전에는 할 일이 없어도 두 파일을 글자로 풀어 줄마다 파싱했고,
+          곁파일이 크면 그것만으로 몇 초가 들었다 (실측 465MB · 백엔드 7~15초). 수 GB 에서는
+          `MemoryError` 로 실패했는데, 실패하면 아무것도 안 써서 **다음 부팅에 또 같은 일을 했다.**
+          그래서 둘을 지킨다.
+          · **색인에 열쇠 없는 줄이 없으면 곁파일은 열지도 않는다.** 두 파일은 이 함수가 함께 고치고
+            (`append_record`·`split_records` 도 둘 다 열쇠를 적는다), 곁파일에 열쇠 없는 줄이 남아
+            있어도 `heavy_of` 가 경로로 찾는다.
+          · 고칠 때도 **한 줄씩** 읽고 쓴다. 곁줄은 열쇠가 맨 앞에 적히므로(`append_record`)
+            그런 줄은 풀지 않고 그대로 옮긴다."""
         d = self.dir_of(ws)
         idx, env = d / RECORDS_NAME, d / ENV_NAME
         if not idx.is_file():
             return 0
-        rows = idx.read_text(encoding="utf-8").splitlines()
+        if not self._keyless(idx):
+            return 0
         by_path: dict[str, str] = {}
-        out, added = [], 0
-        for ln in rows:
-            if not ln.strip():
-                continue
-            try:
-                r = json.loads(ln)
-            except Exception:
-                out.append(ln)
-                continue
-            if not r.get("key"):
-                r["key"] = uuid.uuid4().hex[:12]
-                added += 1
-            by_path[str(r.get("file") or "")] = str(r["key"])
-            out.append(json.dumps(r, ensure_ascii=False))
-        env_out, env_added = [], 0
-        if env.is_file():
-            for ln in env.read_text(encoding="utf-8").splitlines():
-                if not ln.strip():
+        added = env_added = 0
+        with self.locked(ws):
+            # ★색인이 먼저다: 곁파일만 새 열쇠를 받고 색인이 못 받으면, 다음 판이 색인에 **다른**
+            #   열쇠를 달아 둘이 영영 어긋난다. 색인만 받은 채로 멈추면 곁줄은 경로로 찾힌다.
+            tmp = idx.with_suffix(idx.suffix + ".tmp")
+            with idx.open("rb") as fin, tmp.open("wb") as fout:
+                for raw in fin:
+                    if not raw.strip():
+                        continue
+                    try:
+                        r = json.loads(raw.decode("utf-8"))
+                    except Exception:
+                        fout.write(raw if raw.endswith(b"\n") else raw + b"\n")
+                        continue
+                    if not r.get("key"):
+                        r["key"] = uuid.uuid4().hex[:12]
+                        added += 1
+                    by_path[str(r.get("file") or "")] = str(r["key"])
+                    fout.write(json.dumps(r, ensure_ascii=False).encode("utf-8") + b"\n")
+            self._replace(tmp, idx)
+            # ★고칠 줄이 없으면 곁파일은 다시 쓰지 않는다 (수 GB 를 그대로 베끼게 된다)
+            if env.is_file() and self._keyless(env):
+                tmp = env.with_suffix(env.suffix + ".tmp")
+                with env.open("rb") as fin, tmp.open("wb") as fout:
+                    for raw in fin:
+                        if not raw.strip():
+                            continue
+                        if not raw.startswith(_KEY_HEAD):
+                            try:
+                                r = json.loads(raw.decode("utf-8"))
+                            except Exception:
+                                r = None
+                            if isinstance(r, dict) and not r.get("key"):
+                                r = {"key": by_path.get(str(r.get("file") or "")) or uuid.uuid4().hex[:12], **r}
+                                env_added += 1
+                                fout.write(json.dumps(r, ensure_ascii=False).encode("utf-8") + b"\n")
+                                continue
+                        fout.write(raw if raw.endswith(b"\n") else raw + b"\n")
+                self._replace(tmp, env)
+        return added + env_added
+
+    @staticmethod
+    def _keyless(p: Path) -> bool:
+        """열쇠 없는 줄이 하나라도 있나 — 한 줄씩 본다 (파일을 통째로 올리지 않는다).
+        ★맨 앞이 열쇠인 줄은 풀지 않는다 (`_KEY_HEAD`). 나머지만 풀어 본다."""
+        with p.open("rb") as f:
+            for raw in f:
+                if not raw.strip() or raw.startswith(_KEY_HEAD):
                     continue
                 try:
-                    r = json.loads(ln)
+                    r = json.loads(raw.decode("utf-8"))
                 except Exception:
-                    env_out.append(ln)
-                    continue
-                if not r.get("key"):
-                    r = {"key": by_path.get(str(r.get("file") or "")) or uuid.uuid4().hex[:12], **r}
-                    env_added += 1
-                env_out.append(json.dumps(r, ensure_ascii=False))
-        if not added and not env_added:
-            return 0
-        with self.locked(ws):
-            for p, lines in ((idx, out), (env, env_out)):
-                if not lines:
-                    continue
-                tmp = p.with_suffix(p.suffix + ".tmp")
-                tmp.write_text("\n".join(lines) + "\n", encoding="utf-8")
-                self._replace(tmp, p)
-        return added + env_added
+                    continue                  # 못 읽는 줄은 열쇠를 달 수도 없다
+                if isinstance(r, dict) and not r.get("key"):
+                    return True
+        return False
 
     def split_records(self, ws: str) -> int:
         """색인에 남아 있는 무거운 것을 곁파일로 옮긴다. 옮긴 줄 수를 돌려준다.
@@ -887,39 +919,59 @@ class Store:
           잃은 적이 있어(CLAUDE.md) 되돌릴 자리를 둔다. 지워도 앱은 돈다.
         ★임시 파일에 쓰고 rename 한다 — 쓰다 죽어도 옛 파일이 온전하다.
         ★부르는 자리는 **서버가 요청을 받기 전**이다 (`server.py` 부팅) — 그래서 옮기는 도중에
-          새 그림이 끼어들 수 없다. 생성 중이어도 앱을 다시 켜기만 하면 된다."""
+          새 그림이 끼어들 수 없다. 생성 중이어도 앱을 다시 켜기만 하면 된다.
+        ★★**어느 파일도 통째로 읽지 않는다** (`ensure_keys` 의 ★★주와 같은 제보). 부팅마다 도는
+          훑기는 한 줄씩 보고, 무거운 이름이 안 든 줄은 풀지도 않는다. 옮길 때 이미 있던 곁파일은
+          읽어 올리지 않고 새 곁파일 뒤에 그대로 이어 붙인다."""
         d = self.dir_of(ws)
         p = d / RECORDS_NAME
         if not p.exists():
             return 0
-        lines = p.read_text(encoding="utf-8").splitlines()
-        heavy_lines, light_lines, moved = [], [], 0
-        for ln in lines:
+        marks = [f'"{k}"'.encode("utf-8") for k in HEAVY_KEYS]
+
+        def split(raw: bytes) -> tuple[dict, dict] | None:
+            """무거운 것이 든 줄이면 (가벼운 것, 무거운 것). 아니면 None"""
+            if not any(m in raw for m in marks):
+                return None
             try:
-                r = json.loads(ln)
+                r = json.loads(raw.decode("utf-8"))
             except Exception:
-                light_lines.append(ln)   # 깨진 줄은 손대지 않고 그대로 둔다
-                continue
+                return None
+            if not isinstance(r, dict):
+                return None
             heavy = {k: r[k] for k in HEAVY_KEYS if r.get(k) is not None}
-            if heavy:
+            return (r, heavy) if heavy else None
+
+        with p.open("rb") as f:
+            if not any(split(raw) for raw in f):
+                return 0
+
+        shutil.copyfile(p, d / PRESPLIT_NAME)
+        env, moved = d / ENV_NAME, 0
+        env_tmp = d / (ENV_NAME + ".tmp")
+        idx_tmp = d / (RECORDS_NAME + ".tmp")
+        with p.open("rb") as fin, env_tmp.open("wb") as fenv, idx_tmp.open("wb") as fidx:
+            for raw in fin:
+                if not raw.strip():
+                    continue
+                got = split(raw)
+                if got is None:
+                    fidx.write(raw if raw.endswith(b"\n") else raw + b"\n")   # 깨진 줄·가벼운 줄은 그대로
+                    continue
+                r, heavy = got
                 moved += 1
                 # ★열쇠로 잇는다 (`append_record` 의 ★★주) — 여기서 처음 달아 준다
-                r["key"] = str(r.get("key") or uuid.uuid4().hex[:12])
-                heavy_lines.append(
-                    json.dumps({"key": r["key"], "file": r.get("file"), **heavy}, ensure_ascii=False))
-                r = {k: v for k, v in r.items() if k not in HEAVY_KEYS}
-            light_lines.append(json.dumps(r, ensure_ascii=False))
-        if not moved:
-            return 0
-
-        (d / PRESPLIT_NAME).write_text("\n".join(lines) + "\n", encoding="utf-8")
-        env_tmp = d / (ENV_NAME + ".tmp")
-        # ★이미 곁파일이 있으면 **앞에 잇는다** — 새로 적힌 줄이 뒤에 와야 마지막 것이 이긴다
-        old_env = (d / ENV_NAME).read_text(encoding="utf-8").splitlines() if (d / ENV_NAME).exists() else []
-        env_tmp.write_text("\n".join(heavy_lines + old_env) + "\n", encoding="utf-8")
-        self._replace(env_tmp, d / ENV_NAME)
-        idx_tmp = d / (RECORDS_NAME + ".tmp")
-        idx_tmp.write_text("\n".join(light_lines) + "\n", encoding="utf-8")
+                key = str(r.get("key") or uuid.uuid4().hex[:12])
+                fenv.write(json.dumps({"key": key, "file": r.get("file"), **heavy},
+                                      ensure_ascii=False).encode("utf-8") + b"\n")
+                light = {k: v for k, v in r.items() if k not in HEAVY_KEYS}
+                light["key"] = key
+                fidx.write(json.dumps(light, ensure_ascii=False).encode("utf-8") + b"\n")
+            # ★이미 곁파일이 있으면 **뒤에 잇는다** — 새로 적힌 줄이 뒤에 와야 마지막 것이 이긴다
+            if env.exists():
+                with env.open("rb") as fold:
+                    shutil.copyfileobj(fold, fenv, 1024 * 1024)
+        self._replace(env_tmp, env)
         self._replace(idx_tmp, p)
         return moved
 
