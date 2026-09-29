@@ -416,6 +416,8 @@ export const en = {
     inferAdd: "Add reference image",
     inferOut: "Result {w} × {h}",
     inferNoBase: "The base image is not sent while Inference is on.",
+    dropBase: "Use as the base image",
+    dropInfer: "Use as the Inference reference",
     strength: "Strength",
     refStrength: "Reference Strength",
     info: "Information Extracted",

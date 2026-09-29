@@ -20,6 +20,10 @@ import { toast } from "../store/toast";
 import { NAI_VIBE_EXT, isNaiVibeFile, parseNaiVibeFile } from "../lib/naiVibeFile";
 import { useTauriDrop } from "../lib/dropImages";
 import { api } from "../lib/backend";
+import { urlToBase64 } from "../lib/findImage";
+import { imgUrl } from "../lib/imgUrl";
+import { useDropZone, type DragImage } from "../cards/dragStore";
+import { DropVeil } from "../cards/DropVeil";
 import { VibeCache } from "./VibeCache";
 
 /** 앱 창에 떨군 파일 하나를 서버가 읽어 준다 (`POST /api/tools/read`) */
@@ -126,6 +130,33 @@ export function ImageInputPanel({
       return;
     }
     s.setInfer(r.data, r.name);
+  };
+  /** 씬·큰 그림에서 끌어온 한 장의 바이트와 이름. 저장된 그림은 원본을 받아 오고,
+   *  미저장은 끌 때 실어 온 data URL 이 곧 그림 전체다 (`SceneLane` 의 `takeSrc`) */
+  const dragged = async (img: DragImage, unsaved: boolean) =>
+    unsaved
+      ? { data: img.url.split(",")[1] ?? "", name: t("scenes.unsaved") }
+      : {
+          data: await urlToBase64(imgUrl(useGen.getState().base, img.ws, img.file, img.v)),
+          name: img.file.split("/").pop() || img.file,
+        };
+  const dropBase = async (img: DragImage, unsaved: boolean) => {
+    try {
+      const g = await dragged(img, unsaved);
+      s.setBase(g.data, g.name);
+      // ★해상도를 그림에 맞춘다. 밖에서 떨군 그림을 베이스로 걸 때와 같다 (`app/DropImport` 의 `asBase`)
+      await fitSizeToBase(g.data);
+    } catch (e) {
+      toast(String(e), "warn");
+    }
+  };
+  const dropInfer = async (img: DragImage, unsaved: boolean) => {
+    try {
+      const g = await dragged(img, unsaved);
+      s.setInfer(g.data, g.name);
+    } catch (e) {
+      toast(String(e), "warn");
+    }
   };
 
   return (
@@ -277,6 +308,7 @@ export function ImageInputPanel({
       {/* ★★인퍼런스는 V5 Full 에서만 뜬다 (사용자 결정 2026-09-29, 설계 `docs/inference-design.md`).
           한 장만 받고 그림 전체를 쓴다. 배치는 앱이 정하고, 결과 크기는 해상도 칸의 목록에서 고른다 */}
       {!refsOnly && model === INFERENCE_MODEL && (
+      <DropSlot id="infer" label={t("imgIn.dropInfer")} onImage={dropInfer}>
       <Section
         label={t("imgIn.inference")}
         help={t("imgIn.inferenceHint")}
@@ -309,9 +341,12 @@ export function ImageInputPanel({
           />
         )}
       </Section>
+      </DropSlot>
       )}
 
       {!refsOnly && (
+      // ★인퍼런스가 실리는 동안에는 받지 않는다. 흐려 둔 칸이 물들면 받는 자리로 읽힌다
+      <DropSlot id="base" label={t("imgIn.dropBase")} off={!!ride.infer} onImage={dropBase}>
       <Section label={t("imgIn.base")} data-sec="base" flashKey="base">
         {/* ★인퍼런스가 실리는 동안에는 베이스가 안 나간다 (둘 다 인페인트 경로다). 감추지 않고 흐리게 두고 이유를 적는다 */}
         {ride.infer && (
@@ -432,6 +467,7 @@ export function ImageInputPanel({
         )}
         </div>
       </Section>
+      </DropSlot>
       )}
 
       {cache && <VibeCache store={store} onClose={() => setCache(false)} />}
@@ -620,6 +656,41 @@ function Section({
         )}
       </div>
       {(on === undefined || on) && children}
+    </div>
+  );
+}
+
+/** 이미지 입력 칸들의 드롭존 id 앞머리. 접어 둔 묶음을 끌기 동안 펴 준 쪽이 「여기 놓였나」를 이것으로 본다 (`OptionsPanel`) */
+export const INPUT_ZONE = "image-input";
+
+/** 씬·큰 그림에서 끌어온 그림을 받는 칸 (저장된 그림 `image` · 미저장 `imageInput`).
+ *  ★받는 자리는 그 절 전체다. 표시는 앱의 공통 양식이고(`cards/DropVeil`), 어둠 위로 올리는 것은
+ *    이 칸이 아니라 묶음 전체다 (`OptionsPanel` 의 `opt-img` 에 `spot`).
+ *  ★`off` 면 안 받는다. */
+function DropSlot({
+  id,
+  label,
+  off,
+  onImage,
+  children,
+}: {
+  id: string;
+  label: string;
+  off?: boolean;
+  onImage: (img: DragImage, unsaved: boolean) => void;
+  children: React.ReactNode;
+}) {
+  const z = useDropZone({
+    id: `${INPUT_ZONE}-${id}`,
+    kind: ["image", "imageInput"],
+    dir: "image",
+    prio: 5,
+    onDrop: (d) => d.img && onImage(d.img, d.kind === "imageInput"),
+  });
+  return (
+    <div ref={off ? undefined : z.ref} style={{ position: "relative" }}>
+      {children}
+      {!off && z.active && <DropVeil over={z.over} label={label} name={`input-${id}`} />}
     </div>
   );
 }

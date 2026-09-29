@@ -13,16 +13,20 @@ import type { Block } from "../lib/blocks";
  *  드롭 존은 화면에 있는 동안 자기 사각형을 등록하고, 포인터가 움직일 때마다
  *  적중 판정을 한다. 겹치는 존(교체/스택)은 `prio` 가 큰 쪽이 이긴다. */
 
-/** apply = 덱 → 목적지 · save = 섹션 → 핸드 · image = 생성물 → 카드 썸네일 */
+/** apply = 덱 → 목적지 · save = 섹션 → 핸드 · image = 생성물 → 카드 썸네일·이미지 입력 */
 export type DragDir = "apply" | "save" | "image";
 /** ★`blocklib` = 블록 저장소 → 블록 목록. 카드와 **같은 판을 쓴다** — 끄는 방식·존 판정이
- *  같아야 하나만 고치면 둘 다 고쳐진다 (드래그 구현을 두 벌 두지 않는다) */
-export type ZoneKind = CardKind | "image" | "blocklib" | "keep";
+ *  같아야 하나만 고치면 둘 다 고쳐진다 (드래그 구현을 두 벌 두지 않는다)
+ *  ★`imageInput` = 미저장 그림. 파일이 없어 카드 그림(경로로 굳힌다)은 못 되고, 이미지 입력의
+ *    베이스·Inference 칸만 받는다. 그 칸들은 `image` 도 함께 받는다 (`useDropZone` 의 `kind` 목록) */
+export type ZoneKind = CardKind | "image" | "blocklib" | "keep" | "imageInput";
 
 /** 생성된 이미지 한 장 — 썸네일로 넣을 때 끌고 다니는 것.
  *  ★`url` 은 **썸네일** 주소다 (고스트 92×126, 위치 잡는 창 ≤396px — 원본이 필요 없다).
- *    어느 원본인지는 `ws`+`file` 이 들고 있고, 굳히는 것은 서버가 그 원본에서 한다. */
-export type DragImage = { ws: string; file: string; url: string };
+ *    어느 원본인지는 `ws`+`file` 이 들고 있고, 굳히는 것은 서버가 그 원본에서 한다.
+ *  ★미저장 그림(`kind: "imageInput"`)이면 `url` 이 그림 전체의 data URL 이다 (`takeSrc`)
+ *  ★`v` 는 그 그림의 레코드 `ts` 다. 원본을 받아 올 때 주소에 싣는다 (`lib/imgUrl` 의 ★★주: 같은 경로에 다른 그림) */
+export type DragImage = { ws: string; file: string; url: string; v?: string };
 
 export type Dragging = {
   dir: DragDir;
@@ -61,7 +65,8 @@ export type SectionThumb = {
 
 type Zone = {
   id: string;
-  kind: ZoneKind;
+  /** 받는 끌기의 종류 (여럿일 수 있다) */
+  kinds: ZoneKind[];
   dir: DragDir;
   prio: number;
   rect: () => DOMRect | null;
@@ -72,9 +77,9 @@ type S = {
   drag: Dragging | null;
   pos: { x: number; y: number };
   over: string | null;
-  /** 방금 끝난 끌기가 **실제로 놓였나**. 끌기가 끝난 뒤(`drag === null`)에 읽는다 —
-   *  덱을 잠깐 펴 줬던 쪽이 「열어 둘지 도로 닫을지」를 이것으로 가른다 (`useDeckPeek`) */
-  dropped: boolean;
+  /** 방금 끝난 끌기가 **놓인 존의 id** (안 놓였으면 null). 끌기가 끝난 뒤(`drag === null`)에 읽는다 —
+   *  잠깐 펴 줬던 쪽이 「열어 둘지 도로 닫을지」를 이것으로 가른다 (`useDeckPeek` · 이미지 입력 묶음) */
+  droppedOn: string | null;
   zones: Zone[];
 
   begin: (d: Dragging, x: number, y: number) => void;
@@ -88,11 +93,12 @@ export const useDrag = create<S>((set, get) => ({
   drag: null,
   pos: { x: 0, y: 0 },
   over: null,
-  dropped: false,
+  droppedOn: null,
   zones: [],
 
   begin(d, x, y) {
-    set({ drag: d, pos: { x, y }, over: null, dropped: false });
+    set({ drag: d, pos: { x, y }, over: null, droppedOn: null });
+    window.addEventListener("scroll", rehit, true);
   },
 
   move(x, y) {
@@ -100,7 +106,7 @@ export const useDrag = create<S>((set, get) => ({
     if (!drag) return;
     let hit: Zone | null = null;
     for (const z of zones) {
-      if (z.kind !== drag.kind || z.dir !== drag.dir) continue;
+      if (!z.kinds.includes(drag.kind) || z.dir !== drag.dir) continue;
       const r = z.rect();
       if (!r) continue;
       if (x < r.left || x > r.right || y < r.top || y > r.bottom) continue;
@@ -112,15 +118,17 @@ export const useDrag = create<S>((set, get) => ({
 
   /** 손을 뗐다. 드롭이 실제로 일어났으면 true — 덱을 닫을지 판단에 쓴다. */
   end() {
+    window.removeEventListener("scroll", rehit, true);
     const { drag, over, zones } = get();
-    set({ drag: null, over: null, dropped: !!(drag && over) });
+    set({ drag: null, over: null, droppedOn: drag && over ? over : null });
     if (!drag || !over) return false;
     zones.find((z) => z.id === over)?.onDrop(drag);
     return true;
   },
 
   cancel() {
-    set({ drag: null, over: null, dropped: false });
+    window.removeEventListener("scroll", rehit, true);
+    set({ drag: null, over: null, droppedOn: null });
   },
 
   addZone(z) {
@@ -129,10 +137,20 @@ export const useDrag = create<S>((set, get) => ({
   },
 }));
 
+/** ★끄는 동안 무엇이든 스크롤되면 **그 자리에서 다시 잰다.** 판정은 포인터가 움직일 때만 도는데,
+ *  끄는 채로 휠을 굴리면 커서는 그대로이고 밑의 칸만 바뀐다 (이미지 입력은 왼쪽 기둥 아래에 있어
+ *  굴려 내려가서 놓는다). 안 재면 강조가 옛 칸에 남고 놓으면 옛 칸이 받는다.
+ *  ★스크롤은 거품이 안 올라오므로 캡처로 받는다. `begin` 에서 걸고 `end`·`cancel` 에서 뗀다 */
+function rehit() {
+  const { drag, pos, move } = useDrag.getState();
+  if (drag) move(pos.x, pos.y);
+}
+
 /** 드롭 존 등록 — 반환한 ref 를 DOM 요소에 붙인다. */
 export function useDropZone(opts: {
   id: string;
-  kind: ZoneKind;
+  /** 받는 끌기의 종류. 여럿이면 목록으로 준다 (이미지 입력 칸은 `image` 와 `imageInput` 을 둘 다 받는다) */
+  kind: ZoneKind | ZoneKind[];
   dir?: DragDir;
   prio?: number;
   /** ★**여기 보이는 만큼만** 받는다 (스크롤 되는 목록 안의 존). 준 요소와 겹치는
@@ -150,14 +168,16 @@ export function useDropZone(opts: {
   const cb = useRef(opts.onDrop);
   cb.current = opts.onDrop;
 
-  const { id, kind, dir = "apply", prio = 0 } = opts;
+  const { id, dir = "apply", prio = 0 } = opts;
+  // ★목록은 렌더마다 새로 만들어지므로 글자로 묶어 딸림값에 넣는다 (배열을 넣으면 매 렌더 다시 등록된다)
+  const kindKey = ([] as ZoneKind[]).concat(opts.kind).join(",");
   const clip = useRef(opts.clip);
   clip.current = opts.clip;
   useEffect(
     () =>
       useDrag.getState().addZone({
         id,
-        kind,
+        kinds: kindKey.split(",") as ZoneKind[],
         dir,
         prio,
         rect: () => {
@@ -175,11 +195,11 @@ export function useDropZone(opts: {
         },
         onDrop: (d) => cb.current(d),
       }),
-    [id, kind, dir, prio],
+    [id, kindKey, dir, prio],
   );
 
   const over = useDrag((s) => s.over === id);
-  const active = useDrag((s) => s.drag?.kind === kind && s.drag.dir === dir);
+  const active = useDrag((s) => !!s.drag && kindKey.split(",").includes(s.drag.kind) && s.drag.dir === dir);
   return { ref, over, active };
 }
 

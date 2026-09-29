@@ -426,6 +426,9 @@ export const ko: Dict = {
     inferAdd: "참조 그림 넣기",
     inferOut: "결과 {w} × {h}",
     inferNoBase: "Inference 를 켜 둔 동안에는 베이스 이미지가 실리지 않습니다.",
+    /** 씬·큰 그림을 끌어 이 칸 위에 올렸을 때 (`ImageInputPanel` 의 `DropSlot`) */
+    dropBase: "베이스 이미지로",
+    dropInfer: "Inference 참조로",
     strength: "Strength",
     refStrength: "Reference Strength",
     info: "Information Extracted",

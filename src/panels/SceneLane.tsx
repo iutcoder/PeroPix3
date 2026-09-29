@@ -2054,7 +2054,8 @@ function SceneRow(
               //   드래그가 통째로 죽어 있었다 (사용자 지적 2026-08-18).
               // ★클릭(선택)은 `onClick` 이 아니라 **`onTap`** 으로 받는다 — pointerdown 의
               //   `preventDefault` 가 브라우저의 호환 click 을 삼킨다 (CLAUDE.md 「잊기 쉬운 것」).
-              // ★미저장은 **못 끈다.** 파일이 없어서 커버로 쓸 수 없다 (받는 쪽이 경로를 쓴다).
+              // ★미저장은 **이미지 입력 칸으로만** 끈다 (`kind: "imageInput"`). 파일이 없어서 커버로
+              //   쓸 수 없고(받는 쪽이 경로를 쓴다), 베이스·Inference 는 바이트를 그대로 받는다.
               onPointerDown={(e) => {
                 // ★★별표는 **여기서 비켜 간다** (사용자 지적 2026-08-19). 끌기가 pointerdown 에서
                 //   기본 동작을 막아 **호환 click 을 삼키는** 바람에 별표의 onClick 이 통째로
@@ -2076,11 +2077,10 @@ function SceneRow(
                     p.onFocus({ cell: c.id, file: r.file });
                   }
                 };
-                if (un) return tap();
                 e.stopPropagation();
                 startTakeDrag(
                   e,
-                  { dir: "image", kind: "image", img: { ws: p.ws, file: r.file, url: takeSrc(r, p.base, p.ws, true) } },
+                  { dir: "image", kind: un ? "imageInput" : "image", img: { ws: p.ws, file: r.file, url: takeSrc(r, p.base, p.ws, true), v: r.ts } },
                   undefined,
                   tap,
                 );

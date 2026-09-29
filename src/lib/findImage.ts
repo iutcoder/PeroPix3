@@ -27,8 +27,9 @@ export type FoundImage = { data: string; name: string; from: string };
 const isAbsPath = (s: string) => /^[a-zA-Z]:[\\/]/.test(s) || s.startsWith("\\\\") || s.startsWith("/");
 
 /** 주소 하나를 base64 로 — ★`?b64=1` 을 붙인다 (`panels/ImageActions` 의 그 자리와 같은 이유:
- *  같은 주소를 `<img>` 가 no-cors 로 먼저 캐시해 두면 뒤의 `fetch` 가 CORS 로 막힌다) */
-async function urlToBase64(url: string): Promise<string> {
+ *  같은 주소를 `<img>` 가 no-cors 로 먼저 캐시해 두면 뒤의 `fetch` 가 CORS 로 막힌다).
+ *  ★씬·큰 그림에서 이미지 입력 칸으로 끌어 넣을 때도 이것으로 원본을 받는다 (`ImageInputPanel` 의 `DropSlot`) */
+export async function urlToBase64(url: string): Promise<string> {
   const r = await fetch(url + (url.includes("?") ? "&" : "?") + "b64=1");
   if (!r.ok) throw new Error(`${r.status} ${r.statusText}`);
   const blob = await r.blob();

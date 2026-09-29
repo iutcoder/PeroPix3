@@ -1,20 +1,42 @@
 import { useI18n } from "../i18n";
 import { Category } from "./Category";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { DEFAULT_MODEL, MODELS, NAI_MAX, SIZE_PRESETS, alignTo64, modelCaps, useGen, type GenParams, type ParamsHost } from "../store/gen";
 import { pushUndo } from "../lib/undo";
 import { Icon } from "../components/Icon";
 import { Ratio } from "../components/Ratio";
 import { Help } from "../components/Tip";
-import { ImageInputPanel } from "./ImageInputPanel";
+import { ImageInputPanel, INPUT_ZONE } from "./ImageInputPanel";
 import { useImageInput, type ImageInputStore } from "../store/imageInput";
 import { fitPlan, planFor } from "../lib/inference";
 import { flashStyle, useFlash, useUi } from "../store/ui";
+import { useDrag } from "../cards/dragStore";
 
 const SAMPLERS = ["k_euler_ancestral", "k_euler", "k_dpmpp_2m", "k_dpmpp_2m_sde", "k_dpmpp_2s_ancestral", "k_dpmpp_sde"];
 const SCHEDULERS = ["karras", "native", "exponential", "polyexponential"];
 /* ★프리셋 이름표(`QP_LABEL`)와 UC 프리셋 목록은 **`panels/PromptOpts`** 로 옮겼다 —
    그 컨트롤이 프롬프트 칸 하단으로 갔기 때문이다 (2026-08-23). */
+
+/** 그림을 끌기 시작하면 **접힌 이미지 입력 묶음을 잠깐 편다** (카드덱의 `cards/deckPeek` 와 같은 방식).
+ *  ★거기 놓았으면 편 채로 두고, 다른 데 놓거나 취소하면 도로 접는다. 그만둔 사람의 화면은 건드리지 않은 것과 같아야 한다.
+ *  ★묶음 안(`ImageInputPanel`)이 아니라 여기서 한다. 접힌 동안에는 안이 통째로 언마운트된다 (`Category`). */
+function useInputPeek(dragging: boolean) {
+  const peeked = useRef(false);
+  useEffect(() => {
+    const ui = useUi.getState();
+    if (dragging) {
+      // ★접힘의 처음 값은 이 묶음의 `defaultFolded` 다
+      if (ui.view.cat["opt-img"] ?? true) {
+        peeked.current = true;
+        ui.setView("cat", "opt-img", false);
+      }
+      return;
+    }
+    if (!peeked.current) return;
+    peeked.current = false;
+    if (!useDrag.getState().droppedOn?.startsWith(INPUT_ZONE)) ui.setView("cat", "opt-img", true);
+  }, [dragging]);
+}
 
 /** 우측 패널 — 생성 파라미터. */
 /** 생성 옵션 — ★**왼쪽 프롬프트 아래**에 산다 (사용자 지시 2026-08-16).
@@ -60,6 +82,9 @@ export function OptionsPanel({ only, host, refs }: {
   const cap = modelCaps(p.model);
   /** 인퍼런스가 실리면 그 참조의 크기. 해상도 목록이 결과 크기로 바뀐다 (설계 문서 3번 「해상도」) */
   const inferSize = useImageInput((s) => s.riding().infer?.size ?? null);
+  /** 씬·큰 그림을 끌고 있다. 이미지 입력의 베이스·Inference 칸이 받는다 (`ImageInputPanel` 의 `DropSlot`) */
+  const dragImg = useDrag((s) => s.drag?.dir === "image") && !only;
+  useInputPeek(dragImg);
 
   return (
     /* ★★좌우 여백을 주지 않는다 (사용자 지적 2026-08-19) — 이 패널은 프롬프트와 **같은
@@ -148,7 +173,7 @@ export function OptionsPanel({ only, host, refs }: {
       {/* v2 의 `Vibe / Character Ref` + `Base Image` 절 */}
       {/* ★걸린 그림을 알리는 딱지는 **생성 버튼 곁**이다 (`ImageInputBadge` → `GenerateFooter`) —
           이 묶음은 접히면 안이 통째로 언마운트돼서, 안에 두면 접힌 동안 아무 말도 못 한다 */}
-      <Category id="opt-img" label={t("options.catImage")} defaultFolded flashKey="base" flashQuiet>
+      <Category id="opt-img" label={t("options.catImage")} defaultFolded flashKey="base" flashQuiet spot={dragImg}>
         <ImageInputPanel />
       </Category>
 

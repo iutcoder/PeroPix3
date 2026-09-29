@@ -414,6 +414,8 @@ export const ja: Dict = {
     inferAdd: "参照画像を入れる",
     inferOut: "結果 {w} × {h}",
     inferNoBase: "Inference がオンの間はベース画像を送りません。",
+    dropBase: "ベース画像に",
+    dropInfer: "Inference の参照に",
     strength: "Strength",
     refStrength: "Reference Strength",
     info: "Information Extracted",

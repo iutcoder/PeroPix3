@@ -28,9 +28,10 @@ export function PromptPanel({ onThumb }: SectionProps) {
   const { base, baseUc, chars, addChar } = usePrompt();
   /** ★★끌고 있는 동안 **그 묶음 전체**가 어둠 위로 올라온다 (사용자 지적 2026-08-20).
    *  카드마다 올리면 카드 사이 여백이 어두운 채라 「영역」으로 안 읽힌다.
-   *  ★그림 끌기(`image`)는 두 묶음 다 받는다 — 카드 배너에 꽂는 그림이라 어느 쪽이든 될 수 있다. */
+   *  ★그림 끌기(`image`)는 두 묶음 다 받는다 — 카드 배너에 꽂는 그림이라 어느 쪽이든 될 수 있다.
+   *    미저장 그림(`imageInput`)은 카드 그림이 못 되므로 안 올린다 (이미지 입력 묶음만 받는다) */
   const dragKind = useDrag((s) => (s.drag?.dir === "apply" ? s.drag.kind : null));
-  const dragImg = useDrag((s) => s.drag?.dir === "image");
+  const dragImg = useDrag((s) => s.drag?.kind === "image");
   const t = useI18n((s) => s.t);
   const [preview, setPreview] = useState(false);
   const scroller = useRef<HTMLDivElement>(null);

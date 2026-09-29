@@ -76,8 +76,9 @@ export function DeckPanel({
   }, [dragKind]);
   /** ★★끌고 있는 동안 **덱 전체**가 어둠 위로 올라온다 (사용자 지적 2026-08-20:
    *  "드롭영역 전체가 밝아져야하는데, 개별 카드만 밝아져"). 안쪽 줄만 올리면 탭 줄·폴더 칩이
-   *  어두운 채라 「여기가 받는 자리」로 안 읽힌다. 그림 끌기(`image`)도 이 패널이 받는다. */
-  const spot = useDrag((s) => s.drag?.dir === "save" || s.drag?.dir === "image");
+   *  어두운 채라 「여기가 받는 자리」로 안 읽힌다. 그림 끌기(`image`)도 이 패널이 받는다.
+   *  ★미저장 그림(`imageInput`)은 카드 그림이 못 된다. 그때는 안 올린다 */
+  const spot = useDrag((s) => s.drag?.dir === "save" || s.drag?.kind === "image");
   return (
     <div
       style={{

@@ -813,7 +813,8 @@ function ScenePreview() {
           /* ★★큰 그림도 **끌면 카드 커버**가 된다 (덱·손패·프롬프트 배너가 받는다).
                싱글 캔버스를 걷을 때 이 출발점이 씬 칸의 것과 함께 사라져 있었다
                (사용자 지적 2026-08-18). 고스트는 `DragLayer` 가 작게 그리므로 화면을 안 가린다.
-             ★미저장은 못 끈다 — 파일이 없어 커버로 쓸 수 없다 (받는 쪽이 경로를 쓴다). */
+             ★미저장은 이미지 입력 칸으로만 끈다 (`kind: "imageInput"`) — 파일이 없어 커버로 쓸 수 없다
+               (받는 쪽이 경로를 쓴다). 베이스·Inference 는 바이트를 그대로 받는다. */
           onPointerMove={panMove}
           onPointerUp={panUp}
           onPointerDown={
@@ -822,13 +823,11 @@ function ScenePreview() {
                  커버로 끌기는 「꽉차게」에서 그대로 살아 있다. */
             movable
               ? panDown
-              : cur?.preview
-              ? undefined
               : (e) =>
                   startDrag(e, {
                     dir: "image",
-                    kind: "image",
-                    img: { ws, file, url: cur ? takeSrc(cur, base, ws, true) : imgUrl(base, ws, file) },
+                    kind: cur?.preview ? "imageInput" : "image",
+                    img: { ws, file, url: cur ? takeSrc(cur, base, ws, true) : imgUrl(base, ws, file), v: cur?.ts },
                   })
           }
           onLoad={(e) => {
@@ -840,9 +839,9 @@ function ScenePreview() {
                직접 주고 왼쪽 위에서 밀어 놓는다 — 그래야 넘치는 만큼을 끌어 볼 수 있다. */
             ...geom,
             borderRadius: "var(--r-1)",
-            // ★끌어 볼 수 있으면 그 커서다. 아니면 **카드 커버로 끄는** 출발점 그대로
-            cursor: movable ? (drag.current ? "grabbing" : "move") : cur?.preview ? undefined : "grab",
-            ...(cur?.preview || movable ? null : dragSourceStyle),
+            // ★끌어 볼 수 있으면 그 커서다. 아니면 **카드 커버·이미지 입력으로 끄는** 출발점 그대로
+            cursor: movable ? (drag.current ? "grabbing" : "move") : "grab",
+            ...(movable ? null : dragSourceStyle),
           }}
         />
       ) : (!pendingSel || pendingSel === runId) && stepImg ? (
