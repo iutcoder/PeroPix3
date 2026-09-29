@@ -9,6 +9,11 @@ import type { GenParams } from "../store/gen";
 import { STYLE_OPT_KEYS } from "../lib/styleOpts.ts";
 import { MODELS } from "../lib/naiModels.ts";
 
+/** ★★만화 캔버스를 사용자에게 여나 (데스크 지침 「닫아 둔 기능」). 닫힌 동안 새 캔버스 창에 「만화 페이지」가 없고,
+ *  조수 도구 목록에 만화 액션(`gate: "comic"`)이 안 실린다 — `scripts/gen-actions.mjs` 가 **이 줄을 읽는다**.
+ *  코드·판정·이미 만든 만화 캔버스는 그대로다. 열 때는 `true` 로 바꾸고 `gen-actions` 를 다시 돌린다. */
+export const COMIC_READY = false;
+
 export type Pt = [number, number];
 export type Dir = "rtl" | "ltr";
 

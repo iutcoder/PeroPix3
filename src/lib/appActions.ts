@@ -1448,6 +1448,7 @@ defineAction({
 
 defineAction({
   id: "read_comic",
+  gate: "comic",
   title: "만화 캔버스를 읽습니다",
   desc: "★**이미지 편집의 만화 캔버스**를 읽는다 — 공통(화풍 · 캐릭터 외형 · 배경), 페이지마다 컷(상자 · 장면 요약 · 배경 · 컷 태그 · 캐릭터 칸 · 든 그림 수)과 말풍선. "
     + "★결과의 `guide` 가 만화 콘티를 짜는 규칙이다 — add_comic_page 전에 반드시 읽고 따른다. "
@@ -1459,6 +1460,7 @@ defineAction({
 
 defineAction({
   id: "add_comic_page",
+  gate: "comic",
   title: "만화 페이지를 깝니다",
   desc: "★**만화 캔버스의 마지막 페이지 뒤에 페이지 한 장을 깐다** (마지막 페이지가 비어 있으면 거기에). 컷 나누기 · 장면 요약 · 배경 · 컷 태그 · 캐릭터 칸 · 말풍선을 한 번에. "
     + "cuts 는 읽는 차례대로 `{box:[x,y,w,h], summary, background, tags, cast:[{who, tags, x, y}]}` — box 는 페이지 기본 틀 안의 비율, "
@@ -1478,6 +1480,7 @@ defineAction({
 
 defineAction({
   id: "edit_comic_cut",
+  gate: "comic",
   title: "만화 컷을 고칩니다",
   desc: "★**만화 캔버스의 컷 하나를 고친다** — 장면 요약 · 배경 · 컷 태그 · 캐릭터 칸 (주는 것만 바뀐다). page · cut 은 1부터 (컷은 그 페이지의 읽는 차례). "
     + "cast 를 주면 그 컷의 캐릭터 칸을 통째로 갈아 끼운다 ({who, tags, x, y}). 화풍과 캐릭터 외형은 고치지 않는다.",
@@ -1495,6 +1498,7 @@ defineAction({
 
 defineAction({
   id: "add_comic_background",
+  gate: "comic",
   title: "만화 배경을 더합니다",
   desc: "★**만화 캔버스의 공통에 배경 하나를 더한다** — 이야기에 필요한 장소가 공통에 없을 때만. name 은 한국어 이름, tags 는 장소 · 시간 · 조명 · 날씨 태그. "
     + "이미 있는 이름이면 거절한다 (그 이름을 그대로 쓴다).",

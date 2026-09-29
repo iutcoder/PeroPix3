@@ -3,7 +3,7 @@ import { useI18n } from "../i18n";
 import { Icon } from "../components/Icon";
 import { Line, box, dropFocus, on } from "../panels/censor/ui";
 import { sizePreview, withRatio, type Anchor, type Fill, type Size } from "./model";
-import { LAYOUTS, pageLabel, paperPx, type Dir, type Dpi, type PaperId } from "./comic";
+import { COMIC_READY, LAYOUTS, pageLabel, paperPx, type Dir, type Dpi, type PaperId } from "./comic";
 import { LayoutThumb } from "./comicUi";
 import { composite, exportDataUrl } from "./pixels";
 import { api } from "../lib/backend";
@@ -202,7 +202,8 @@ const btn: React.CSSProperties = {
  *  ★만화 페이지가 새 모드가 아니라 **캔버스의 한 종류**다 (설계 2번) — 그래서 「새 캔버스」가 이 둘로 갈린다 */
 export function NewCanvasDialog({ onClose }: { onClose: () => void }) {
   const t = useI18n((s) => s.t);
-  const [kind, setKind] = useState<"image" | "comic">("comic");
+  // ★만화가 닫혀 있으면 종류 고르기 없이 이미지뿐이다 (`comic.COMIC_READY`)
+  const [kind, setKind] = useState<"image" | "comic">(COMIC_READY ? "comic" : "image");
   const [iw, setIw] = useState(1216);
   const [ih, setIh] = useState(832);
   const [paper, setPaper] = useState<PaperId>("a4");
@@ -225,7 +226,7 @@ export function NewCanvasDialog({ onClose }: { onClose: () => void }) {
   const seg = (active: boolean): React.CSSProperties => ({ ...box, ...(active ? on : {}), padding: "3px 10px", whiteSpace: "nowrap" });
   return (
     <Modal title={t("editor.newDoc")} onOk={ok} onClose={onClose} mark="editor-new-dialog" width={kind === "comic" ? 580 : 420} okLabel={t("editor.create")}>
-      <div style={{ display: "flex", gap: "var(--sp-3)" }}>
+      {COMIC_READY && <div style={{ display: "flex", gap: "var(--sp-3)" }}>
         <button data-editor-new-kind="image" onMouseDown={dropFocus} onClick={() => setKind("image")} style={card(kind === "image")}>
           {Icon.image}
           <span>{t("editor.kindImage")}<small style={sub}>1216 × 832</small></span>
@@ -234,7 +235,7 @@ export function NewCanvasDialog({ onClose }: { onClose: () => void }) {
           {Icon.page}
           <span>{t("editor.kindComic")}<small style={sub}>{t("editor.kindComicSub")}</small></span>
         </button>
-      </div>
+      </div>}
       {kind === "image" && (
         <Line label={t("editor.dims")}>
           <NumField mark="editor-new-w" value={iw} onChange={setIw} />

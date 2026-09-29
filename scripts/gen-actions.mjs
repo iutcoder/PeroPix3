@@ -21,6 +21,14 @@ const OUT = join(here, "..", "backend", "actions.json");
 
 const src = readFileSync(SRC, "utf-8");
 
+/** 닫아 둔 기능의 깃발 — `gate: "comic"` 액션은 이것이 `true` 일 때만 싣는다 (`src/editor/comic.ts` 의 `COMIC_READY`) */
+const flag = /export const COMIC_READY = (true|false);/.exec(readFileSync(join(here, "..", "src", "editor", "comic.ts"), "utf-8"));
+if (!flag) {
+  console.error("[gen-actions] src/editor/comic.ts 에서 COMIC_READY 줄을 못 찾았습니다.");
+  process.exit(1);
+}
+const open = { comic: flag[1] === "true" };
+
 /** `defineAction({ ... });` 덩이를 통째로 자른다 — 중괄호 깊이로 끝을 찾는다 */
 function blocks(text) {
   const out = [];
@@ -91,9 +99,15 @@ function args(b) {
 }
 
 const actions = [];
+const closed = [];
 for (const b of blocks(src)) {
   const id = str(b, "id");
   if (!id) continue;
+  const gate = str(b, "gate");
+  if (gate && !open[gate]) {
+    closed.push(id);
+    continue;
+  }
   actions.push({ id, desc: desc(b), args: args(b) });
 }
 
@@ -103,5 +117,5 @@ if (!actions.length) {
 }
 
 writeFileSync(OUT, JSON.stringify({ actions }, null, 2) + "\n", "utf-8");
-console.log(`[gen-actions] ${actions.length}개 → ${OUT}`);
+console.log(`[gen-actions] ${actions.length}개 → ${OUT}${closed.length ? ` (닫아 둔 기능이라 뺌: ${closed.join(", ")})` : ""}`);
 for (const a of actions) console.log(`  ${a.id}(${Object.keys(a.args).join(", ")})`);
