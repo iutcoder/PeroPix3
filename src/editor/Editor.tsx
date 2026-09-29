@@ -309,7 +309,8 @@ function ToolOptions() {
   const isColor = bg.startsWith("#");
 
   return (
-    <div data-editor-opts style={{ display: "flex", alignItems: "center", gap: "var(--sp-4)", minHeight: 28, fontSize: "var(--text-2xs)", color: "var(--ink-soft)" }}>
+    /* ★폭이 모자라면 **다음 줄로 내린다**. 한 줄로 두면 칸들이 줄어들며 서로 덮어, 덮인 버튼은 눌리지 않았다 (말풍선 도구의 종류 버튼 다섯) */
+    <div data-editor-opts style={{ display: "flex", flexWrap: "wrap", alignItems: "center", columnGap: "var(--sp-4)", rowGap: "var(--sp-2)", minHeight: 28, fontSize: "var(--text-2xs)", color: "var(--ink-soft)" }}>
       <span style={{ display: "inline-flex", alignItems: "center", gap: 6, fontWeight: "var(--w-semi)", color: "var(--ink)" }}>
         {toolMeta.icon}{t(toolMeta.key).replace(/\s*\(.*\)$/, "")}
       </span>
@@ -399,7 +400,8 @@ function ToolOptions() {
           <button data-editor-crop-cancel disabled={!s.crop} onClick={() => s.setCrop(null)} style={{ ...box, padding: "2px 10px" }}>{t("editor.cropCancel")}</button>
         </>
       )}
-      <span style={{ flex: 1 }} />
+      {/* ★오른쪽 끝에 붙이는 것은 빈 칸(spacer)이 아니라 `marginLeft: auto` 다. 줄이 넘치면 빈 칸은 윗줄에 남고 이 묶음만 아랫줄 왼쪽으로 떨어진다 */}
+      <span style={{ marginLeft: "auto", display: "inline-flex", alignItems: "center", gap: "var(--sp-4)" }}>
       {/* 만화 캔버스 — 「AI 콘티」(설계 10번) · 「페이지」 메뉴(용지 · 읽는 방향 · 안내선 · 크기 · 내보내기, 설계 8-5) */}
       {doc.comic && <ContiButton doc={doc} />}
       {doc.comic && <PageMenu />}
@@ -429,6 +431,7 @@ function ToolOptions() {
             </div>
           )}
         </div>
+      </span>
       </span>
     </div>
   );
