@@ -43,7 +43,7 @@ RECORDS_NAME = "records.jsonl"
 #:  ★성질은 그대로 append-only JSONL 이다: 사람이 읽을 수 있고, 쓰다 죽어도 앞줄은 온전하다.
 ENV_NAME = "records-env.jsonl"
 #: 색인에서 빼고 곁파일로 보내는 필드
-HEAVY_KEYS = ("resolved", "env")
+HEAVY_KEYS = ("resolved", "env", "inference")
 #: ★★**별표의 이력** (사용자 결정 2026-08-28). 별표는 `workspace.json` 한 곳에만 적혀서, 그 파일이
 #:  덮어써지면(실사고 2026-08-28: 다른 워크스페이스의 spec 이 이 이름으로 저장됐다) 되살릴 재료가
 #:  없었다. 저장할 때 별표 목록이 **바뀌었을 때만** 한 줄 덧붙인다 — 되돌릴 때는 마지막 줄을 본다.
@@ -752,7 +752,7 @@ class Store:
         return [r for r in self.records(ws) if (d / str(r.get("file") or "")).is_file()]
 
     def heavy_of(self, ws: str, file: str) -> dict:
-        """그 그림의 **무거운 것**(`resolved`·`env`). 없으면 빈 것.
+        """그 그림의 **무거운 것**(`HEAVY_KEYS`: `resolved`·`env`·`inference`). 없으면 빈 것.
 
         ★찾는 자리는 곁파일이고, **뒤에서부터** 본다 (같은 경로가 여러 번 적혔으면 마지막 것).
         ★파싱하기 전에 **경로 문자열이 그 줄에 있는지**부터 본다 — 줄 하나가 수십 KB 라
@@ -769,6 +769,8 @@ class Store:
         #   그것만으로 0.5초가 든다. 맞는 줄 **하나만** 풀면 된다.
         want_key = f'"key": "{key}"'.encode("utf-8") if key else None
         want_file = f'"file": "{file}"'.encode("utf-8")
+        # 무거운 것이 든 줄의 표식 — 키 목록 하나(`HEAVY_KEYS`)에서 뽑는다
+        heavy_marks = [f'"{k}"'.encode("utf-8") for k in HEAVY_KEYS]
         for name in (ENV_NAME, RECORDS_NAME):
             p = d / name
             if not p.exists():
@@ -779,7 +781,7 @@ class Store:
             by_key = by_file = None
             with p.open("rb") as f:
                 for raw in f:
-                    if not (b'"env"' in raw or b'"resolved"' in raw):
+                    if not any(m in raw for m in heavy_marks):
                         continue
                     if want_key and want_key in raw:
                         by_key = raw

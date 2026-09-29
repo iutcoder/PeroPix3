@@ -13,6 +13,7 @@ import {
   type ImageInputStore,
 } from "../store/imageInput";
 import { canFocus } from "../lib/focused";
+import { INFERENCE_MODEL } from "../lib/inference";
 import { fitSizeToBase, modelCaps, useGen } from "../store/gen";
 import { flashStyle, useFlashAt } from "../store/ui";
 import { toast } from "../store/toast";
@@ -51,6 +52,11 @@ export function ImageInputPanel({
   const model = own ?? genModel;
   const cap = modelCaps(model);
   const [cache, setCache] = useState(false);
+  // ★인퍼런스의 결과 크기는 해상도 칸을 따라 바뀐다. 그 값을 들어야 다시 그린다
+  useGen((g) => g.params.width);
+  useGen((g) => g.params.height);
+  const ride = s.riding();
+  const plan = s.inferPlan();
 
   /** ★서버에 구워 둔 인코딩이 있으면 「구워 둠」이 뜨고 비용에서도 빠진다.
    *
@@ -112,6 +118,14 @@ export function ImageInputPanel({
     }
     s.setBase(r.data, r.name);
     await fitSizeToBase(r.data);
+  };
+  const addInferPath = async (path: string) => {
+    const r = await readDropped(path).catch(() => null);
+    if (!r?.data) {
+      toast(t("imgIn.dropBad"), "warn");
+      return;
+    }
+    s.setInfer(r.data, r.name);
   };
 
   return (
@@ -260,8 +274,59 @@ export function ImageInputPanel({
       </Section>
       )}
 
+      {/* ★★인퍼런스는 V5 Full 에서만 뜬다 (사용자 결정 2026-09-29, 설계 `docs/inference-design.md`).
+          한 장만 받고 그림 전체를 쓴다. 배치는 앱이 정하고, 결과 크기는 해상도 칸의 목록에서 고른다 */}
+      {!refsOnly && model === INFERENCE_MODEL && (
+      <Section
+        label={t("imgIn.inference")}
+        help={t("imgIn.inferenceHint")}
+        on={s.inferOn}
+        onToggle={s.setInferOn}
+        data-sec="inference"
+      >
+        {s.infer ? (
+          <Card
+            src={`data:image/png;base64,${s.infer.image}`}
+            name={s.infer.name}
+            onRemove={s.clearInfer}
+            data-infer
+          >
+            {plan && (
+              <span
+                data-infer-out={`${plan.crop.w}x${plan.crop.h}`}
+                style={{ fontSize: "var(--text-2xs)", color: "var(--ink-dim)", fontVariantNumeric: "tabular-nums" }}
+              >
+                {t("imgIn.inferOut", { w: plan.crop.w, h: plan.crop.h })}
+              </span>
+            )}
+          </Card>
+        ) : (
+          <Pick
+            label={t("imgIn.inferAdd")}
+            data-add="inference"
+            onFile={async (f) => s.setInfer(await fileToBase64(f), f.name)}
+            onPath={addInferPath}
+          />
+        )}
+      </Section>
+      )}
+
       {!refsOnly && (
       <Section label={t("imgIn.base")} data-sec="base" flashKey="base">
+        {/* ★인퍼런스가 실리는 동안에는 베이스가 안 나간다 (둘 다 인페인트 경로다). 감추지 않고 흐리게 두고 이유를 적는다 */}
+        {ride.infer && (
+          <span data-base-blocked style={{ fontSize: "var(--text-2xs)", color: "var(--ink-faint)", lineHeight: 1.45 }}>
+            {t("imgIn.inferNoBase")}
+          </span>
+        )}
+        <div
+          style={{
+            display: "flex",
+            flexDirection: "column",
+            gap: "var(--sp-2)",
+            ...(ride.infer ? { opacity: 0.45, pointerEvents: "none" as const } : null),
+          }}
+        >
         {s.baseImage ? (
           <Card
             src={`data:image/png;base64,${s.baseImage}`}
@@ -365,6 +430,7 @@ export function ImageInputPanel({
             />
           </>
         )}
+        </div>
       </Section>
       )}
 
@@ -835,7 +901,8 @@ export function ImageInputBadge() {
   // ★모델을 바꾸면 딸려 바뀐다 — V5 로 가면 바이브·레퍼런스가 통째로 빠진다
   useGen((g) => g.params.model);
   const ride = s.riding();
-  const n = (s.baseImage ? 1 : 0) + ride.vibes.length + ride.refs.length;
+  // ★인퍼런스가 실리면 베이스는 안 나간다 (`payload`). 세지 않는다
+  const n = (s.baseImage && !ride.infer ? 1 : 0) + ride.vibes.length + ride.refs.length + (ride.infer ? 1 : 0);
   if (!n) return null;
   return (
     <span
@@ -880,12 +947,13 @@ function inputTip(
     for (const it of list.slice(0, TIP_MAX)) out.push(t("imgIn.sumItem", { name: it.name }));
     if (list.length > TIP_MAX) out.push(t("imgIn.sumMore", { n: list.length - TIP_MAX }));
   };
-  if (s.baseImage) {
-    // ★베이스 그림에는 켜고 끄는 스위치가 없다 — 걸려 있으면 언제나 나간다
+  if (s.baseImage && !ride.infer) {
+    // ★베이스 그림에는 켜고 끄는 스위치가 없어 걸려 있으면 언제나 나간다 (인퍼런스가 실릴 때만 빼고)
     out.push(t("imgIn.sumBase", { mode: t(s.baseMode === "inpaint" ? "imgIn.inpaint" : "imgIn.i2i") }));
     if (s.baseName) out.push(t("imgIn.sumItem", { name: s.baseName }));
   }
   group(t("imgIn.vibe"), ride.vibes);
   group(t("imgIn.ref"), ride.refs);
+  group(t("imgIn.inference"), ride.infer ? [ride.infer] : []);
   return out.join("\n");
 }
