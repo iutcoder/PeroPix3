@@ -171,6 +171,16 @@ export const stepKey = (workspace: string, cell: string) => `${workspace}::${cel
  *  ★소켓이 생기기 전 구간을 이것이 지킨다 (`connect` 의 ★주) */
 let connecting = false;
 
+/** ★★개발 모드의 HMR 이 이 모듈을 다시 실행해도 **옛 사본이 살아 있다** (2026-09-29 실측).
+ *  Vite 는 교체 경로 중간에 낀 모듈의 `dispose` 를 부르지 않는다 (`acceptedPath` 만 부른다). 그래서 옛 사본의 소켓이
+ *  남고, 새 사본이 같은 `clientId` 로 붙으면 서버가 옛것을 닫고 → 옛것이 다시 붙어 새것을 닫고 → … 가 돈다
+ *  (개발본에서 10초에 연결 27번). 그 사이 CLI 줄과 턴 끝이 **그때 붙어 있던 사본**의 스토어로 가서 보고 있는 대화에는
+ *  안 오고 옛 대화 파일에 흩어져 저장됐다. 「중단」을 눌러도 턴 끝이 안 와 「일하는 중」에 갇혔다.
+ *  ★가장 나중에 실행된 사본만 붙는다. 배포판은 모듈이 한 번만 실행되므로 번호가 늘 1 이다. */
+const G = globalThis as { __queueGen?: number };
+const gen = (G.__queueGen = (G.__queueGen ?? 0) + 1);
+const retired = () => gen !== G.__queueGen;
+
 /** **지금 그리고 있는 대기 칸**의 번호 (없으면 `null`).
  *
  *  ★★규칙을 여기 하나에 둔다 (사용자 지적 2026-08-28: *"스트리밍 썸네일이 같은 씬에 걸려
@@ -216,6 +226,7 @@ export const useQueue = create<S>((set, get) => ({
        실측(2026-08-20 로그): 90분 동안 재연결 **58,120번**, 오류 로그 7.5MB.
        그 소음 속에서 평범한 요청이 간헐적으로 거절돼 `Failed to fetch` 로 보였다. */
     if (connecting) return;
+    if (retired()) return; // ★HMR 이 갈아 끼운 옛 사본 — 새 사본이 붙는다 (`gen` 의 ★★주)
     if (sock && (sock.readyState === WebSocket.OPEN || sock.readyState === WebSocket.CONNECTING)) return;
     connecting = true;
     const base = await backendUrl().catch(() => {
@@ -250,6 +261,7 @@ export const useQueue = create<S>((set, get) => ({
       // ★**지금 것이 아니면 아무것도 안 한다** — 옛 소켓이 닫힌 것으로 「끊겼다」를 켜거나
       //   재연결을 걸면, 살아 있는 연결을 두고 다시 붙는 고리가 생긴다 (위 ★주)
       if (sock !== ws) return;
+      if (retired()) return; // ★옛 사본은 다시 붙지 않는다 — 새 사본이 붙어 있다 (`gen` 의 ★★주)
       sock = null;
       set({ connected: false });
       // 지수 백오프 재연결 (최대 10초)

@@ -400,7 +400,12 @@ type S = {
 /** 백엔드가 내주는 도구 명세 (MCP 모양). 한 번 받아 두고 쓴다 */
 type ToolSpec = { name: string; description: string; inputSchema: Record<string, unknown> };
 let specs: ToolSpec[] = [];
-let abort = false;
+/** 지금 도는 API 턴 — 「중단」이 이것으로 **나가 있는 요청까지** 끊는다.
+ *  ★턴마다 새로 만든다. 멈춘 턴의 뒤늦은 마무리가 그 뒤에 시작한 턴을 건드리지 않게, 제 것일 때만 턴을 끝낸다. */
+let turn: AbortController | null = null;
+/** 멈춘 턴에서 결과를 못 받은 도구 — 결과 없는 `tool_use` 가 남으면 다음 턴이 공급자에게 400 을 받는다 */
+const NOT_RUN = { cancelled: true, reason: "사용자가 중단해서 실행하지 않았습니다." };
+const CUT = { stopped: true, reason: "사용자가 중단했습니다. 실행이 끝났는지는 모릅니다." };
 const newId = () => "chat_" + Date.now().toString(36);
 
 export const useLlm = create<S>((set, get) => ({
@@ -628,7 +633,6 @@ export const useLlm = create<S>((set, get) => ({
 
   /** 한 턴을 실제로 돌린다 — `send` 와 `drain` 이 함께 쓴다 (사용자 줄은 이미 올라가 있다). */
   async run(text) {
-    abort = false;
     const push = (m: Wire) => {
       const wire = [...get().wire, m];
       set({ wire, lines: linesOf(wire) });
@@ -659,6 +663,10 @@ export const useLlm = create<S>((set, get) => ({
       return; // 끝은 `turn_end` 가 알린다 (cliEvent)
     }
 
+    // ★`sending` 을 켠 뒤 첫 `await` 전에 잡는다 — 그 사이 누른 「중단」도 이 턴을 멈춘다
+    const ctl = new AbortController();
+    turn = ctl;
+    const { signal } = ctl;
     // ★이 턴 동안은 한 값으로 간다 — 첫 바퀴에서 이름이 붙어도 다음 바퀴의 앞부분이 같아야 캐시가 산다 (`NAME_FIRST` 의 ★★주)
     const nameFirst = !get().title;
     /* ★★**보내기 전에 접는다** (2026-09-22). 마지막 응답의 입력 토큰이 문턱을 넘었으면 이 말을 보내기 전에
@@ -670,7 +678,7 @@ export const useLlm = create<S>((set, get) => ({
     const turnStart = turnStartOf(get().wire);
     try {
       for (let round = 0; round < MAX_ROUNDS; round++) {
-        if (abort) break;
+        if (signal.aborted) break;
         // ★도구 명세는 **백엔드가 정본**이다 (CLI 경로와 같은 것을 쓴다)
         if (!specs.length) specs = (await api<{ tools: ToolSpec[] }>("/api/agent/tools")).tools ?? [];
         const r = await api<{
@@ -681,6 +689,7 @@ export const useLlm = create<S>((set, get) => ({
         }>("/api/llm/chat", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
+          signal,
           body: JSON.stringify({
             system: SYSTEM,
             messages: withNameFirst(forProvider(stripOldImages(get().wire, turnStart)), nameFirst),
@@ -709,11 +718,15 @@ export const useLlm = create<S>((set, get) => ({
         /** ★★도구가 돌려준 **그림** — 도구 결과 **다음에** 따로 붙인다 (아래 ★★주) */
         const shots: { file: string; mime: string; b64: string }[] = [];
         for (const c of calls) {
-          const out = await api<Record<string, unknown>>("/api/agent/call", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ name: c.name, input: c.input }),
-          }).catch((e) => ({ error: String((e as Error).message ?? e) }));
+          // ★멈췄으면 남은 도구는 안 부르고, 나가 있던 것은 끊는다. 결과는 그래도 남긴다 (`NOT_RUN` 주석)
+          const out = signal.aborted
+            ? NOT_RUN
+            : await api<Record<string, unknown>>("/api/agent/call", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                signal,
+                body: JSON.stringify({ name: c.name, input: c.input }),
+              }).catch((e) => (signal.aborted ? CUT : { error: String((e as Error).message ?? e) }));
           const body = { ...(out ?? { ok: true }) } as Record<string, unknown>;
           /* ★★**그림을 못 받는 모델에는 안 싣는다** (설계 2-7). 모델 목록이 `vision` 을
              실어 주는데(`backend/llm.py` 의 `input_modalities`) 아무도 안 보고 있었다 —
@@ -760,11 +773,17 @@ export const useLlm = create<S>((set, get) => ({
         }
       }
     } catch (e) {
-      noteError(String((e as Error).message ?? e));
+      // ★멈춰서 끊긴 요청은 오류가 아니다
+      if (!signal.aborted) noteError(String((e as Error).message ?? e));
     } finally {
-      endTurn();
-      void save(get());
-      drain();
+      // ★★멈춘 턴은 `stop` 이 이미 끝냈다. 그 뒤 새 턴이 돌고 있을 수 있으니 여기서는 건드리지 않는다
+      //   (예전에는 멈춘 턴이 뒤늦게 `sending` 을 꺼서, 도는 새 턴 위에 또 한 턴을 보낼 수 있었다)
+      if (turn === ctl) {
+        turn = null;
+        endTurn();
+        void save(get());
+        drain();
+      }
     }
   },
 
@@ -817,10 +836,17 @@ export const useLlm = create<S>((set, get) => ({
   },
 
   stop() {
-    abort = true;
     // ★멈추라고 했으면 **쌓아 둔 말도 버린다** — 안 그러면 멈춘 직후에 저절로 또 돈다
     set({ queued: [] });
+    // ★★답을 기다리는 승인 카드·물음도 거둔다 — 멈춘 턴의 도구가 그 답을 기다리고 있다.
+    //   남겨 두면 나중에 누른 「승인」이 턴도 없이 실행된다
+    get().confirm?.answer(false);
+    get().ask?.answer([]);
     if (useCli.getState().engine !== "cli") {
+      // ★★나가 있는 요청까지 끊는다 (사용자 지적 2026-09-29: 눌러도 곧바로 안 멈췄다). 예전에는 표식만 세워서
+      //   기다리던 답이 뒤늦게 대화에 붙고, 그 답이 시킨 도구까지 돈 뒤에야 멈췄다
+      turn?.abort();
+      turn = null;
       set({ sending: false });
       return;
     }
