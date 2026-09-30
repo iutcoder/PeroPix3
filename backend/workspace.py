@@ -3,7 +3,8 @@
 구조:
     workspaces/<워크스페이스>/
       workspace.json     ← spec (의도. 사람·LLM 이 편집)
-      records.jsonl      ← 사실 (코드만 쓴다, append-only)
+      records.jsonl      ← 사실의 색인 (코드만 쓴다, append-only)
+      records.db         ← 그림 한 장의 무거운 기록 (`recordsdb` 머리 주석)
       output/싱글/<탭>/*.png              ← 생성물 = 원본. 앱이 자동으로 지우지 않는다
       output/멀티/<캐릭터>/<포즈세트>/*.png
       work/<탭>/<셀>/*.png                ← ★옛 경로. **읽기만** 한다 (아래 out_dir 주석)
@@ -14,7 +15,9 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
+import os
 import re
 import shutil
 import threading
@@ -24,6 +27,7 @@ from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 
+import recordsdb
 import thumbs
 import trash
 
@@ -40,13 +44,11 @@ RECORDS_NAME = "records.jsonl"
 #:
 #:  ★그림 폴더에는 **아무것도 안 만든다.** 그림 한 장에 파일 하나씩 붙이면 탐색기로 그림을
 #:    보는 자리가 지저분해진다 (사용자 지적) — 워크스페이스당 파일 **하나**만 는다.
-#:  ★성질은 그대로 append-only JSONL 이다: 사람이 읽을 수 있고, 쓰다 죽어도 앞줄은 온전하다.
+#:  ★★**지금은 `records.db` 다** (사용자 결정 2026-09-30, `recordsdb` 머리 주석). 이 이름은 옛
+#:    곁파일을 옮길 때만 쓴다 (`migrate_records`) — 옮긴 뒤에는 워크스페이스 휴지통으로 간다.
 ENV_NAME = "records-env.jsonl"
-#: 색인에서 빼고 곁파일로 보내는 필드
+#: 색인에서 빼고 `records.db` 로 보내는 필드
 HEAVY_KEYS = ("resolved", "env", "inference")
-#: 곁줄의 머리 — 열쇠를 **맨 앞에** 적으므로(`append_record`) 이것으로 시작하면 풀지 않고도
-#  열쇠가 있는 줄임을 안다 (`ensure_keys` 가 수 GB 곁파일을 줄마다 풀지 않게)
-_KEY_HEAD = b'{"key": '
 #: ★★**별표의 이력** (사용자 결정 2026-08-28). 별표는 `workspace.json` 한 곳에만 적혀서, 그 파일이
 #:  덮어써지면(실사고 2026-08-28: 다른 워크스페이스의 spec 이 이 이름으로 저장됐다) 되살릴 재료가
 #:  없었다. 저장할 때 별표 목록이 **바뀌었을 때만** 한 줄 덧붙인다 — 되돌릴 때는 마지막 줄을 본다.
@@ -507,8 +509,9 @@ class Store:
         ★★**두 단계로 바꾼다.** 씬 둘이 자리를 맞바꾸면(사용자 예: 미소 ↔ 슬픔) 중간에
           **이름이 겹친다** — 먼저 임시 이름으로 전부 옮기고 나서 제 이름을 준다.
           한 번에 하면 뒤엣것이 앞엣것을 덮거나 `next_name` 이 엉뚱한 번호를 준다.
-        ★함께 고치는 것 셋 — 파일 · 색인(`records.jsonl`) · 곁파일(`records-env.jsonl`).
-          하나라도 빠지면 **그림이 화면에서 사라진다** (색인이 없는 경로를 가리킨다).
+        ★함께 고치는 것 둘 — 파일 · 색인(`records.jsonl`). 무거운 기록(`records.db`)은 열쇠로
+          이어져 있어 안 건드린다 (`_rewrite_paths`). 색인이 빠지면 **그림이 화면에서 사라진다**
+          (색인이 없는 경로를 가리킨다).
         ★★**썸네일 캐시도 함께 옮긴다** (실측 2026-08-27). 파생 캐시의 이름은 **경로에서**
           나오므로(`thumbs.flat_name`), 안 옮기면 개명한 그림이 전부 캐시 미스가 되어
           한 장씩 다시 구워진다 — 실측 **한 장 60ms, 600장이면 36초**다. 그동안 화면에
@@ -643,84 +646,65 @@ class Store:
         return line[i + len(cls._FILE_KEY):j] if j > 0 else None
 
     def _rewrite_paths(self, ws: str, moves: dict[str, str], patch: dict | None = None) -> None:
-        """색인과 곁파일의 `file` 을 새 경로로 바꾼다 (`renumber`·`move_scene_group`).
+        """색인의 `file` 을 새 경로로 바꾼다 (`renumber`·`move_scene_group`).
 
         ★`patch` 를 주면 그 줄에 값을 함께 심는다 (세트 이름이 바뀌었을 때).
-        ★★**곁파일은 안 건드린다** (사용자 승인 2026-08-28). 두 파일을 잇는 것이 경로가 아니라
-          `key` 라, 경로가 바뀌어도 곁파일은 그대로 맞다 (`append_record` 의 ★★주).
-          실측: 그림 740장 옮기기가 954ms → 곁파일을 빼면 색인만 남아 훨씬 싸다.
-          ★**열쇠가 없는 옛 줄**이 섞여 있으면 그 줄들만 곁파일에서도 고친다 (이전 전의 데이터).
-        ★★**바이트로 훑는다**. 줄 하나가 수십 KB 라, 글자로 풀었다가 다시 담으면 바뀌지 않는
-          줄에도 그 비용이 든다. 바뀌는 줄만 풀고 나머지는 바이트 그대로 흘려 쓴다.
+        ★★**무거운 기록(`records.db`)은 안 건드린다** (사용자 승인 2026-08-28). 둘을 잇는 것이
+          경로가 아니라 `key` 라, 경로가 바뀌어도 기록은 그대로 맞다 (`append_record` 의 ★★주).
+        ★★**바이트로 훑는다**. 바뀌는 줄만 풀고 나머지는 바이트 그대로 흘려 쓴다.
 
         ★append-only 인 파일을 **통째로 다시 쓰는** 유일한 자리다. 그래서 임시 파일에 쓴 뒤
           바꿔치기한다 — 쓰다 죽어도 앞의 것이 남는다.
-
-        ★★**바뀌는 줄만 파싱한다** (실측 2026-08-27). 곁파일(`records-env.jsonl`)은 생성
-          환경을 통째로 담아 **쉽게 90MB를 넘는다** (개발 워크스페이스 실측 92MB). 예전에는
-          모든 줄을 `json.loads` → `json.dumps` 로 굴려 **1.40초**가 들었다 — 그것도 **몇 장을
-          옮기든 늘 같은 값**이라, 사용자에게는 「15장이든 100장이든 비슷한 딜레이」로 보였다.
-          바뀌는 줄만 굴리면 **0.46초**다 (나머지는 그대로 흘려 쓴다).
         """
-        d = self.dir_of(ws)
+        p = self.dir_of(ws) / RECORDS_NAME
+        if not p.is_file():
+            return
         hit = {k.encode("utf-8") for k in moves}
-        keyless: set[bytes] = set()       # 열쇠가 없어 곁파일도 고쳐야 하는 옛 줄
-        names = [RECORDS_NAME]
-        while names:
-            name = names.pop(0)
-            p = d / name
-            if not p.is_file():
-                continue
-            tmp = p.with_suffix(p.suffix + ".tmp")
-            with p.open("rb") as fin, tmp.open("wb") as fout:
-                for raw in fin:
-                    if not raw.strip():
+        tmp = p.with_suffix(p.suffix + ".tmp")
+        with p.open("rb") as fin, tmp.open("wb") as fout:
+            for raw in fin:
+                if not raw.strip():
+                    continue
+                f = self._file_of_bytes(raw)
+                if f is not None and f in hit:
+                    try:
+                        row = json.loads(raw.decode("utf-8"))
+                        row["file"] = moves[f.decode("utf-8")]
+                        if patch:
+                            row.update(patch)
+                        fout.write(json.dumps(row, ensure_ascii=False).encode("utf-8") + b"\n")
                         continue
-                    f = self._file_of_bytes(raw)
-                    if f is not None and f in hit:
-                        try:
-                            row = json.loads(raw.decode("utf-8"))
-                            if name == RECORDS_NAME and not row.get("key"):
-                                keyless.add(f)     # ★이 줄은 경로로만 이어져 있다
-                            row["file"] = moves[f.decode("utf-8")]
-                            if patch and name == RECORDS_NAME:
-                                row.update(patch)
-                            fout.write(json.dumps(row, ensure_ascii=False).encode("utf-8") + b"\n")
-                            continue
-                        except Exception:
-                            pass          # ★못 읽는 줄은 **그대로 둔다** (버리지 않는다)
-                    fout.write(raw if raw.endswith(b"\n") else raw + b"\n")
-            # ★임시 파일을 **바꿔치기**한다 — 지우는 연산을 이 파일에 두지 않는다
-            #   (`test_output_safety` 가 그것을 지킨다: 생성물은 사람이 지울 때만 사라진다).
-            self._replace(tmp, p)
-            if name == RECORDS_NAME and keyless:
-                hit = keyless             # ★옛 줄만 골라 곁파일도 고친다 (위 ★주)
-                names.append(ENV_NAME)
+                    except Exception:
+                        pass          # ★못 읽는 줄은 **그대로 둔다** (버리지 않는다)
+                fout.write(raw if raw.endswith(b"\n") else raw + b"\n")
+        # ★임시 파일을 **바꿔치기**한다 — 지우는 연산을 이 파일에 두지 않는다
+        #   (`test_output_safety` 가 그것을 지킨다: 생성물은 사람이 지울 때만 사라진다).
+        self._replace(tmp, p)
 
     def append_record(self, ws: str, rec: dict) -> None:
-        """레코드 한 줄. ★무거운 것은 **곁파일로 갈라** 적는다 (`ENV_NAME` 머리 주석).
+        """레코드 한 줄. ★무거운 것은 **`records.db` 로 갈라** 적는다 (`recordsdb` 머리 주석).
 
-        ★순서가 안전장치다: **곁파일을 먼저** 적는다. 거꾸로 하면 그 사이에 죽었을 때
+        ★순서가 안전장치다: **기록을 먼저** 적는다. 거꾸로 하면 그 사이에 죽었을 때
           색인에는 있는데 무거운 것이 없는 그림이 생긴다 (「새 탭으로 복제」가 조용히 빈손이 된다).
-          반대로 곁파일만 남는 것은 해가 없다 — 아무도 안 찾는 줄일 뿐이다.
+          반대로 기록만 남는 것은 해가 없다 — 아무도 안 찾는 줄일 뿐이다.
         ★★**두 줄을 잇는 것은 `key` 다** (사용자 승인 2026-08-28). 예전에는 **경로**로 이었는데,
           그림을 옮기거나 이름을 바꿀 때마다 100MB 곁파일을 통째로 다시 써야 했고(실측 0.44초),
-          안 쓰면 이름 재사용 때문에 조용히 어긋났다 (`heavy_of` 의 ★★주). 열쇠는 안 바뀌므로
-          옮길 때 **색인만** 고치면 된다 (600KB · 0.01초)."""
+          안 쓰면 이름 재사용 때문에 조용히 어긋났다. 열쇠는 안 바뀌므로 옮길 때 **색인만**
+          고치면 된다 (600KB · 0.01초)."""
         d = self.dir_of(ws)
         d.mkdir(parents=True, exist_ok=True)
         heavy = {k: rec[k] for k in HEAVY_KEYS if rec.get(k) is not None}
         key = str(rec.get("key") or uuid.uuid4().hex[:12])
         rec = {**rec, "key": key}
         if heavy:
-            with (d / ENV_NAME).open("a", encoding="utf-8") as f:
-                f.write(json.dumps({"key": key, "file": rec.get("file"), **heavy}, ensure_ascii=False) + "\n")
+            with recordsdb.connect(d) as con:
+                recordsdb.put(con, key, heavy)
         light = {k: v for k, v in rec.items() if k not in HEAVY_KEYS}
         with (d / RECORDS_NAME).open("a", encoding="utf-8") as f:
             f.write(json.dumps(light, ensure_ascii=False) + "\n")
 
     def records(self, ws: str, limit: int = 0) -> list[dict]:
-        """색인 전체. ★**제한이 없다** (사용자 결정 2026-08-22) — 무거운 것을 곁파일로 뺀 뒤로
+        """색인 전체. ★**제한이 없다** (사용자 결정 2026-08-22) — 무거운 것을 따로 뺀 뒤로
         줄당 211B 라 전부 읽어도 싸다. `limit` 은 옛 부르는 쪽을 위해 남겨 둔 것이다.
 
         ★쪼개지기 전에 적힌 줄이 섞여 있을 수 있다 (마이그레이션 전 · 옛 백업을 되돌린 경우).
@@ -750,67 +734,42 @@ class Store:
           그 목록은 「파일이 없다」는 사실을 베껴 적은 것이라(실측: 1,446개 전부 파일 없음, 어긋남 0),
           spec 이 덮어써지면 1,441건을 손으로 다시 채워야 했다 (실사고 2026-08-28). 파일의 존재가
           정본이면 베낄 것도, 어긋날 것도 없다 — 휴지통에서 꺼내면 그대로 다시 보인다.
-        ★실측 256ms (2,647줄, 존재 검사 한 번씩). 부르는 쪽은 스레드로 돈다 (`server.py` 의 규칙)."""
+        ★★**있는지는 폴더 목록으로 본다** (사용자 결정 2026-09-30). 한 장씩 물으면 그림 10만 장에
+          9.5초였다 (실측). 색인에 나오는 폴더마다 목록을 **한 번씩** 읽으면 0.13초다.
+          ★윈도우처럼 대소문자를 가리지 않는다 (`normcase`) — 한 장씩 물을 때와 같은 답이다.
+        ★부르는 쪽은 스레드로 돈다 (`server.py` 의 규칙)."""
         d = self.dir_of(ws)
-        return [r for r in self.records(ws) if (d / str(r.get("file") or "")).is_file()]
+        recs = self.records(ws)
+        have: set[str] = set()
+        seen: set[str] = set()
+        for r in recs:
+            parent = str(r.get("file") or "").rpartition("/")[0]
+            if parent in seen:
+                continue
+            seen.add(parent)
+            try:
+                with os.scandir(d / parent if parent else d) as it:
+                    for e in it:
+                        if e.is_file():
+                            have.add(os.path.normcase(f"{parent}/{e.name}" if parent else e.name))
+            except OSError:
+                continue                  # 폴더째 없다 — 그 안의 줄은 전부 빠진다
+        return [r for r in recs if os.path.normcase(str(r.get("file") or "")) in have]
 
     def heavy_of(self, ws: str, file: str) -> dict:
         """그 그림의 **무거운 것**(`HEAVY_KEYS`: `resolved`·`env`·`inference`). 없으면 빈 것.
 
-        ★찾는 자리는 곁파일이고, **뒤에서부터** 본다 (같은 경로가 여러 번 적혔으면 마지막 것).
-        ★파싱하기 전에 **경로 문자열이 그 줄에 있는지**부터 본다 — 줄 하나가 수십 KB 라
-          전부 파싱하면 느리다.
+        ★색인에서 열쇠를 찾고(같은 경로가 여러 번 적혔으면 마지막 것), `records.db` 에서 그 한 장만
+          꺼낸다 (`recordsdb` 머리 주석).
         ★★**두 파일을 잇는 것은 `key` 다** (사용자 승인 2026-08-28, `append_record` 의 ★★주).
-          경로로 이으면 그림을 옮길 때마다 100MB 를 다시 써야 하고, 안 쓰면 **비워진 이름을 다른
-          그림이 다시 가져가** 조용히 어긋난다 (스트레스 2026-08-28이 잡았다).
-        ★열쇠가 없는 옛 줄은 **경로로** 찾는다 — 이전(`ensure_keys`)이 돌기 전이나, 옛 백업을
-          되돌린 파일이 그렇다.
-        ★곁파일에 없으면 색인의 옛 줄을 되짚는다 (쪼개지기 전에 적힌 그림)."""
-        d = self.dir_of(ws)
+          경로로 이으면 **비워진 이름을 다른 그림이 다시 가져가** 조용히 어긋난다
+          (스트레스 2026-08-28이 잡았다)."""
         key = self.key_of(ws, file)
-        # ★★**바이트로 훑는다** — 곁파일은 100MB 를 넘는다 (실측 112MB). 글자로 풀어 목록에 담으면
-        #   그것만으로 0.5초가 든다. 맞는 줄 **하나만** 풀면 된다.
-        want_key = f'"key": "{key}"'.encode("utf-8") if key else None
-        want_file = f'"file": "{file}"'.encode("utf-8")
-        # 무거운 것이 든 줄의 표식 — 키 목록 하나(`HEAVY_KEYS`)에서 뽑는다
-        heavy_marks = [f'"{k}"'.encode("utf-8") for k in HEAVY_KEYS]
-        for name in (ENV_NAME, RECORDS_NAME):
-            p = d / name
-            if not p.exists():
-                continue
-            # ★★**무거운 것이 든 줄**만 센다 (마지막이 이긴다). 열쇠는 같은데 내용이 없는 줄이
-            #   섞일 수 있다 — 옛 판이 남긴 자국이나 손으로 넣은 줄. 그런 줄이 마지막이라고
-            #   해서 진짜 줄을 가리면 안 된다 (실사례 2026-08-28: 되돌린 실험이 남긴 1,022줄).
-            by_key = by_file = None
-            with p.open("rb") as f:
-                for raw in f:
-                    if not any(m in raw for m in heavy_marks):
-                        continue
-                    if want_key and want_key in raw:
-                        by_key = raw
-                    elif want_file in raw:
-                        by_file = raw
-            for raw in (by_key, by_file):
-                if raw is None:
-                    continue
-                try:
-                    r = json.loads(raw.decode("utf-8"))
-                except Exception:
-                    continue
-                # ★열쇠가 있는 줄은 **열쇠로만** 잡는다 — 경로가 같아도 남의 줄일 수 있다
-                if raw is by_key:
-                    if r.get("key") != key:
-                        continue
-                elif r.get("file") != file or r.get("key"):
-                    continue
-                got = {k: r[k] for k in HEAVY_KEYS if r.get(k) is not None}
-                if got:
-                    return got
-        return {}
+        return recordsdb.get(self.dir_of(ws), key) if key else {}
 
     def key_of(self, ws: str, file: str) -> str | None:
-        """그 그림의 **열쇠** — 색인에서 찾는다 (없으면 `None`, 옛 줄이다).
-        ★색인은 작다 (실측 600KB · 줄당 211B) — 곁파일(100MB)을 훑는 것과 값이 다르다."""
+        """그 그림의 **열쇠** — 색인에서 찾는다 (없으면 `None`).
+        ★색인은 작다 (줄당 약 260B · 그림 10만 장에 24MB, 한 번 훑는 데 33ms)."""
         p = self.dir_of(ws) / RECORDS_NAME
         if not p.exists():
             return None
@@ -829,151 +788,202 @@ class Store:
         k = r.get("key")
         return str(k) if r.get("file") == file and k else None
 
-    def ensure_keys(self, ws: str) -> int:
-        """옛 줄에 **열쇠를 달아 준다** — 한 번만 돈다 (사용자 승인 2026-08-28).
-
-        색인과 곁파일을 경로로 맞대어 같은 열쇠를 심는다. 그 뒤로는 옮기거나 이름을 바꿔도
-        곁파일을 안 건드린다 (`_rewrite_paths`).
-        ★**줄을 버리지 않는다** — 못 읽는 줄은 그대로 흘려 쓴다. 임시 파일에 쓰고 바꿔치기한다.
-        ★색인에 없는 곁줄(옛 그림의 잔여)은 제 열쇠를 새로 받는다 — 아무도 안 찾지만 버리지 않는다.
-        ★이미 다 달려 있으면 아무 파일도 안 쓴다 (0 을 돌려준다).
-        ★★**곁파일을 통째로 읽지 않는다** (사용자 제보 2026-09-30: 곁파일 2.86GB 에서 부팅이 멈췄다).
-          이 함수는 부팅마다 돈다. 예전에는 할 일이 없어도 두 파일을 글자로 풀어 줄마다 파싱했고,
-          곁파일이 크면 그것만으로 몇 초가 들었다 (실측 465MB · 백엔드 7~15초). 수 GB 에서는
-          `MemoryError` 로 실패했는데, 실패하면 아무것도 안 써서 **다음 부팅에 또 같은 일을 했다.**
-          그래서 둘을 지킨다.
-          · **색인에 열쇠 없는 줄이 없으면 곁파일은 열지도 않는다.** 두 파일은 이 함수가 함께 고치고
-            (`append_record`·`split_records` 도 둘 다 열쇠를 적는다), 곁파일에 열쇠 없는 줄이 남아
-            있어도 `heavy_of` 가 경로로 찾는다.
-          · 고칠 때도 **한 줄씩** 읽고 쓴다. 곁줄은 열쇠가 맨 앞에 적히므로(`append_record`)
-            그런 줄은 풀지 않고 그대로 옮긴다."""
-        d = self.dir_of(ws)
-        idx, env = d / RECORDS_NAME, d / ENV_NAME
-        if not idx.is_file():
-            return 0
-        if not self._keyless(idx):
-            return 0
-        by_path: dict[str, str] = {}
-        added = env_added = 0
-        with self.locked(ws):
-            # ★색인이 먼저다: 곁파일만 새 열쇠를 받고 색인이 못 받으면, 다음 판이 색인에 **다른**
-            #   열쇠를 달아 둘이 영영 어긋난다. 색인만 받은 채로 멈추면 곁줄은 경로로 찾힌다.
-            tmp = idx.with_suffix(idx.suffix + ".tmp")
-            with idx.open("rb") as fin, tmp.open("wb") as fout:
-                for raw in fin:
-                    if not raw.strip():
-                        continue
-                    try:
-                        r = json.loads(raw.decode("utf-8"))
-                    except Exception:
-                        fout.write(raw if raw.endswith(b"\n") else raw + b"\n")
-                        continue
-                    if not r.get("key"):
-                        r["key"] = uuid.uuid4().hex[:12]
-                        added += 1
-                    by_path[str(r.get("file") or "")] = str(r["key"])
-                    fout.write(json.dumps(r, ensure_ascii=False).encode("utf-8") + b"\n")
-            self._replace(tmp, idx)
-            # ★고칠 줄이 없으면 곁파일은 다시 쓰지 않는다 (수 GB 를 그대로 베끼게 된다)
-            if env.is_file() and self._keyless(env):
-                tmp = env.with_suffix(env.suffix + ".tmp")
-                with env.open("rb") as fin, tmp.open("wb") as fout:
-                    for raw in fin:
-                        if not raw.strip():
-                            continue
-                        if not raw.startswith(_KEY_HEAD):
-                            try:
-                                r = json.loads(raw.decode("utf-8"))
-                            except Exception:
-                                r = None
-                            if isinstance(r, dict) and not r.get("key"):
-                                r = {"key": by_path.get(str(r.get("file") or "")) or uuid.uuid4().hex[:12], **r}
-                                env_added += 1
-                                fout.write(json.dumps(r, ensure_ascii=False).encode("utf-8") + b"\n")
-                                continue
-                        fout.write(raw if raw.endswith(b"\n") else raw + b"\n")
-                self._replace(tmp, env)
-        return added + env_added
+    # ── 옛 기록 옮기기 (부팅 때) ──────────────────────────────
+    #: 무거운 것이 든 줄의 표식 — 키 목록 하나(`HEAVY_KEYS`)에서 뽑는다
+    _HEAVY_MARKS = tuple(f'"{k}"'.encode("utf-8") for k in HEAVY_KEYS)
 
     @staticmethod
-    def _keyless(p: Path) -> bool:
-        """열쇠 없는 줄이 하나라도 있나 — 한 줄씩 본다 (파일을 통째로 올리지 않는다).
-        ★맨 앞이 열쇠인 줄은 풀지 않는다 (`_KEY_HEAD`). 나머지만 풀어 본다."""
+    def _old_key(raw: bytes) -> str:
+        """열쇠가 없던 옛 줄의 열쇠 — **줄 내용에서** 만든다. 옮기기가 중간에 끊겨 다시 돌아도 같은
+        줄은 같은 열쇠를 받는다 (새로 뽑으면 두 판의 기록이 서로 다른 열쇠로 갈린다)."""
+        return hashlib.sha1(raw.rstrip(b"\r\n")).hexdigest()[:12]
+
+    @staticmethod
+    def _heavy(r: dict) -> dict:
+        """줄에서 무거운 것만. ★레퍼런스 그림은 빼고 옮긴다 (`recordsdb.UNRECORDED`)."""
+        heavy = {k: r[k] for k in HEAVY_KEYS if r.get(k) is not None}
+        if isinstance(heavy.get("resolved"), dict):
+            heavy["resolved"] = recordsdb.recorded(heavy["resolved"])
+        return heavy
+
+    def _light_line(self, raw: bytes) -> bool:
+        """열쇠가 있고 무거운 것이 없는 색인 줄인가 — **풀지 않고** 본다 (이미 새 모양인 줄)."""
+        return self._KEY_KEY_B in raw and not any(m in raw for m in self._HEAVY_MARKS)
+
+    def records_todo(self, ws: str) -> int:
+        """옮길 옛 모양이 남았으면 그 바이트 수(진행률의 분모), 없으면 0.
+
+        옛 모양은 셋이다: 곁파일(`records-env.jsonl`)이 있다 · 색인에 무거운 것이 섞여 있다 (쪼개기 전) ·
+        색인에 열쇠 없는 줄이 있다 (열쇠를 달기 전).
+        ★부팅마다 돈다. 색인은 **바이트로** 훑고 의심 가는 줄만 풀어 본다."""
+        d = self.dir_of(ws)
+        env, idx = d / ENV_NAME, d / RECORDS_NAME
+        n = env.stat().st_size if env.is_file() else 0
+        if idx.is_file() and self._index_is_old(idx):
+            n += idx.stat().st_size
+        return n
+
+    def _index_is_old(self, p: Path) -> bool:
         with p.open("rb") as f:
             for raw in f:
-                if not raw.strip() or raw.startswith(_KEY_HEAD):
+                if not raw.strip() or self._light_line(raw):
                     continue
                 try:
                     r = json.loads(raw.decode("utf-8"))
                 except Exception:
-                    continue                  # 못 읽는 줄은 열쇠를 달 수도 없다
-                if isinstance(r, dict) and not r.get("key"):
+                    continue              # 못 읽는 줄은 고칠 수도 없다
+                if isinstance(r, dict) and (not r.get("key") or self._heavy(r)):
                     return True
         return False
 
-    def split_records(self, ws: str) -> int:
-        """색인에 남아 있는 무거운 것을 곁파일로 옮긴다. 옮긴 줄 수를 돌려준다.
+    def migrate_records(self, ws: str, tick=None) -> dict:
+        """옛 모양을 `records.db` 로 옮긴다 (사용자 결정 2026-09-30).
 
-        ★**한 번만 돈다.** 무거운 것이 든 줄이 하나도 없으면 아무 일도 안 한다.
-        ★원본을 `records-before-split.jsonl` 로 한 번 남긴다 — 이 앱은 사용자 그림 기록을
-          잃은 적이 있어(CLAUDE.md) 되돌릴 자리를 둔다. 지워도 앱은 돈다.
-        ★임시 파일에 쓰고 rename 한다 — 쓰다 죽어도 옛 파일이 온전하다.
-        ★부르는 자리는 **서버가 요청을 받기 전**이다 (`server.py` 부팅) — 그래서 옮기는 도중에
-          새 그림이 끼어들 수 없다. 생성 중이어도 앱을 다시 켜기만 하면 된다.
-        ★★**어느 파일도 통째로 읽지 않는다** (`ensure_keys` 의 ★★주와 같은 제보). 부팅마다 도는
-          훑기는 한 줄씩 보고, 무거운 이름이 안 든 줄은 풀지도 않는다. 옮길 때 이미 있던 곁파일은
-          읽어 올리지 않고 새 곁파일 뒤에 그대로 이어 붙인다."""
+        ★★부팅 때 **요청을 막고** 돈다 (`server._records_phase`). 옮기는 동안 탭을 다른 워크스페이스로
+          옮기거나 워크스페이스를 지우면 기록이 엇갈린다.
+
+        ① 색인을 훑어 경로 → 열쇠를 정한다 (열쇠 없는 줄은 `_old_key`, 같은 경로는 마지막 것)
+        ② 곁파일의 줄을 기록으로 — 열쇠가 적힌 줄은 **뒤의 것이 이기고**, 열쇠 없는 줄은 경로로 잇되
+           열쇠가 적힌 줄을 못 이긴다. 무거운 것이 없는 줄(이정표·자국)은 건너뛴다.
+           옛 `heavy_of` 가 찾던 순서 그대로다.
+        ③ 색인에 섞여 있던 무거운 것(쪼개기 전의 줄)도 기록으로 — 곁파일에 같은 열쇠가 있으면 그쪽이
+           이긴다 (옛 `heavy_of` 가 곁파일을 먼저 봤다). 색인은 가벼운 줄 + 열쇠로 다시 쓴다.
+        ④ 기록을 다시 열어 **옮긴 열쇠가 전부 있는지** 대조한다. 맞을 때만 색인을 바꿔치기하고
+           곁파일을 워크스페이스 휴지통으로 보낸다 (24시간 뒤 비워진다).
+
+        ★줄을 버리지 않는다: 못 읽는 곁줄은 `unread` 에, 못 읽는 색인 줄은 색인에 그대로 남는다.
+        ★레퍼런스 그림은 옮기지 않는다 (`_heavy`).
+        ★중간에 끊겨도 된다 — 곁파일과 옛 색인이 그대로 남아 다음 부팅에 처음부터 다시 돈다.
+          열쇠를 줄 내용에서 만들고 같은 열쇠는 덮어쓰므로 두 번 돌아도 결과가 같다.
+        ★통째로 읽지 않는다 — 한 줄씩 (사용자 제보 2026-09-30: 곁파일 2.86GB 에서 부팅이 멈췄다).
+        ★`tick(바이트)` 로 진행을 알린다 (`records_todo` 가 센 것과 같은 바이트를 센다)."""
         d = self.dir_of(ws)
-        p = d / RECORDS_NAME
-        if not p.exists():
+        env, idx = d / ENV_NAME, d / RECORDS_NAME
+        tick = tick or (lambda _n: None)
+
+        # ① 경로 → 열쇠
+        by_path: dict[str, str] = {}
+        index_old = index_heavy = False
+        if idx.is_file():
+            with idx.open("rb") as f:
+                for raw in f:
+                    if not raw.strip():
+                        continue
+                    if self._light_line(raw):
+                        k, fl = self._key_of_bytes(raw), self._file_of_bytes(raw)
+                        if k is not None and fl is not None:
+                            by_path[fl.decode("utf-8")] = k.decode("utf-8")
+                            continue
+                    try:
+                        r = json.loads(raw.decode("utf-8"))
+                    except Exception:
+                        continue
+                    if not isinstance(r, dict):
+                        continue
+                    heavy = bool(self._heavy(r))
+                    index_heavy = index_heavy or heavy
+                    index_old = index_old or heavy or not r.get("key")
+                    by_path[str(r.get("file") or "")] = str(r.get("key") or self._old_key(raw))
+
+        want: set[str] = set()        # 옮긴 열쇠 — ④ 에서 대조한다
+        keyed: set[str] = set()       # 열쇠가 적힌 곁줄에서 온 것 — 열쇠 없는 곁줄이 못 덮는다
+        unread = 0
+        tmp = idx.with_suffix(idx.suffix + ".tmp")
+        with recordsdb.connect(d) as con:
+            # ② 곁파일
+            if env.is_file():
+                with env.open("rb") as f:
+                    for i, raw in enumerate(f, 1):
+                        tick(len(raw))
+                        if not raw.strip():
+                            continue
+                        try:
+                            r = json.loads(raw.decode("utf-8"))
+                        except Exception:
+                            r = None
+                        if not isinstance(r, dict):
+                            recordsdb.keep_unread(con, raw.rstrip(b"\r\n"))
+                            unread += 1
+                            continue
+                        heavy = self._heavy(r)
+                        if not heavy:
+                            continue
+                        if r.get("key"):
+                            key = str(r["key"])
+                            keyed.add(key)
+                        else:
+                            key = by_path.get(str(r.get("file") or "")) or self._old_key(raw)
+                            if key in keyed:
+                                continue
+                        recordsdb.put(con, key, heavy)
+                        want.add(key)
+                        if i % 500 == 0:
+                            con.commit()      # ★끊겨도 다시 돌면 같은 결과다 (머리 주석)
+            side = set(want)
+            # ③ 색인
+            if index_old:
+                with idx.open("rb") as fin, tmp.open("wb") as fout:
+                    for raw in fin:
+                        tick(len(raw))
+                        if not raw.strip():
+                            continue
+                        if self._light_line(raw):
+                            fout.write(raw if raw.endswith(b"\n") else raw + b"\n")
+                            continue
+                        try:
+                            r = json.loads(raw.decode("utf-8"))
+                        except Exception:
+                            r = None
+                        if not isinstance(r, dict):
+                            fout.write(raw if raw.endswith(b"\n") else raw + b"\n")   # 못 읽는 줄은 그대로
+                            continue
+                        key = str(r.get("key") or self._old_key(raw))
+                        heavy = self._heavy(r)
+                        if heavy and key not in side:
+                            recordsdb.put(con, key, heavy)
+                            want.add(key)
+                        light = {k: v for k, v in r.items() if k not in HEAVY_KEYS}
+                        light["key"] = key
+                        fout.write(json.dumps(light, ensure_ascii=False).encode("utf-8") + b"\n")
+
+        # ④ 대조 — 다시 열어서 본다
+        missing = want - recordsdb.keys(d)
+        if missing:
+            raise RuntimeError(f"옮긴 기록 {len(missing)}건이 {recordsdb.NAME} 에 없습니다")
+        if index_old:
+            if index_heavy:
+                # ★원본을 한 번 남긴다 — 이 앱은 사용자 그림 기록을 잃은 적이 있다 (옛 `split_records` 와 같다)
+                shutil.copyfile(idx, d / PRESPLIT_NAME)
+            self._replace(tmp, idx)
+        trashed = False
+        if env.is_file():
+            trashed = bool(trash.send_at(d, [ENV_NAME])["moved"])
+        return {"moved": len(want), "unread": unread, "trashed": trashed}
+
+    def forget(self, ws: str, rels: list[str]) -> int:
+        """휴지통에서 **비워진** 그림의 무거운 기록을 뺀다 (사용자 결정 2026-09-30). 뺀 수를 돌려준다.
+
+        ★★색인 줄은 **남긴다.** 이름을 지을 때 「그 이름을 쓴 적이 있다」를 색인으로 세므로
+          (`_names_in` 의 ★★★주), 줄을 지우면 비워진 이름을 새 그림이 다시 받는다. 색인 줄은
+          가볍고(줄당 약 260B) 무거운 것은 여기서 빠진다.
+        ★폴더째 비워졌으면 그 아래 전부다. ★지금 그 자리에 파일이 있으면 건드리지 않는다 (다른 그림이다).
+        ★휴지통을 안 거치고 사라진 그림(탐색기에서 옮긴 것)은 모른다 — 되돌아올 수 있으므로 그대로 둔다."""
+        d = self.dir_of(ws)
+        gone = {r.strip("/") for r in rels if r and r.strip("/")}
+        if not gone or not (d / recordsdb.NAME).is_file():
             return 0
-        marks = [f'"{k}"'.encode("utf-8") for k in HEAVY_KEYS]
-
-        def split(raw: bytes) -> tuple[dict, dict] | None:
-            """무거운 것이 든 줄이면 (가벼운 것, 무거운 것). 아니면 None"""
-            if not any(m in raw for m in marks):
-                return None
-            try:
-                r = json.loads(raw.decode("utf-8"))
-            except Exception:
-                return None
-            if not isinstance(r, dict):
-                return None
-            heavy = {k: r[k] for k in HEAVY_KEYS if r.get(k) is not None}
-            return (r, heavy) if heavy else None
-
-        with p.open("rb") as f:
-            if not any(split(raw) for raw in f):
-                return 0
-
-        shutil.copyfile(p, d / PRESPLIT_NAME)
-        env, moved = d / ENV_NAME, 0
-        env_tmp = d / (ENV_NAME + ".tmp")
-        idx_tmp = d / (RECORDS_NAME + ".tmp")
-        with p.open("rb") as fin, env_tmp.open("wb") as fenv, idx_tmp.open("wb") as fidx:
-            for raw in fin:
-                if not raw.strip():
-                    continue
-                got = split(raw)
-                if got is None:
-                    fidx.write(raw if raw.endswith(b"\n") else raw + b"\n")   # 깨진 줄·가벼운 줄은 그대로
-                    continue
-                r, heavy = got
-                moved += 1
-                # ★열쇠로 잇는다 (`append_record` 의 ★★주) — 여기서 처음 달아 준다
-                key = str(r.get("key") or uuid.uuid4().hex[:12])
-                fenv.write(json.dumps({"key": key, "file": r.get("file"), **heavy},
-                                      ensure_ascii=False).encode("utf-8") + b"\n")
-                light = {k: v for k, v in r.items() if k not in HEAVY_KEYS}
-                light["key"] = key
-                fidx.write(json.dumps(light, ensure_ascii=False).encode("utf-8") + b"\n")
-            # ★이미 곁파일이 있으면 **뒤에 잇는다** — 새로 적힌 줄이 뒤에 와야 마지막 것이 이긴다
-            if env.exists():
-                with env.open("rb") as fold:
-                    shutil.copyfileobj(fold, fenv, 1024 * 1024)
-        self._replace(env_tmp, env)
-        self._replace(idx_tmp, p)
-        return moved
+        dead: set[str] = set()
+        for r in self.records(ws):
+            f, k = str(r.get("file") or ""), r.get("key")
+            if not f or not k:
+                continue
+            parts = f.split("/")
+            if not any("/".join(parts[:i]) in gone for i in range(1, len(parts) + 1)):
+                continue
+            if (d / f).exists():
+                continue
+            dead.add(str(k))
+        return recordsdb.forget(d, dead)
 
     def thumb_path(self, ws: str, rel: str) -> Path | None:
         """생성물의 **파생 썸네일**. 히스토리 줄·셀 그리드가 이걸 쓴다.
@@ -1151,7 +1161,7 @@ class Store:
         넣는 기능도 추가"*). 그림·레코드·썸네일 캐시가 함께 간다.
 
         ★**탭 옮기기의 축소판이다** — 다른 것은 둘뿐이다: (a) 한 워크스페이스 안이라 id 가 겹칠 일이
-          없어 새 id 를 주지 않는다 (한 spec 안에서 이미 유일하다), (b) 색인·곁파일은 줄이 오갈 곳이
+          없어 새 id 를 주지 않는다 (한 spec 안에서 이미 유일하다), (b) 색인은 줄이 오갈 곳이
           없어 **경로만 갈아 끼운다** (`_rewrite_paths` — 개명이 쓰는 그 경로).
         ★★파일이 **받는 탭의 폴더로 간다** — 자리는 `output/멀티/<탭>/<세트>/` 라 탭이 바뀌면 자리도
           바뀐다. 안 옮기면 탐색기에서는 옛 탭 밑에 있는데 앱에서는 새 탭에 보인다.
@@ -1324,11 +1334,11 @@ class Store:
           안 뜬다 (`lib/takes.ts` 는 id 로 묶는다).
         ★파일은 받는 쪽의 `output/멀티/<탭>/<세트>/` 로 간다 (`out_dir` 하나가 자리를 정한다).
           이름은 그대로 두되 이미 있으면 `next_name` 으로 번호를 새로 받는다.
-        ★색인·곁파일은 **줄 단위로 옮긴다** — 그 줄을 받는 쪽 끝에 붙이고(경로·id 만 고쳐서),
+        ★색인은 **줄 단위로 옮긴다** — 그 줄을 받는 쪽 끝에 붙이고(경로·id 만 고쳐서),
           주는 쪽에서는 그 줄을 뺀 사본으로 바꿔치기한다 (`_rewrite_paths` 와 같은 방식).
-          지우는 연산은 없다 (`test_output_safety`).
+          무거운 기록은 열쇠로 골라 받는 쪽 `records.db` 로 옮긴다. 지우는 파일 연산은 없다 (`test_output_safety`).
         ★같은 뿌리 아래의 폴더끼리라 `rename` 으로 옮긴다 — 바이트를 다시 쓰지 않는다.
-        ★속도(실측 2026-08-28, 그림 736장): rename 0.4초 + 색인·곁파일 재작성 0.3초. 화면은 이 답을
+        ★속도(실측 2026-08-28, 그림 736장): rename 0.4초 + 색인 재작성. 화면은 이 답을
           기다리지 않고 **놓는 즉시** 탭을 뺀다 (`store/workspace.ts` 의 `moveTabToWs`).
         """
         src = self.load(src_ws)
@@ -1398,14 +1408,11 @@ class Store:
         # ③ 파일·썸네일을 받는 쪽 자리로 (`_relocate` — 씬 그룹 옮기기와 같은 일이라 한곳에 있다)
         moves = self._relocate(src_ws, mine, dst_ws, str(tab.get("name") or ""), None, others)
 
-        # ④ 색인·곁파일 — 곁파일을 먼저 (`append_record` 와 같은 순서)
-        #   ★★곁파일은 **줄을 통째로 옮긴다** (워크스페이스가 갈리므로 이정표로는 못 따라간다).
-        #     같은 워크스페이스 안의 옮기기(`move_scene_group`·`renumber`)와 다른 점이다.
-        #   ★바이트로 훑는다 — 곁파일은 100MB를 넘고 줄 하나가 수십 KB 다 (`_rewrite_paths` 의 ★★주).
-        #   ★★곁줄은 **열쇠로** 고른다. 같은 워크스페이스 안의 옮기기·개명은 곁파일을 안 건드리므로
-        #     (`append_record` 의 ★★주) 거기 적힌 경로는 **옛것일 수 있다** — 경로로 고르면 그 줄을
-        #     못 찾아 환경이 주는 쪽에 남는다 (스트레스 2026-08-28이 잡았다). 열쇠가 없는 옛 줄만
-        #     경로로 고른다.
+        # ④ 색인·기록 — 색인 줄은 받는 쪽 끝에 붙이고(경로·id 만 고쳐서), 주는 쪽에서는 뺀 사본으로 바꿔치기한다
+        #   ★★순서가 안전장치다: 기록을 받는 쪽에 **먼저 베끼고**(`append_record` 와 같은 순서), 색인을
+        #     옮긴 **뒤에** 주는 쪽 기록을 뺀다. 그 사이에 멈춰도 어느 쪽 색인이든 제 기록을 찾는다
+        #     (남는 것은 아무도 안 찾는 사본뿐이다).
+        #   ★★기록은 **열쇠로** 고른다. 경로는 개명으로 바뀌어도 열쇠는 그대로다 (`append_record` 의 ★★주).
         sd = self.dir_of(src_ws)
         dd = self.dir_of(dst_ws)
         dd.mkdir(parents=True, exist_ok=True)
@@ -1415,19 +1422,19 @@ class Store:
             k, f = r.get("key"), str(r.get("file") or "")
             if k and f in moves:
                 by_key[str(k).encode("utf-8")] = moves[f]
-        for name in (ENV_NAME, RECORDS_NAME):
-            p = sd / name
-            if not p.is_file():
-                continue
-            tmp = p.with_suffix(p.suffix + ".tmp")
-            with p.open("rb") as fin, tmp.open("wb") as fout, (dd / name).open("ab") as fdst:
+        p = sd / RECORDS_NAME
+        tmp = p.with_suffix(p.suffix + ".tmp")
+        gone: list[bytes] = []          # 받는 쪽에 붙일 줄
+        keys: list[str] = []            # 함께 가는 기록의 열쇠
+        if p.is_file():
+            with p.open("rb") as fin, tmp.open("wb") as fout:
                 for line in fin:
                     if not line.strip():
                         continue
                     f = self._file_of_bytes(line)
                     k = self._key_of_bytes(line)
                     to = by_key.get(k) if k else None
-                    if to is None and f is not None and f in hit and (k is None or name == RECORDS_NAME):
+                    if to is None and f is not None and f in hit:
                         to = moves[f.decode("utf-8")]
                     if to is not None:
                         try:
@@ -1436,12 +1443,18 @@ class Store:
                             for k in ("scene_group_id", "cell_id"):
                                 if row.get(k) in remap:
                                     row[k] = remap[row[k]]
-                            fdst.write(json.dumps(row, ensure_ascii=False).encode("utf-8") + b"\n")
+                            gone.append(json.dumps(row, ensure_ascii=False).encode("utf-8") + b"\n")
+                            if row.get("key"):
+                                keys.append(str(row["key"]))
                             continue
                         except Exception:
                             pass          # ★못 읽는 줄은 주는 쪽에 **그대로 둔다**
                     fout.write(line if line.endswith(b"\n") else line + b"\n")
+            recordsdb.copy(sd, dd, keys)
+            with (dd / RECORDS_NAME).open("ab") as fdst:
+                fdst.writelines(gone)
             self._replace(tmp, p)
+            recordsdb.forget(sd, keys)
 
         # ⑤ 두 spec — 받는 쪽에 붙이고, 주는 쪽에서 뺀다 (활성 탭·그룹은 `removeTab` 과 같은 규칙)
         self._hand_selection(src, dst, moves)   # ★별표·숨김도 함께 건너간다 (그 함수의 ★주)

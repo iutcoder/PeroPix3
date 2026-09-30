@@ -22,6 +22,7 @@ import { Settings } from "./app/Settings";
 import { UpdateStrip } from "./app/UpdateStrip";
 import { TaggerStrip } from "./app/TaggerStrip";
 import { useHealth, type Health } from "./store/health";
+import { toast } from "./store/toast";
 import { sameApp } from "./lib/sameApp";
 import { Toasts } from "./app/Toasts";
 import { TipLayer } from "./components/Tip";
@@ -182,6 +183,15 @@ export function App() {
           }
           mark("백엔드");
           useHealth.getState().set(h);
+          /* ★★부팅 때 옛 생성 기록을 옮기는 동안은 **기다린다** (사용자 결정 2026-09-30, `backend/server.py`
+             의 `_records_phase`). 백엔드는 그동안 상태 확인 말고는 전부 막는다 — 워크스페이스를 읽으러
+             가면 안 된다. 옮기지 못한 워크스페이스가 있으면 알린다 (다음 실행에서 다시 한다). */
+          if (h.records?.busy && !(await waitRecords(() => alive))) {
+            if (alive) useHealth.getState().setDead(true);
+            return;
+          }
+          const failed = useHealth.getState().health?.records?.failed ?? [];
+          if (failed.length) toast(tGlobal("boot.recordsFailed", { names: failed.join(", ") }), "warn");
           /* ★★**기다리지 않는다** (실측 2026-08-27: 이 한 줄이 **0.94초**였다).
              구독 정보는 NAI 공홈에 물어보는 것이라 인터넷 왕복이 통째로 부팅 사슬에 얹혔다.
              화면이 뜨는 데 필요한 값이 아니다 — 도착하면 그때 배지가 채워진다.
@@ -628,9 +638,32 @@ function ThemeButton() {
  *  107개를 하나씩 주느라 2.6초가 더 붙지만, **1.7초는 정식 빌드에서도 그대로 남는다** —
  *  그래서 표시가 필요하다.
  *  ★기다리는 것이 무엇인지 말한다. "로딩 중"만 뜨면 멈춘 것과 구분이 안 된다. */
+/** 부팅 때 옛 생성 기록을 옮기는 동안 기다린다 (`backend/server.py` 의 `_records_phase`). 끝나면 true.
+ *  ★진행이 이어지는 동안은 **한도 없이** 기다린다. 걸리는 시간은 기록 크기에 달렸다 (5GB 에 49초 실측).
+ *  ★백엔드가 15초 동안 한 번도 답하지 않으면 그만둔다 — 부팅 대기와 같은 한도다.
+ *  ★받은 상태를 그대로 스토어에 넣는다 — 부팅 화면(`Booting`)이 그것으로 진행을 그린다. */
+async function waitRecords(alive: () => boolean): Promise<boolean> {
+  let heard = Date.now();
+  while (alive()) {
+    await new Promise((r) => setTimeout(r, 300));
+    try {
+      const h = await api<Health>("/api/health");
+      heard = Date.now();
+      useHealth.getState().set(h);
+      if (!h.records?.busy) return true;
+    } catch {
+      if (Date.now() - heard > 15_000) return false;
+    }
+  }
+  return false;
+}
+
 function Booting({ ready, dead }: { ready: boolean; dead: boolean }) {
   const t = useI18n((s) => s.t);
   const [retrying, setRetrying] = useState(false);
+  // ★옮길 것이 있을 때만 따로 보인다. 휴지통만 비우는 짧은 순간(`total` 0)은 평소 문구 그대로다
+  const rec = useHealth((s) => s.health?.records);
+  const moving = !dead && !!rec?.busy && rec.total > 0;
 
   /** ★★**막다른 길을 만들지 않는다** (사용자 제보 2026-09-16). 지금까지 이 화면에는 로그
    *  파일의 이름만 있었고, 사용자가 할 수 있는 일은 앱을 껐다 켜는 것뿐이었다. 제보자가 겪은
@@ -652,7 +685,7 @@ function Booting({ ready, dead }: { ready: boolean; dead: boolean }) {
 
   return (
     <div
-      data-booting={dead ? "dead" : ready ? "workspace" : "backend"}
+      data-booting={dead ? "dead" : moving ? "records" : ready ? "workspace" : "backend"}
       style={{ display: "grid", justifyItems: "center", gap: "var(--sp-5)", padding: "var(--sp-8)" }}
     >
       <div
@@ -671,15 +704,33 @@ function Booting({ ready, dead }: { ready: boolean; dead: boolean }) {
         P
       </div>
       {/* 남은 시간을 알 수 없으므로 왕복만 한다 — 가짜 퍼센트를 그리지 않는다.
+          ★기록을 옮기는 동안만은 **진짜 진행**(옮긴 바이트)을 그린다.
           ★**실패했으면 트랙도 그리지 않는다** (사용자 결정 2026-09-17). 빈 트랙만 남으면
             아직 무언가 진행 중인 것으로 읽히는데, 기다리기를 그만둔 자리다. */}
       {!dead && (
         <div style={{ width: 132, height: 2, borderRadius: 1, background: "var(--line)", overflow: "hidden" }}>
-          <div className="boot-bar" style={{ width: "34%", height: "100%", background: "var(--accent)" }} />
+          {moving ? (
+            <div
+              style={{
+                width: `${Math.min(100, (rec!.done / rec!.total) * 100)}%`,
+                height: "100%",
+                background: "var(--accent)",
+                transition: "width 0.3s",
+              }}
+            />
+          ) : (
+            <div className="boot-bar" style={{ width: "34%", height: "100%", background: "var(--accent)" }} />
+          )}
         </div>
       )}
       <div style={{ fontSize: "var(--text-2xs)", color: "var(--ink-dim)", textAlign: "center", lineHeight: 1.6 }}>
-        {dead ? t("boot.failed") : ready ? t("boot.workspace") : t("boot.backend")}
+        {dead
+          ? t("boot.failed")
+          : moving
+            ? t("boot.records", { n: rec!.ws, m: rec!.wsTotal })
+            : ready
+              ? t("boot.workspace")
+              : t("boot.backend")}
         {dead && (
           <>
             <br />

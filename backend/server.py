@@ -68,6 +68,7 @@ import meta
 import guide as guide_mod
 import tools as tools_mod  # ★별칭 필수 — 아래에서 `tools` 라는 이름을 Tools 인스턴스가 가져간다
 import translate as translate_mod
+import recordsdb
 import trash
 import agentlog
 import migrate_terms
@@ -257,29 +258,6 @@ def _tidy_ws_root() -> None:
 _tidy_ws_root()
 
 
-def _split_records() -> None:
-    """색인에 섞여 있는 무거운 것을 곁파일로 옮긴다 (사용자 결정 2026-08-22).
-
-    ★**요청을 받기 전**에 돈다 — 옮기는 도중에 새 그림이 끼어들 수 없다. 그래서 사용자가
-      생성 중이어도 앱을 다시 켜기만 하면 되고, 미리 멈출 필요가 없다.
-    ★한 워크스페이스가 실패해도 앱은 뜬다 — 남겨 두고 다음 부팅에 다시 시도한다
-      (`_tidy_ws_root` 와 같은 규약).
-    ★두 번째 부팅부터는 옮길 것이 없어 아무 일도 안 한다."""
-    for ws_dir in list(WS_ROOT.iterdir()) if WS_ROOT.is_dir() else []:
-        if not ws_dir.is_dir():
-            continue
-        try:
-            n = store.split_records(ws_dir.name)
-        # ★`OSError` 만 잡으면 `MemoryError` 같은 것이 임포트를 통째로 죽여 **백엔드가 안 뜬다**
-        except Exception as e:
-            print(f"[레코드] {ws_dir.name} 을 못 쪼갰습니다 ({e!r}) — 다음에 다시 시도합니다")
-            continue
-        if n:
-            print(f"[레코드] {ws_dir.name}: {n}줄의 무거운 값을 records-env.jsonl 로 옮김")
-
-
-_split_records()
-
 #: ★★**임포트만으로 사용자 데이터를 고치지 않게 하는 스위치** (실사고 2026-08-28).
 #   아래 이전들은 모듈을 **임포트하는 것만으로** 돈다 — 그런데 판정 하나가(`test_workspace`)
 #   서버를 임포트해서, 판정을 돌린 것만으로 **실제 워크스페이스 전량에 이전이 돌았다.**
@@ -292,29 +270,76 @@ _SKIP_MIGRATIONS = bool(os.environ.get("PEROPIX_SKIP_MIGRATIONS"))
 for _line in (migrate_terms.run(WS_ROOT) if not _SKIP_MIGRATIONS else []):
     print(_line)
 
-# ★★색인과 곁파일을 잇는 **열쇠**를 옛 줄에 달아 준다 (사용자 승인 2026-08-28, 한 번만 돈다).
-#   그 뒤로는 그림을 옮기거나 이름을 바꿔도 100MB 곁파일을 안 건드린다 (`Store.ensure_keys`).
-for _d in sorted(WS_ROOT.iterdir()) if WS_ROOT.is_dir() and not _SKIP_MIGRATIONS else []:
-    if _d.is_dir() and not _d.name.startswith("."):
-        try:
-            _n = store.ensure_keys(_d.name)
-            if _n:
-                print(f"[열쇠 이전] {_d.name}: {_n}줄")
-        except Exception as _e:            # ★한 워크스페이스가 실패해도 앱은 뜬다
-            # ★`repr` 로 찍는다 — `MemoryError` 는 `str` 이 비어 「실패 ()」만 남았다 (사용자 제보 2026-09-30)
-            print(f"[열쇠 이전] {_d.name}: 실패 ({_e!r})")
-
 for _line in (migrate_thumbs.run(cards, store, pins) if not _SKIP_MIGRATIONS else []):
     print(f"[썸네일 이전] {_line}")
 
 # ★휴지통은 **켤 때** 비운다 (종료 때가 아니라 — 강제 종료에서는 안 돈다, trash.py 머리 주석)
 # ★★뿌리가 넷이다 (2026-08-18, D7): 워크스페이스(+`workspaces/` 자체) · 보관함 ·
 #   바이브 캐시 · 카드 · 대화. 한 곳만 비우면 나머지 휴지통이 영영 쌓인다.
-for _batch in (trash.sweep(WS_ROOT) if not _SKIP_MIGRATIONS else []):
-    print(f"[휴지통 비움] {_batch}")
+#   ★워크스페이스 휴지통은 여기가 아니라 `_records_phase` 가 비운다 — 비운 그림의 기록을 함께 빼려면
+#     기록이 새 모양(`records.db`)으로 옮겨진 뒤여야 한다.
 for _root in ((DATA_DIR / "cards", DATA_DIR / "chats", DATA_DIR / "vibe-cache", DATA_DIR / "editor") if not _SKIP_MIGRATIONS else ()):
     for _batch in trash.sweep_at(_root):
         print(f"[휴지통 비움] {_root.name}/{_batch}")
+
+
+#: ★★부팅 때 기록을 옮기는 동안의 상태 (사용자 결정 2026-09-30). `/api/health` 가 화면에 알려 준다.
+#:  `busy` 동안은 `RecordsGate` 가 상태 확인 말고는 전부 막는다. `done`·`total` 은 바이트,
+#:  `ws`·`wsTotal` 은 몇 번째 워크스페이스인지, `failed` 는 옮기지 못한 워크스페이스 이름이다.
+_RECORDS: dict = {"busy": False, "done": 0, "total": 0, "ws": 0, "wsTotal": 0, "failed": []}
+
+
+def _records_phase() -> None:
+    """옛 기록(곁파일 `records-env.jsonl` · 쪼개기 전 색인 · 열쇠 없는 줄)을 워크스페이스마다
+    `records.db` 로 옮기고, 워크스페이스 휴지통을 비우며 비운 그림의 기록을 뺀다.
+
+    ★★**앱을 막고 돈다** (사용자 결정 2026-09-30). 옮기는 동안 탭을 다른 워크스페이스로 옮기거나
+      워크스페이스를 지우면 기록이 엇갈리고, 조수·플러그인도 같은 API 로 들어온다. 그래서 화면만이
+      아니라 백엔드가 막는다 (`RecordsGate`).
+    ★★**요청을 받기 전이 아니라 받기 시작한 뒤에** 돈다. 화면은 백엔드를 15초만 기다리는데
+      (`App.tsx`), 5GB 곁파일은 옮기는 데 49초가 든다 (실측). 백엔드는 곧바로 떠서 상태 확인에 답하고,
+      화면은 진행을 보이며 기다린다.
+    ★한 워크스페이스가 실패해도 앱은 뜬다 — 옛 파일이 그대로 남아 다음 부팅에 다시 시도한다.
+      실패한 이름은 화면이 알린다 (`failed`).
+    ★옮길 것이 없으면 휴지통만 비우고 곧바로 끝난다."""
+    try:
+        todo: list[tuple[str, int]] = []
+        for d in sorted(WS_ROOT.iterdir()) if WS_ROOT.is_dir() else []:
+            if not d.is_dir() or d.name.startswith("."):
+                continue
+            try:
+                n = store.records_todo(d.name)
+            except Exception as e:
+                say("error", "records", f"{d.name}: 옛 기록을 살피지 못했습니다 ({e!r})")
+                continue
+            if n:
+                todo.append((d.name, n))
+        _RECORDS.update(total=sum(n for _, n in todo), wsTotal=len(todo))
+
+        def tick(n: int) -> None:
+            _RECORDS["done"] += n
+
+        for i, (ws, n) in enumerate(todo):
+            _RECORDS["ws"] = i + 1
+            start, t0 = _RECORDS["done"], time.time()
+            try:
+                r = store.migrate_records(ws, tick)
+                say("info", "records", f"{ws}: 기록 {r['moved']}장을 records.db 로 옮김 · 못 읽은 줄 {r['unread']}"
+                    f" · {time.time() - t0:.1f}초")
+            # ★`OSError` 만 잡으면 `MemoryError` 같은 것이 이 단계를 통째로 죽인다.
+            #   `repr` 로 찍는다 — `MemoryError` 는 `str` 이 비어 「실패 ()」만 남았다 (사용자 제보 2026-09-30)
+            except Exception as e:
+                _RECORDS["failed"].append(ws)
+                say("error", "records", f"{ws}: 기록을 옮기지 못했습니다 ({e!r}) — 다음 실행에서 다시 합니다")
+                print(traceback.format_exc(), flush=True)
+            _RECORDS["done"] = start + n
+        for b in trash.sweep(WS_ROOT, forget=store.forget):
+            print(f"[휴지통 비움] {b}")
+    except Exception as e:
+        say("error", "records", f"기록 정리가 멈췄습니다 ({e!r})")
+        print(traceback.format_exc(), flush=True)
+    finally:
+        _RECORDS["busy"] = False
 
 app = FastAPI(title="PeroPix Backend", version=APP_VERSION)
 
@@ -413,6 +438,36 @@ class KeyGate:
         await send({"type": "http.response.body", "body": "PeroPix: 열쇠가 없습니다".encode()})
 
 
+class RecordsGate:
+    """부팅 때 기록을 옮기는 동안(`_records_phase`) **상태 확인 말고는 전부 막는다** (사용자 결정 2026-09-30).
+
+    ★화면만 막으면 조수(바깥 에이전트의 MCP)·플러그인이 같은 API 로 들어와 탭을 옮기거나
+      워크스페이스를 지울 수 있다. 그래서 백엔드가 막는다.
+    ★ASGI 층이다 — 웹소켓도 막는다 (`KeyGate` 의 ★★주와 같은 이유).
+    ★열쇠 문(`KeyGate`) **안쪽**에 선다: 앞머리가 벗겨진 경로를 보고, 열쇠 없는 요청은 여기까지 안 온다.
+    ★CORS **안쪽**에 선다: 막은 답에도 CORS 머리가 붙어 화면이 503 을 그대로 읽는다."""
+
+    #: 막는 동안에도 여는 자리 — 화면이 진행을 묻는 곳과, 부팅 중에 터진 것을 적는 곳
+    OPEN = ("/api/health", "/api/log")
+
+    def __init__(self, app_):
+        self.app = app_
+
+    async def __call__(self, scope, receive, send):
+        if (not _RECORDS["busy"] or scope["type"] not in ("http", "websocket")
+                or scope.get("path") in self.OPEN):
+            return await self.app(scope, receive, send)
+        if scope["type"] == "websocket":
+            return await send({"type": "websocket.close", "code": 1013})   # 1013 = 잠시 뒤 다시
+        await send({"type": "http.response.start", "status": 503,
+                    "headers": [(b"content-type", b"application/json; charset=utf-8")]})
+        await send({"type": "http.response.body",
+                    "body": json.dumps({"detail": "기록을 옮기는 중입니다. 잠시 뒤 다시 시도하세요."},
+                                       ensure_ascii=False).encode("utf-8")})
+
+
+# ★먼저 붙인 것이 안쪽이다 — 순서가 `RecordsGate` 머리 주석의 두 ★ 그대로다
+app.add_middleware(RecordsGate)
 # Tauri 는 tauri://localhost 오리진, 개발 중에는 Vite 가 localhost:1420.
 # ★오리진은 열어 두되 **문은 위의 열쇠가 잠근다** — 오리진 목록만으로는 프리플라이트를
 #   안 타는 요청이 새고, 열쇠는 웹페이지가 알 길이 없어 원리적으로 막힌다.
@@ -702,7 +757,9 @@ async def health():
             #   내 것인가»를 물을 수 있어야 한다 — 아니면 창은 이쪽인데 데이터는 저쪽이
             #   되고, 그게 조용히 일어난다 (실측 2026-08-08 의 포트 다툼).
             "root": str(APP_DIR), "port": CURRENT_PORT,
-            "hasLlm": bool(llm_settings().get("key"))}
+            "hasLlm": bool(llm_settings().get("key")),
+            # ★부팅 때 기록을 옮기는 중이면 화면은 이것을 보며 기다린다 (`_records_phase`)
+            "records": {**_RECORDS, "failed": list(_RECORDS["failed"])}}
 
 
 # ── 자동 업데이트 ──────────────────────────────────────────────────
@@ -1331,7 +1388,8 @@ def _light(rec: dict) -> dict:
 #  못 받는다** — 썸네일도 웹소켓도 **다른 워크스페이스에서 돌고 있는 생성**도 함께 선다.
 #  다음 둘은 반드시 스레드로 보낸다 (`asyncio.to_thread`):
 #    · 워크스페이스 **잠금을 기다리는 것** (`Store.save` — 옮기기가 1~2초 쥐고 있을 수 있다)
-#    · **파일을 통째로 읽고 쓰는 것** (색인 `records`, 곁파일 `heavy_of` — 실측 112MB)
+#    · **파일을 통째로 읽고 쓰는 것** (색인 `records` · 그림 10만 장에 24MB)
+#    · 디스크를 읽는 것 (`heavy_of` — 색인을 훑고 `records.db` 에서 한 장을 꺼낸다)
 #  ★동기(`def`) 핸들러는 FastAPI 가 알아서 스레드로 돌린다 (썸네일이 그래서 멀쩡했다).
 #    `async def` 로 적은 것만 이 규칙에 걸린다.
 @app.get("/api/workspaces/{ws}")
@@ -1401,8 +1459,7 @@ async def gallery_env(ws: str, file: str):
 
     ★없을 수 있다 — 이 기능이 생기기 전(2026-08-19)에 만든 그림은 안 남겼다.
       그때는 화면이 **그 그림이 나온 탭**에서 가져간다 (`cloneToNewTab` 의 폴백)."""
-    # ★무거운 것은 곁파일에 있다 (`workspace.ENV_NAME` 머리 주석) — 색인을 훑지 않는다
-    # ★곁파일은 통째로 읽는다 (실측 112MB) — 루프에서 읽으면 그동안 서버가 선다 (위 ★★주)
+    # ★무거운 것은 `records.db` 에 있다 (`recordsdb` 머리 주석). 디스크를 읽으므로 스레드로 (위 ★★주)
     return {"env": (await asyncio.to_thread(store.heavy_of, ws, file)).get("env")}
 
 
@@ -1782,23 +1839,6 @@ def _inference_record(inf: dict) -> dict:
     return {k: inf.get(k) for k in ("image", "name", "pick", "canvas", "ref", "keep", "crop", "aux")}
 
 
-#: ★★기록에 남기지 않는 페이로드 값 — 바이브(`reference_image_multiple`)와 정밀 레퍼런스
-#:  (`director_reference_images`)로 보낸 **그림 그 자체**다. 요청을 짤 때만 쓰이고(`nai.build_payload`)
-#:  기록에서 다시 읽는 곳이 없다 (`gallery_base` 는 `image`·`mask`, `_sent_from_record` 는 모델·프리셋만 읽는다).
-#:  ★남겨 두면 같은 레퍼런스를 쓰는 동안 그림마다 몇 MB 가 곁파일에 쌓인다
-#:  (사용자 제보 2026-09-30: records-env.jsonl 2.86GB 중 99% 가 이 값이었고 부팅이 멈췄다).
-#:  ★세기·설명 같은 짝 배열은 몇 바이트라 그대로 둔다 (어떤 설정으로 뽑았는지는 남는다).
-_UNRECORDED = ("reference_image_multiple", "director_reference_images")
-
-
-def _recorded(payload: dict) -> dict:
-    """기록에 남길 페이로드 — `_UNRECORDED` 만 뺀 얕은 사본. 보낸 페이로드는 건드리지 않는다."""
-    par = payload.get("parameters")
-    if not isinstance(par, dict) or not any(k in par for k in _UNRECORDED):
-        return payload
-    return {**payload, "parameters": {k: v for k, v in par.items() if k not in _UNRECORDED}}
-
-
 def _req_of(body: GenBody) -> nai.GenRequest:
     return nai.GenRequest(
         prompt=body.prompt,
@@ -2074,7 +2114,7 @@ async def _generate_one(body: GenBody) -> dict:
     #   방금 만든 그림이 **문자열 비교로 더 옛것**이 되어 줄 오른쪽으로 밀렸다.
     ts = datetime.now().isoformat(timespec="seconds")
     # ★records 는 append-only. resolved 에 그 시점의 요청을 남겨
-    #   나중에 spec 이 바뀌어도 재현·비교가 가능하게 한다. 레퍼런스 그림만 뺀다 (`_UNRECORDED`).
+    #   나중에 spec 이 바뀌어도 재현·비교가 가능하게 한다. 레퍼런스 그림만 뺀다 (`recordsdb.UNRECORDED`).
     store.append_record(
         body.workspace,
         {
@@ -2086,7 +2126,7 @@ async def _generate_one(body: GenBody) -> dict:
             "cell_id": body.cell_id,
             "enhance_of": body.enhance_of,
             "seed": seed,
-            "resolved": _recorded(payload),
+            "resolved": recordsdb.recorded(payload),
             # ★위에서 한 번 정한 것을 쓴다 (`shot_env` 의 ★주) — 미저장으로 돌려준 것과 같아야 한다
             "env": shot_env,
             # ★인퍼런스였으면 참조와 배치를 남긴다. 「설정 불러오기」가 이것으로 인퍼런스 칸을 되살린다 (`gallery_base`)
@@ -2142,7 +2182,7 @@ async def upscale_image(body: UpscaleBody):
     path.write_bytes(png)
     rel = store.rel(body.workspace, path)
 
-    # ★색인은 통째로 읽는다 — 무거운 것을 곁파일로 뺀 뒤로 줄당 211B 라 싸다
+    # ★색인은 통째로 읽는다 — 무거운 것을 따로 뺀 뒤로 줄당 211B 라 싸다
     rec = next(
         (r for r in await asyncio.to_thread(store.records, body.workspace) if r.get("file") == body.file),
         None,
@@ -2369,6 +2409,15 @@ async def _start_queue():
     write_mcp_endpoint()
     # ★검열 모델을 뒤에서 미리 올린다 (`censor.warm` 의 ★★주). 데몬 스레드 — 끝나기 전에 서버가 내려가도 붙잡지 않는다
     threading.Thread(target=censor.warm, name="censor-warm", daemon=True).start()
+    # ★★기록 옮기기는 **서버가 뜨는 자리**에서 건다 (`_records_phase`). 임포트 때 걸면 개발 리로드 모드의
+    #   부모 프로세스와 워커가 둘 다 돌리고, 판정이 서버를 임포트하기만 해도 돈다.
+    #   ★★**진짜로 서비스할 때만** 건다 (`PEROPIX_SERVING`, `main()` 이 켠다). 판정이 `TestClient` 로
+    #     서버를 열어도 startup 은 돈다 — 그것만으로 개발 트리의 워크스페이스가 옮겨졌다 (2026-09-30).
+    #   ★문을 먼저 닫고 스레드를 띄운다 — 거꾸로 하면 그 사이에 요청이 들어온다.
+    #   ★데몬 스레드: 옮기는 도중에 앱을 꺼도 된다 (`Store.migrate_records` 의 ★「중간에 끊겨도」).
+    if os.environ.get("PEROPIX_SERVING") and not _SKIP_MIGRATIONS:
+        _RECORDS["busy"] = True
+        threading.Thread(target=_records_phase, name="records", daemon=True).start()
 
 
 @app.on_event("shutdown")
@@ -2586,7 +2635,7 @@ def _sent_from_record(ws: str, file: str) -> dict:
       본문을 손대 놓았으면 언제나 None 이 됐다 (사용자 지적 2026-08-21).
     ★우리 워크스페이스 그림은 보낸 페이로드를 통째로 기록해 두므로 짐작할 이유가 없다.
       밖에서 가져온 그림에는 기록이 없어 예전처럼 짐작한다."""
-    # ★무거운 것은 곁파일에 있다 (`workspace.ENV_NAME` 머리 주석)
+    # ★무거운 것은 `records.db` 에 있다 (`recordsdb` 머리 주석)
     res = store.heavy_of(ws, file).get("resolved") or {}
     par = res.get("parameters") or {}
     out: dict = {}
@@ -2615,7 +2664,7 @@ def _model_from_record(ws: str, file: str) -> str:
     ★우리는 보낸 페이로드를 통째로 기록해 두므로 **우리 워크스페이스 그림은** 되살릴 수 있다.
       밖에서 가져온 그림은 기록이 없어 여전히 빈 값이다 — 그때는 화면 값이 유지된다.
     ★인페인트 결과는 `model` 이 인페인팅 id 라 원본으로 되돌려 준다 (`nai.base_model`)."""
-    # ★무거운 것은 곁파일에 있다 (`workspace.ENV_NAME` 머리 주석)
+    # ★무거운 것은 `records.db` 에 있다 (`recordsdb` 머리 주석)
     m = (store.heavy_of(ws, file).get("resolved") or {}).get("model")
     return nai.base_model(m) if isinstance(m, str) else ""
 
@@ -2636,7 +2685,7 @@ async def gallery_meta(ws: str, file: str):
             m["nai_model"] = sent["model"]
         return m
 
-    # ★곁파일 읽기(실측 112MB)와 그림 메타 읽기가 함께 있다 — 루프에서 하면 서버가 선다
+    # ★기록 읽기와 그림 메타 읽기가 함께 있다 — 루프에서 하면 서버가 선다
     #   (위 「이벤트 루프에서 하면 안 되는 일」 ★★주)
     return {"file": file, "meta": await asyncio.to_thread(read)}
 

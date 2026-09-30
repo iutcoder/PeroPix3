@@ -233,13 +233,15 @@ def restore_at(base: Path, entries: list[dict]) -> dict:
     return {"restored": back, "missing": missing, "pairs": pairs}
 
 
-def sweep_at(base: Path, hours: int = KEEP_HOURS) -> list[str]:
+def sweep_at(base: Path, hours: int = KEEP_HOURS, swept: list[str] | None = None) -> list[str]:
     """그 뿌리의 휴지통에서 오래된 것을 비운다. 지운 이름을 돌려준다 (로그용).
 
     ★★판정은 **장부의 시각**이다 (머리 주석). 옮긴 파일의 mtime 은 **원본이 만들어진 때**라,
       그것으로 세면 예전에 만든 그림이 버리자마자 사라진다.
     ★장부에 없는 것은 안 건드린다 — 사람이 직접 넣어 둔 것일 수 있다.
-    ★옛 묶음 폴더(`<지운 시각>/…`)는 예전 규칙대로 폴더 시각으로 비운다."""
+    ★옛 묶음 폴더(`<지운 시각>/…`)는 예전 규칙대로 폴더 시각으로 비운다.
+    ★`swept` 를 주면 비운 것의 **원래 자리**(뿌리 기준 상대경로)를 거기 담는다 — 워크스페이스가
+      그 그림의 기록을 뺀다 (`sweep` 의 `forget`)."""
     root = trash_root(base)
     if not root.is_dir():
         return []
@@ -262,6 +264,8 @@ def sweep_at(base: Path, hours: int = KEEP_HOURS) -> list[str]:
             elif p.exists():
                 p.unlink()
             gone.append(p.name)
+            if swept is not None and r.get("file"):
+                swept.append(str(r["file"]))
         except OSError:
             keep.append(r)
     if len(keep) != len(rows):
@@ -362,18 +366,34 @@ def listing(base: Path, limit: int = 50) -> list[dict]:
     return out
 
 
-def sweep(ws_root: Path, hours: int = KEEP_HOURS) -> list[str]:
+def sweep(ws_root: Path, hours: int = KEEP_HOURS, forget=None) -> list[str]:
     """**앱을 켤 때** 오래된 것을 비운다.
 
     ★휴지통이 워크스페이스마다 있으므로 전부 훑고, `workspaces/` 자체의 휴지통
-      (파일 관리·워크스페이스 삭제가 쓴다)도 함께 본다."""
+      (파일 관리·워크스페이스 삭제가 쓴다)도 함께 본다.
+    ★★`forget(워크스페이스 이름, [상대경로])` 를 주면 **비운 그림의 기록**을 빼게 알린다 (사용자 결정
+      2026-09-30, `Store.forget`). 휴지통에 있는 동안은 되돌릴 수 있으므로 기록을 남기고, 정말
+      없어지는 여기서 뺀다. ★실패해도 비우기는 이어 간다 — 기록이 남는 것뿐이다."""
     if not ws_root.exists():
         return []
-    gone = [f"{TRASH}/{b}" for b in sweep_at(ws_root, hours)]
+    root_swept: list[str] = []
+    gone = [f"{TRASH}/{b}" for b in sweep_at(ws_root, hours, root_swept)]
+    # 파일 관리가 버린 것은 `<워크스페이스>/<상대경로>` 로 적혀 있다
+    by_ws: dict[str, list[str]] = {}
+    for rel in root_swept:
+        ws, _, rest = rel.strip("/").partition("/")
+        if rest:
+            by_ws.setdefault(ws, []).append(rest)
     for ws_dir in ws_root.iterdir():
         if not ws_dir.is_dir() or ws_dir.name == TRASH:
             continue
-        gone += [f"{ws_dir.name}/{b}" for b in sweep_at(ws_dir, hours)]
+        swept = by_ws.get(ws_dir.name, [])
+        gone += [f"{ws_dir.name}/{b}" for b in sweep_at(ws_dir, hours, swept)]
+        if forget and swept:
+            try:
+                forget(ws_dir.name, swept)
+            except Exception as e:
+                print(f"[휴지통 비움] {ws_dir.name}: 비운 그림의 기록을 못 뺐습니다 ({e!r})")
         # ★**빈 휴지통만 남은 껍데기**도 치운다 (사용자 지적 2026-09-15). `rmdir` 은 완전히 빈
         #   폴더만 지우므로, 안이 다 비워진 뒤에도 `.trash` 한 겹 때문에 지운 워크스페이스가
         #   목록에 계속 섰다. ★내용이 조금이라도 남은 휴지통은 건드리지 않는다 — 되살릴 것이 있다.

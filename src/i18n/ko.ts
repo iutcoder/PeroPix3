@@ -4,6 +4,8 @@ export const ko: Dict = {
   boot: {
     backend: "엔진을 깨우는 중…",
     workspace: "마지막 작업을 불러오는 중…",
+    records: "생성 기록을 새 형식으로 옮기는 중… (워크스페이스 {n}/{m})",
+    recordsFailed: "생성 기록을 옮기지 못한 워크스페이스가 있습니다: {names}. 다음 실행에서 다시 시도합니다.",
     failed: "백엔드가 뜨지 않았습니다. 로그를 보세요:",
     retry: "다시 시도",
     retrying: "다시 시도하는 중…",

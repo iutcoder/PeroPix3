@@ -20,6 +20,10 @@ export type Health = {
   root?: string;
   /** 그 백엔드가 듣고 있는 포트 (진단용) */
   port?: number;
+  /** ★부팅 때 옛 생성 기록을 옮기는 중인가 (`backend/server.py` 의 `_records_phase`).
+   *  `busy` 동안 백엔드는 상태 확인 말고는 전부 막는다. `done`·`total` 은 바이트,
+   *  `ws`·`wsTotal` 은 몇 번째 워크스페이스인지, `failed` 는 옮기지 못한 워크스페이스 이름이다. */
+  records?: { busy: boolean; done: number; total: number; ws: number; wsTotal: number; failed: string[] };
 };
 
 type S = {

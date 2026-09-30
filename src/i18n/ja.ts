@@ -4,6 +4,8 @@ export const ja: Dict = {
   boot: {
     backend: "エンジンを起動中…",
     workspace: "前回のワークスペースを読み込み中…",
+    records: "生成記録を新しい形式に移行中… (ワークスペース {n}/{m})",
+    recordsFailed: "生成記録を移行できなかったワークスペースがあります: {names}。次回の起動時に再試行します。",
     failed: "バックエンドが起動しませんでした。ログをご確認ください:",
     retry: "再試行",
     retrying: "再試行中…",
