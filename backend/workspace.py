@@ -1496,6 +1496,7 @@ class Store:
         exclude_no: bool,
         src_path: Path | None = None,
         seed: int | None = None,
+        env: dict | None = None,
     ) -> dict:
         """그림 한 장을 **같은 워크스페이스의 다른 탭**으로 복사한다 (원본은 그대로).
 
@@ -1533,6 +1534,9 @@ class Store:
             "cell_id": cell_id,
             "enhance_of": None,
             "seed": int(seed if seed is not None else (old.get("seed") or 0)),
+            # ★원본의 화면 구조 (`env`) — 부르는 쪽이 찾아 준다 (`server.copy_to_tab`)
+            "env": env,
         }
         self.append_record(ws, rec)
-        return {"ok": True, "file": rel, "record": rec}
+        # ★무거운 것은 빼고 준다 (`/api/save-preview` 와 같은 규칙) — 화면은 필요할 때 `/env` 로 가져간다
+        return {"ok": True, "file": rel, "record": {k: v for k, v in rec.items() if k not in HEAVY_KEYS}}

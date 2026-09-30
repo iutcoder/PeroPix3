@@ -1510,9 +1510,15 @@ async def copy_to_tab(ws: str, body: CopyBody):
       「새 탭으로 복제」도 그림이 슬롯에 앉아야 하므로 같은 자리를 쓴다."""
     try:
         src = keep.safe_folder(KEEP_DIR, body.file) if body.from_keep else None
+        # ★★**그때 화면 구조를 물려받는다** (업스케일과 같은 이유 — `upscale` 의 `env` 주석).
+        #   없으면 복제본에서 「설정 불러오기」를 할 때 캐릭터 카드가 `#1`·`#2` 로 되살아난다.
+        #   보관함 그림은 출처 워크스페이스의 기록에서 찾는다 (`keep.origin_of`, 모르면 없다).
+        origin = keep.origin_of(KEEP_DIR, body.file) if body.from_keep else {"workspace": ws, "file": body.file}
+        env = ((await asyncio.to_thread(store.heavy_of, origin["workspace"], origin["file"])).get("env")
+               if origin else None)
         return store.copy_to_scene_group(ws, body.file, body.scene_group, body.scene_group_id, body.cell,
                                  body.cell_id, body.cell_no, body.tab,
-                                 body.exclude_slot_number, src, body.seed)
+                                 body.exclude_slot_number, src, body.seed, env)
     except ValueError as e:
         raise HTTPException(404, str(e))
 
