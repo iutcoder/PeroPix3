@@ -289,33 +289,41 @@ for _root in ((DATA_DIR / "cards", DATA_DIR / "chats", DATA_DIR / "vibe-cache", 
 _RECORDS: dict = {"busy": False, "done": 0, "total": 0, "ws": 0, "wsTotal": 0, "failed": []}
 
 
-def _records_phase() -> None:
+def _records_todo() -> list[tuple[str, int]]:
+    """옮길 옛 기록이 남은 워크스페이스와 그 바이트 수. ★싸다 — 파일 크기를 보고 색인만 바이트로 훑는다
+    (`Store.records_todo`, 그림 10만 장의 색인도 수십 ms). 그래서 서버가 뜨는 자리에서 **먼저** 센다."""
+    todo: list[tuple[str, int]] = []
+    for d in sorted(WS_ROOT.iterdir()) if WS_ROOT.is_dir() else []:
+        if not d.is_dir() or d.name.startswith("."):
+            continue
+        try:
+            n = store.records_todo(d.name)
+        except Exception as e:
+            # ★화면에도 알린다 — 로그에만 남기면 그 워크스페이스는 옮겨지지 않은 채 아무 말이 없다
+            _RECORDS["failed"].append(d.name)
+            say("error", "records", f"{d.name}: 옛 기록을 살피지 못했습니다 ({e!r})")
+            continue
+        if n:
+            todo.append((d.name, n))
+    return todo
+
+
+def _records_phase(todo: list[tuple[str, int]]) -> None:
     """옛 기록(곁파일 `records-env.jsonl` · 쪼개기 전 색인 · 열쇠 없는 줄)을 워크스페이스마다
     `records.db` 로 옮기고, 워크스페이스 휴지통을 비우며 비운 그림의 기록을 뺀다.
 
-    ★★**앱을 막고 돈다** (사용자 결정 2026-09-30). 옮기는 동안 탭을 다른 워크스페이스로 옮기거나
-      워크스페이스를 지우면 기록이 엇갈리고, 조수·플러그인도 같은 API 로 들어온다. 그래서 화면만이
-      아니라 백엔드가 막는다 (`RecordsGate`).
+    ★★**옮길 것이 있을 때만 앱을 막는다** (사용자 결정 2026-09-30). 옮기는 동안 탭을 다른 워크스페이스로
+      옮기거나 워크스페이스를 지우면 기록이 엇갈리고, 조수·플러그인도 같은 API 로 들어온다. 그래서 화면만이
+      아니라 백엔드가 막는다 (`RecordsGate`). 문을 닫는 것은 부르는 쪽이다 (startup).
+      ★옮길 것이 없는데도 막았더니 개발 리로드 때마다 그 틈에 누른 생성이 503 으로 거절됐다 (사용자 제보
+        2026-09-30: *"2장 생성했는데 다 씬에 뜨지 않음"*). 휴지통 비우기는 막지 않고 뒤에서 돈다 —
+        기록 DB 는 연결을 그때그때 열고 닫으므로 함께 써도 된다.
     ★★**요청을 받기 전이 아니라 받기 시작한 뒤에** 돈다. 화면은 백엔드를 15초만 기다리는데
       (`App.tsx`), 5GB 곁파일은 옮기는 데 49초가 든다 (실측). 백엔드는 곧바로 떠서 상태 확인에 답하고,
       화면은 진행을 보이며 기다린다.
     ★한 워크스페이스가 실패해도 앱은 뜬다 — 옛 파일이 그대로 남아 다음 부팅에 다시 시도한다.
-      실패한 이름은 화면이 알린다 (`failed`).
-    ★옮길 것이 없으면 휴지통만 비우고 곧바로 끝난다."""
+      실패한 이름은 화면이 알린다 (`failed`)."""
     try:
-        todo: list[tuple[str, int]] = []
-        for d in sorted(WS_ROOT.iterdir()) if WS_ROOT.is_dir() else []:
-            if not d.is_dir() or d.name.startswith("."):
-                continue
-            try:
-                n = store.records_todo(d.name)
-            except Exception as e:
-                # ★화면에도 알린다 — 로그에만 남기면 그 워크스페이스는 옮겨지지 않은 채 아무 말이 없다
-                _RECORDS["failed"].append(d.name)
-                say("error", "records", f"{d.name}: 옛 기록을 살피지 못했습니다 ({e!r})")
-                continue
-            if n:
-                todo.append((d.name, n))
         _RECORDS.update(total=sum(n for _, n in todo), wsTotal=len(todo))
 
         def tick(n: int) -> None:
@@ -2449,11 +2457,14 @@ async def _start_queue():
     #   부모 프로세스와 워커가 둘 다 돌리고, 판정이 서버를 임포트하기만 해도 돈다.
     #   ★★**진짜로 서비스할 때만** 건다 (`PEROPIX_SERVING`, `main()` 이 켠다). 판정이 `TestClient` 로
     #     서버를 열어도 startup 은 돈다 — 그것만으로 개발 트리의 워크스페이스가 옮겨졌다 (2026-09-30).
+    #   ★★**옮길 것이 있을 때만** 문을 닫는다 (`_records_phase` 의 ★★주). 세는 것은 싸서 여기서 한다.
     #   ★문을 먼저 닫고 스레드를 띄운다 — 거꾸로 하면 그 사이에 요청이 들어온다.
     #   ★데몬 스레드: 옮기는 도중에 앱을 꺼도 된다 (`Store.migrate_records` 의 ★「중간에 끊겨도」).
     if os.environ.get("PEROPIX_SERVING") and not _SKIP_MIGRATIONS:
-        _RECORDS["busy"] = True
-        threading.Thread(target=_records_phase, name="records", daemon=True).start()
+        todo = _records_todo()
+        if todo:
+            _RECORDS["busy"] = True
+        threading.Thread(target=_records_phase, args=(todo,), name="records", daemon=True).start()
 
 
 @app.on_event("shutdown")
