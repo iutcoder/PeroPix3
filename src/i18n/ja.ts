@@ -1243,6 +1243,8 @@ export const ja: Dict = {
     sentInpaint: "直す場所を塗って生成を押してください",
     applied: "設定を読み込みました",
     noMeta: "この画像に生成設定はありません",
+    /** 저장하지 않은 그림에서 꺼 둔 강화·업스케일의 툴팁 (`ImageActions` 의 `unsaved`) */
+    needSaved: "未保存の画像には使えません。",
     promptOf: "この画像のプロンプト",
     close: "閉じる",
     copy: "コピー",

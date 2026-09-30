@@ -14,7 +14,7 @@ import {
 import type { DragImage } from "../cards/dragStore";
 import { toggleCharCapped, useGen } from "../store/gen";
 import { useUi } from "../store/ui";
-import { useDropZone, useDragSource, useDrag } from "../cards/dragStore";
+import { savedImage, useDropZone, useDragSource, useDrag } from "../cards/dragStore";
 import { flashStyle, useFlashAt } from "../store/ui";
 import { TYPE } from "../styles/type";
 import { applyCard, dropStyleCard } from "../lib/applyCard";
@@ -49,6 +49,8 @@ function useThumbDrop(section: string, onAsk: (img: DragImage) => void) {
     kind: "image",
     dir: "image",
     prio: 5,
+    // ★썸네일은 서버가 원본 파일에서 굽는다 (`/api/pin`) — 저장하지 않은 그림은 받지 않는다
+    accepts: savedImage,
     onDrop: (d) => d.img && onAsk(d.img),
   });
   return zone;

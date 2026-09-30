@@ -22,6 +22,7 @@ import { upscaleCost } from "../lib/anlas";
 import { useCurrentSub } from "../store/sub";
 import { currentAccountId } from "../store/accounts";
 import { useWs, type Rec } from "../store/workspace";
+import { isPreviewFile, usePreviews } from "../store/previews";
 import type { ImageMeta } from "../store/gallery";
 import { sendToTagger } from "./tools/TaggerTool";
 import { FolderOpenButton } from "../components/FolderOpenButton";
@@ -42,8 +43,6 @@ export function ImageActions({
   loadMeta,
   loadEnv,
   loadBase,
-  ensureFile,
-  ensureFiles,
   hideSettings,
   dims,
   revealPath,
@@ -51,6 +50,7 @@ export function ImageActions({
   onEnhance,
   upscale,
   multi,
+  unsaved,
   onKeep,
   onConvert,
   onCensor,
@@ -68,20 +68,13 @@ export function ImageActions({
   /** 실제 해상도 — 페로픽스파이 `res-tag`. 그림을 띄우는 쪽이 `onLoad` 로 재서 준다 */
   dims?: { w: number; h: number } | null;
   /** 뿌리 기준 경로 — 있으면 「폴더 열기」가 뜬다 (페로픽스파이 📂 Folder) */
-  /** 탐색기에서 열 경로. ★함수로 주면 **누를 때** 정한다 — 미저장 그림은 그때 저장하고
-   *  새 경로를 돌려주면 된다 (`Canvas` 의 `ensureSaved`) */
+  /** 탐색기에서 열 경로. ★함수로 주면 **누를 때** 정한다 */
   revealPath?: string | (() => Promise<string | null>);
   /** ★뿌리가 자리마다 다르다 — 워크스페이스 파일은 아웃풋 루트, 보관함은 `<APP>/gallery`.
    *  버튼은 하나로 두고 **창구만** 갈아 끼운다 (몸통 모양은 둘이 같다). */
   revealApi?: string;
   /** 이 그림의 생성 설정. 없으면 「설정 불러오기」가 안 뜬다 */
   loadMeta?: () => Promise<ImageMeta | null>;
-  /** 파일이 있어야 하는 일 **앞에** 부른다 — 미저장 그림이면 저장하고 새 경로를 돌려준다.
-   *  ★없으면 지금 경로를 그대로 쓴다 (갤러리·저장된 그림). 이 갈래를 부르는 쪽이 안다. */
-  ensureFile?: () => Promise<string | null>;
-  /** 여러 장 골랐을 때(`upscale.files`)의 `ensureFile` — 미저장이 섞였으면 저장하고 **경로들**을 돌려준다.
-   *  ★없으면 `upscale.files` 를 그대로 쓴다 */
-  ensureFiles?: () => Promise<string[]>;
   /** 생성할 때 남겨 둔 **그때 구조** (`gen.ts` 의 `env`). 있으면 설정 불러오기가 이걸 먼저 쓴다 */
   loadEnv?: () => Promise<ShotEnv | null>;
   /** 그 그림을 뽑을 때의 **베이스 이미지**(i2i·인페인트). 워크스페이스 그림에만 있다 */
@@ -97,6 +90,13 @@ export function ImageActions({
    *  단추(복제·인핸스·업스케일·보관·일괄 변환·삭제)만 남긴다 — 한 장 전용(프롬프트 보기·
    *  설정 불러오기·i2i·인페인트·폴더 열기·시드)은 어느 장의 것인지 애매하다. */
   multi?: number;
+  /** ★★저장하지 않은 그림이다 (여러 장이면 하나라도). **저장 버튼 말고는 어디서도 저장하지 않는다**
+   *  (사용자 지시 2026-09-30: *"명시적으로 저장 버튼 누른 거 아니면 전부 자동 저장되면 안 됨. 저장 없이
+   *  해당 액션이 불가능하면 비활성화"*).
+   *  ★NAI 로 보내는 것(i2i·인페인트·인핸스·업스케일)과 읽기(프롬프트 보기·설정 불러오기)는 **바이트로** 돈다 —
+   *    공홈도 저장 없이 된다. 업스케일 결과는 미저장으로 원본 곁에 붙는다.
+   *  ★파일이 있어야 하는 앱 기능(Tagger·폴더 열기·보내기 메뉴의 앱 갈래)은 **꺼 두고** 툴팁으로 이유를 말한다. */
+  unsaved?: boolean;
   onKeep?: () => void | Promise<void>;
   /** 「일괄 변환으로 보내기」 — 워크스페이스 파일에만 뜻이 있다 (캔버스가 준다) */
   onConvert?: () => void | Promise<void>;
@@ -257,12 +257,25 @@ export function ImageActions({
         }))
       )
         return;
-      // ★미저장이면 **먼저 파일로 남긴다** — 업스케일은 서버가 그 파일을 연다
-      const list = many
-        ? ensureFiles ? await ensureFiles() : upscale.files!
-        : [ensureFile ? await ensureFile() : upscale.file].filter((f): f is string => !!f);
-      if (!list.length) return;
+      const list = many ? upscale.files! : [upscale.file];
       for (const f of list) {
+        // ★★미저장은 **바이트를 보내고** 결과도 미저장으로 받는다 — 저장하지 않는다 (`unsaved` 의 ★★주)
+        const pv = isPreviewFile(f) ? usePreviews.getState().items.find((x) => x.file === f) : undefined;
+        if (pv) {
+          const r = await api<{ b64: string; fmt: string; ts: string }>("/api/upscale", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ workspace: upscale.ws, b64: pv.preview.b64, account: currentAccountId() }),
+          });
+          // 원본과 같은 씬 · 같은 저장 자리 · 같은 구조 (저장된 그림의 업스케일이 원본에서 물려받는 것과 같다)
+          usePreviews.getState().add({
+            workspace: pv.ws, scene_group: pv.scene_group, scene_group_id: pv.scene_group_id,
+            cell: pv.cell, cell_id: pv.cell_id, seed: pv.seed, enhance_of: pv.enhance_of,
+            tab: pv.save.tab, cell_no: pv.save.cell_no, exclude_slot_number: pv.save.exclude_slot_number,
+            env: pv.env ?? null, b64: r.b64, fmt: r.fmt, ts: r.ts,
+          });
+          continue;
+        }
         const r = await api<{ file: string; record: Rec }>("/api/upscale", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -311,14 +324,11 @@ export function ImageActions({
    *  지금의 태거 버튼을 태거로 보내기로"*) — 결과 창구는 보조도구 › Tagger 하나다.
    *  일괄 변환으로 보내기와 같은 몸짓(`rel`)으로 싣는다. */
   const toTagger = async () => {
-    if (!upscale || busy) return;
+    if (!upscale || busy || unsaved) return;
     setBusy(true);
     try {
       // ★여러 장 골랐으면 전부 싣는다 (사용자 지시 2026-08-29: "다중 선택도 대응")
-      const files =
-        isMulti && upscale.files?.length
-          ? ensureFiles ? await ensureFiles() : upscale.files
-          : [ensureFile ? await ensureFile() : upscale.file];
+      const files = isMulti && upscale.files?.length ? upscale.files : [upscale.file];
       const items = files
         .filter((f): f is string => !!f)
         .map((f) => ({
@@ -364,9 +374,9 @@ export function ImageActions({
           <button
             data-act-tagger
             onClick={() => void toTagger()}
-            disabled={busy}
-            data-tip={t("act.tagger")}
-            style={iconBtn}
+            disabled={busy || unsaved}
+            data-tip={unsaved ? t("act.needSaved") : t("act.tagger")}
+            style={{ ...iconBtn, opacity: unsaved ? 0.45 : 1 }}
           >
             {Icon.tagger}
           </button>
@@ -479,7 +489,8 @@ export function ImageActions({
                 }).catch((e) => toast(String(e), "warn"));
               })()
             }
-            tip={t("files.reveal")}
+            disabled={unsaved}
+            tip={unsaved ? t("act.needSaved") : t("files.reveal")}
           />
         )}
         {/* ★★**「어디로 보낼까」는 한 단추로 묶는다** (사용자 지시 2026-09-04).
@@ -489,13 +500,13 @@ export function ImageActions({
         <SendMenu
           busy={busy}
           img={url ? { url, name } : undefined}
-          items={[
-            onClone && { mark: "clone", label: t("act.clone"), run: runClone },
-            onKeep && { mark: "keep", label: t("gallery.keep"), run: onKeep },
-            onConvert && { mark: "convert", label: t("tools.sendConvert"), run: onConvert },
-            onCensor && { mark: "censor", label: t("tools.sendCensor"), run: onCensor },
-            onEdit && { mark: "edit", label: t("tools.sendEdit"), run: onEdit },
-          ].filter((x): x is SendItem => !!x)}
+          items={([
+            onClone && { mark: "clone", label: t("act.clone"), run: runClone, off: unsaved },
+            onKeep && { mark: "keep", label: t("gallery.keep"), run: onKeep, off: unsaved },
+            onConvert && { mark: "convert", label: t("tools.sendConvert"), run: onConvert, off: unsaved },
+            onCensor && { mark: "censor", label: t("tools.sendCensor"), run: onCensor, off: unsaved },
+            onEdit && { mark: "edit", label: t("tools.sendEdit"), run: onEdit, off: unsaved },
+          ] as (SendItem | undefined)[]).filter((x): x is SendItem => !!x)}
         />
         {extra}
 
@@ -752,7 +763,8 @@ const btn: React.CSSProperties = {
   fontSize: "var(--text-2xs)",
 };
 
-type SendItem = { mark: string; label: string; run: () => void | Promise<void> };
+/** `off` — 꺼 둔 갈래 (저장하지 않은 그림에서 파일이 있어야 하는 것, `ImageActions` 의 `unsaved`) */
+type SendItem = { mark: string; label: string; run: () => void | Promise<void>; off?: boolean };
 
 /** 「보내기」 — 이 그림을 **다른 자리로** 보내는 갈래를 한 단추에 모은다.
  *
@@ -854,7 +866,10 @@ function SendMenu({ busy, items: given, img }: { busy: boolean; items: SendItem[
                 key={it.mark}
                 data-act-send-to={it.mark}
                 onClick={() => fire(it)}
+                disabled={it.off}
+                data-tip={it.off ? t("act.needSaved") : undefined}
                 style={{
+                  opacity: it.off ? 0.45 : 1,
                   textAlign: "left",
                   padding: "6px var(--sp-3)",
                   borderRadius: "var(--r-1)",

@@ -18,14 +18,14 @@ import { kindColor } from "../cards/kindColor";
 import { slotBlock, slotBlocksOf } from "../lib/blocks";
 import { BlockList } from "../blocks/BlockList";
 import { DropVeil } from "../cards/DropVeil";
-import { useDragSource, useDropZone } from "../cards/dragStore";
+import { savedImage, useDragSource, useDropZone } from "../cards/dragStore";
 import { askThumb } from "../cards/thumbAsk";
 import { FittedImg } from "../cards/FittedImg";
 import { useThumbView } from "./PromptSections";
 import { DragGhost } from "../cards/DragGhost";
 import { useLaneReorder, type LaneDrop } from "../lib/useReorder";
 import { useSceneFocus } from "../store/sceneFocus";
-import { removeTakes, saveTake, stepScene, stepTake, visibleTakes } from "../lib/sceneTakes";
+import { removeTakes, stepScene, stepTake, visibleTakes } from "../lib/sceneTakes";
 import { clearUndo, undoLast } from "../lib/undo";
 // ★`t` 는 **모듈 것**을 쓴다 — 이 파일 안에서 `t` 는 이벤트 대상 이름으로 자주 가려진다
 import { t as tr } from "../i18n";
@@ -967,17 +967,8 @@ export function SceneLane() {
                 takes={takesOfCell}
                 stepOf={(id) => steps[stepKey(ws, id)] ?? ""}
                 isStarred={isStarred}
-                /* ★미저장이면 **먼저 파일로 남기고** 그 경로에 켠다 (별의 ★★주) */
-                onStar={(f) =>
-                  isPreviewFile(f)
-                    ? void saveTake(f)
-                        .then((nf) => {
-                          toggleStar(nf);
-                          toast(t("scenes.savedToast", { name: nf.split("/").pop() ?? nf }));
-                        })
-                        .catch((e) => toast(String(e), "warn"))
-                    : toggleStar(f)
-                }
+                /* ★미저장은 별을 못 단다 — 별표는 파일 경로로 저장된다 (별의 ★★주) */
+                onStar={(f) => !isPreviewFile(f) && toggleStar(f)}
                 queuedOf={(cellId) => queued.filter((p) => p.cellId === cellId)}
                 /* ★★**서버가 말하는 씬**의 대기 칸에 「생성 중」을 붙인다 (2026-08-25).
                    예전에는 `queued[0]`(내 목록의 맨 앞)을 찍었는데, 배치가 겹치면 그 순서가
@@ -1338,6 +1329,8 @@ function CardGroup(p: GroupProps) {
     kind: "image",
     dir: "image",
     prio: 6,
+    // ★썸네일은 서버가 원본 파일에서 굽는다 (`/api/pin`) — 저장하지 않은 그림은 받지 않는다
+    accepts: savedImage,
     onDrop: (d) =>
       d.img && askThumb({ type: "scene-card", groupId: p.groupId, cardId: p.card.id, img: d.img }),
   });
@@ -2075,7 +2068,8 @@ function SceneRow(
                 const tap = () => {
                   // ★★미저장도 **여러 장 고르기에 든다** (사용자 지시 2026-09-30: *"자동저장을 하든
                   //   안 하든 최대한 UI 동일하게"*). 고른 것에 걸리는 일은 미저장을 먼저 저장하거나
-                  //   (강화·보관 — `SceneActions` 의 `ensureAll`) 메모리에서 뺀다 (삭제 — `removeTakes`).
+                  //   (강화·업스케일 — 바이트로 돈다) 파일이 있어야 하면 꺼 두거나(보관·보내기 — `Canvas` 의 `unsaved`)
+                  //   메모리에서 뺀다 (삭제 — `removeTakes`).
                   if (e.ctrlKey || e.metaKey) p.onPick(r.file, c.id, false);
                   else if (e.shiftKey) p.onPick(r.file, c.id, true);
                   else {
@@ -2184,11 +2178,13 @@ function SceneRow(
                    ★평소에는 **안 보이고**(`opacity: 0`), 커서를 올리거나 별이 달려 있을 때만
                      보인다 — 늘 떠 있으면 수십 장이 별 밭이 된다 (`.thumb-star` 규칙).
                    ★12px 은 썸네일 위에서 작았다 → 18px (사용자 지시 2026-08-18).
-                   ★★미저장 그림에도 붙는다 (사용자 지시 2026-09-30: *"자동저장을 하든 안 하든 최대한
-                     UI 동일하게"*). 별표는 **파일 경로**로 저장되므로, 누르면 먼저 파일로 남기고 그
-                     경로에 켠다 (`onStar` 가 가른다 — 강화·보관이 미저장을 먼저 저장하는 것과 같은 규칙). */
+                   ★★미저장 그림에도 **같은 자리에 선다**(사용자 지시 2026-09-30: *"자동저장을 하든 안 하든 최대한
+                     UI 동일하게"*). 다만 별표는 **파일 경로**로 저장되므로 미저장에서는 **꺼져 있고** 이유가
+                     툴팁으로 뜬다 — 저장 버튼 말고는 어디서도 저장하지 않는다 (같은 날 사용자 지시). */
                 <span
                   data-take-star={r.file}
+                  data-off={r.preview ? "" : undefined}
+                  data-tip={r.preview ? t("act.needSaved") : undefined}
                   onClick={(e) => {
                     e.stopPropagation();
                     p.onStar(r.file);
@@ -2198,7 +2194,8 @@ function SceneRow(
                     right: 2,
                     top: 1,
                     display: "grid",
-                    color: p.isStarred(r.file) ? "var(--warn)" : "rgba(255,255,255,0.8)",
+                    color: p.isStarred(r.file) ? "var(--warn)" : r.preview ? "rgba(255,255,255,0.35)" : "rgba(255,255,255,0.8)",
+                    cursor: r.preview ? "not-allowed" : undefined,
                     opacity: p.isStarred(r.file) ? 1 : 0,
                     /* ★★**어두운 받침을 깐다** (사용자 지적 2026-08-27: *"별표한 게 너무
                        안 보임. 일러스트 위에 있어서 일러스트랑 섞여서 보여"*). 그림자만으로는

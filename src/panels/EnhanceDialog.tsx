@@ -24,6 +24,12 @@ import { allScenes } from "../store/workspace";
 import { api } from "../lib/backend";
 import type { ImageMeta } from "../store/gallery";
 import { hasMeta, metaParams } from "../lib/metaApply";
+import { isPreviewFile, usePreviews, type PreviewTake } from "../store/previews";
+
+/** 저장하지 않은 그림이면 그 미리보기 — ★★바이트로 강화한다 (사용자 지시 2026-09-30: *"공홈은 저장 안 해도
+ *  인핸스·업스케일·i2i 전부 쓸 수 있다"* · 저장 버튼 말고는 어디서도 저장하지 않는다) */
+const previewOf = (f: string): PreviewTake | undefined =>
+  isPreviewFile(f) ? usePreviews.getState().items.find((x) => x.file === f) : undefined;
 
 /** ★Magnitude → 강도·노이즈. v2 `magnitudePresets` 원문 그대로 (index.html:23953).
  *  숫자를 바꾸면 결과가 달라진다 — "적당히 비슷한 값"으로 손대지 말 것. */
@@ -118,7 +124,8 @@ export function EnhanceDialog({
             im.onload = () => res([f, [im.naturalWidth, im.naturalHeight]]);
             // 못 읽으면 화면 값으로 둔다 — 목표 크기는 어차피 서버가 원본에서 다시 잰다
             im.onerror = () => res([f, [params.width, params.height]]);
-            im.src = imgUrl(base, ws, f);
+            const pv = previewOf(f);
+            im.src = pv ? `data:image/${pv.preview.fmt};base64,${pv.preview.b64}` : imgUrl(base, ws, f);
           }),
       ),
     ).then((pairs) => {
@@ -144,6 +151,15 @@ export function EnhanceDialog({
     void Promise.all(
       targets.map(async (f) => {
         try {
+          const pv = previewOf(f);
+          if (pv) {
+            // ★미저장은 바이트를 보내 읽는다 (`Canvas` 의 `loadMeta` 와 같다)
+            const bin = Uint8Array.from(atob(pv.preview.b64), (c) => c.charCodeAt(0));
+            const fd = new FormData();
+            fd.append("file", new Blob([bin], { type: `image/${pv.preview.fmt}` }), "preview.png");
+            const r = await api<{ meta: ImageMeta | null }>("/api/tools/meta-upload", { method: "POST", body: fd });
+            return [f, r.meta] as const;
+          }
           const r = await api<{ meta: ImageMeta | null }>(
             `/api/gallery/${encodeURIComponent(ws)}/meta?file=${encodeURIComponent(f)}`,
           );
@@ -245,7 +261,7 @@ export function EnhanceDialog({
        *  전부 보내면 다른 줄의 그림을 강화한 결과가 엉뚱한 줄에 붙는다.
        *  칸을 못 찾으면 base 의 것(지금 보는 칸)이 그대로 쓰인다 (`store/queue` enqueue 주석). */
       const cellOf = (f: string) => {
-        const id = records.find((r) => r.file === f)?.cell_id;
+        const id = (previewOf(f) ?? records.find((r) => r.file === f))?.cell_id;
         const at = id ? scenes.find((x) => x.cell.id === id) : null;
         return at ? { cell: at.cell.name, cell_id: at.cell.id } : {};
       };
@@ -255,15 +271,22 @@ export function EnhanceDialog({
       //   ★★그리고 **그 그림의 메타데이터**를 얹는다 (머리 주석). 큐는 항목의 값만 base 위에
       //     덮으므로(`server._process_job`), 메타데이터가 안 준 자리는 저절로 아래 base 의
       //     화면 값이 된다 — v2 의 `normalized?.x || 사이드바` 와 같은 결과다.
-      const jobs = targets.map((f) => ({
-        enhance_from: f,
+      const jobs = targets.map((f) => {
+        const pv = previewOf(f);
+        return {
+        /* ★★미저장은 **바이트를 싣는다** — 파일이 없다. 구조(`env`)도 서버가 기록에서 못 찾으므로 들고 있던 것을
+           함께 보낸다 (저장된 그림은 서버가 원본 기록에서 물려받는다, `server._generate_one` 의 `shot_env`).
+           ★출처(`enhance_of`)는 미저장의 표식(`preview:3`)을 남기지 않는다 — 새로고침하면 사라지는 이름이다. */
+        ...(pv
+          ? { enhance_b64: pv.preview.b64, enhance_of: pv.enhance_of ?? null, env: pv.env ?? null }
+          : { enhance_from: f, enhance_of: records.find((r) => r.file === f)?.enhance_of || f }),
         enhance_scale: scaleOf(f),
-        enhance_of: records.find((r) => r.file === f)?.enhance_of || f,
         base_strength: useStrength,
         base_noise: useNoise,
         ...cellOf(f),
         ...metaJob(metas?.[f] ?? null),
-      }));
+        };
+      });
       // ★창을 **먼저** 닫는다 (사용자 지적 2026-08-14: 다 될 때까지 안 꺼졌다).
       //   큐는 보내기 전에 대기 칸을 미리 잡아 두므로, 닫자마자 그 자리가 보인다.
       onClose();

@@ -603,6 +603,9 @@ class GenBody(BaseModel):
     # ★강화의 **원본 파일 경로**. 주면 서버가 그 파일을 읽어 베이스 이미지로 쓴다 —
     #   화면이 4.6MB base64 를 실어 보내지 않아도 되고, 배치로 여러 장을 돌릴 수 있다.
     enhance_from: str | None = None
+    # ★강화할 그림의 **바이트**(base64) — 파일이 없는 그림(저장하지 않은 그림)일 때 `enhance_from` 대신 싣는다
+    #   (사용자 지시 2026-09-30: *"공홈은 저장 안 해도 인핸스·업스케일·i2i 전부 쓸 수 있다"*).
+    enhance_b64: str | None = None
     # 1.0 이면 그대로, 1.5 면 그 배로 키워서 (64 배수로 맞춘다)
     enhance_scale: float = 1.0
     # ★타일 인페인트(Focused) — 원본 좌표계의 **크롭 사각형**. 있으면 그 자리만 잘라 보낸다.
@@ -1905,14 +1908,18 @@ async def _generate_one(body: GenBody) -> dict:
     #     (1216×832 ×1.5 는 1824×1248 이 아니라 **1856×1280**).
     #   ★고치는 대상은 `body` 가 아니라 **`req`** 다 — `req` 는 이미 만들어졌으므로 `body` 를
     #     고쳐 봐야 페이로드에 안 들어간다. 예전에 그래서 **강화가 조용히 txt2img 로 나갔다.**
-    if body.enhance_from:
-        src = store.file_path(body.workspace, body.enhance_from)
-        if not src:
-            raise HTTPException(404, "강화할 그림을 찾지 못했습니다")
-        with Image.open(src) as _im:
+    if body.enhance_from or body.enhance_b64:
+        if body.enhance_from:
+            src = store.file_path(body.workspace, body.enhance_from)
+            if not src:
+                raise HTTPException(404, "강화할 그림을 찾지 못했습니다")
+            raw = src.read_bytes()
+        else:
+            raw = base64.b64decode(body.enhance_b64)
+        with Image.open(io.BytesIO(raw)) as _im:
             w, h = _im.size
         sc = max(1.0, float(body.enhance_scale or 1.0))
-        req.base_image = base64.b64encode(src.read_bytes()).decode()
+        req.base_image = base64.b64encode(raw).decode()
         req.base_mode = "img2img"
         req.base_mask = ""
         req.enhance = True
@@ -2149,10 +2156,13 @@ async def _generate_one(body: GenBody) -> dict:
 
 
 class UpscaleBody(BaseModel):
-    """이미 만든 그림 한 장을 4배로 키운다. **파일 경로만** 싣는다 (바이트는 서버가 읽는다)."""
+    """이미 만든 그림 한 장을 4배로 키운다. 파일이면 **경로만** 싣는다 (바이트는 서버가 읽는다)."""
 
     workspace: str
-    file: str
+    file: str | None = None
+    #: ★파일이 없는 그림(저장하지 않은 그림)의 바이트 — 주면 결과도 **파일로 안 남기고** 돌려준다
+    #:  (사용자 지시 2026-09-30: 저장 버튼을 누른 것이 아니면 어디서도 저장하지 않는다)
+    b64: str | None = None
     #: 버전 뿌리 — 없으면 이 파일이 뿌리다 (강화와 같은 자리를 쓴다)
     enhance_of: str | None = None
     #: 어느 NAI 계정으로 (`GenBody.account` 와 같다)
@@ -2168,20 +2178,28 @@ async def upscale_image(body: UpscaleBody):
     ★생성 파이프라인을 타지 않는다 — 프롬프트도 시드도 없는 별개 호출이다.
     ★★2026-08-21 재배포로 **배율을 우리가 못 정한다** — 서버가 정한다 (`nai.upscale`).
       「4배」라는 말을 화면·문구에 새로 박지 말 것."""
-    src = store.file_path(body.workspace, body.file)
-    if not src or not src.exists():
+    src = store.file_path(body.workspace, body.file) if body.file else None
+    if body.b64:
+        raw = base64.b64decode(body.b64)
+    elif src and src.exists():
+        raw = src.read_bytes()
+    else:
         raise HTTPException(404, "업스케일할 그림을 찾지 못했습니다")
-    with Image.open(src) as im:
+    with Image.open(io.BytesIO(raw)) as im:
         w, h = im.size
     # ★공홈도 이 한계에서 버튼을 막는다. 보내 봐야 거절이라 여기서 끊는다
     if w * h > nai.UPSCALE_MAX_PX:
         raise HTTPException(400, f"3MP 보다 큰 그림은 업스케일할 수 없습니다 ({w}x{h})")
 
-    b64 = base64.b64encode(src.read_bytes()).decode()
     try:
-        png = await nai.upscale(b64, w, h, nai_token(body.account))
+        png = await nai.upscale(base64.b64encode(raw).decode(), w, h, nai_token(body.account))
     except RuntimeError as e:
         raise HTTPException(502, str(e))
+    if body.b64:
+        # ★저장하지 않은 그림의 결과는 **미리보기로** 돌려준다 — 화면이 원본 곁(같은 씬)에 미저장으로 얹는다
+        return {"ok": True, "file": None, "b64": base64.b64encode(png).decode(), "fmt": "png",
+                "size": [w * 4, h * 4], "workspace": body.workspace,
+                "ts": datetime.now().isoformat(timespec="seconds")}
 
     # 원본과 **같은 폴더**에 남긴다 — 버전이라 자리가 갈리면 찾기 어렵다.
     # ★접두를 따로 둔다(`up_001.png`) — 세트 탭의 셀 번호(`003_002.png`)와 섞이면

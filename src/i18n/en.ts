@@ -1245,6 +1245,8 @@ export const en = {
     sentInpaint: "Paint the area to redraw, then press Generate",
     applied: "Settings loaded",
     noMeta: "This image carries no generation settings",
+    /** 저장하지 않은 그림에서 꺼 둔 강화·업스케일의 툴팁 (`ImageActions` 의 `unsaved`) */
+    needSaved: "Not available for unsaved images.",
     promptOf: "Prompt of this image",
     close: "Close",
     copy: "Copy",

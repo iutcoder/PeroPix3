@@ -1274,6 +1274,8 @@ export const ko: Dict = {
     sentInpaint: "고칠 자리를 칠하고 생성을 누르세요",
     applied: "설정을 가져왔습니다",
     noMeta: "이 그림에는 생성 설정이 없습니다",
+    /** 저장하지 않은 그림에서 꺼 둔 강화·업스케일의 툴팁 (`ImageActions` 의 `unsaved`) */
+    needSaved: "저장하지 않은 그림에는 쓸 수 없습니다.",
     promptOf: "이 그림의 프롬프트",
     close: "닫기",
     copy: "복사",
