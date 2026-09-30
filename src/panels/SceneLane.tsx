@@ -18,7 +18,7 @@ import { kindColor } from "../cards/kindColor";
 import { slotBlock, slotBlocksOf } from "../lib/blocks";
 import { BlockList } from "../blocks/BlockList";
 import { DropVeil } from "../cards/DropVeil";
-import { savedImage, useDragSource, useDropZone } from "../cards/dragStore";
+import { useDragSource, useDropZone } from "../cards/dragStore";
 import { askThumb } from "../cards/thumbAsk";
 import { FittedImg } from "../cards/FittedImg";
 import { useThumbView } from "./PromptSections";
@@ -1329,8 +1329,6 @@ function CardGroup(p: GroupProps) {
     kind: "image",
     dir: "image",
     prio: 6,
-    // ★썸네일은 서버가 원본 파일에서 굽는다 (`/api/pin`) — 저장하지 않은 그림은 받지 않는다
-    accepts: savedImage,
     onDrop: (d) =>
       d.img && askThumb({ type: "scene-card", groupId: p.groupId, cardId: p.card.id, img: d.img }),
   });

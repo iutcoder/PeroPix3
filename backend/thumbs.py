@@ -33,6 +33,7 @@ PeroPixfy 의 `get_thumbnail_path` 와 같은 방식이고, 히스토리 줄이 
 from __future__ import annotations
 
 import hashlib
+import io
 import re
 from pathlib import Path
 
@@ -99,3 +100,24 @@ class Pins:
         if dst.exists():
             return tid
         return tid if derive(src, dst) else None
+
+    def pin_bytes(self, raw: bytes) -> str | None:
+        """파일이 없는 그림(저장하지 않은 그림)을 고정 썸네일로 굳힌다. tid 는 **내용**에서 — 같은 그림이면 같은 tid."""
+        tid = self.tid_of("bytes|" + hashlib.sha1(raw).hexdigest())
+        dst = self.root / f"{tid}.webp"
+        if dst.exists():
+            return tid
+        from PIL import Image
+
+        try:
+            with Image.open(io.BytesIO(raw)) as im:
+                im.thumbnail((MAX_SIDE, MAX_SIDE), Image.Resampling.LANCZOS)
+                if im.mode not in ("RGB", "RGBA"):
+                    im = im.convert("RGBA" if "A" in im.getbands() else "RGB")
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                tmp = dst.with_suffix(".tmp")
+                im.save(tmp, "WEBP", quality=QUALITY, method=4)
+            tmp.replace(dst)
+        except Exception:
+            return None
+        return tid

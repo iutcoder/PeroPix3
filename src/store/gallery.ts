@@ -5,6 +5,7 @@ import { toast, undoToast } from "./toast";
 import { loadTags } from "../lib/tagData";
 import { isArtist, normTag, tallyTags, type IndexEntry, type TagHit } from "../lib/tagSearch";
 import { useUi } from "./ui";
+import { previewName, previewOf } from "./previews";
 
 /** 갤러리 — 워크스페이스에 쌓인 그림을 훑어 본다.
  *
@@ -381,6 +382,16 @@ export const useGallery = create<S>((set, get) => ({
   },
 
   async keep(ws, file, folder = "") {
+    /* ★★미저장 그림은 **데이터로 들인다** (사용자 지시 2026-09-30: 저장하지 않고 되는 기능은 다 켠다).
+       밖에서 떨군 그림과 같은 창구다 (`/api/keep/import`) — 워크스페이스에는 파일이 안 생긴다.
+       ★출처 표에는 안 적힌다 (적을 파일이 없다). 그래서 보관함에서 「새 탭으로 복제」하면 메타데이터로 세운다. */
+    const pv = previewOf(file);
+    if (pv)
+      return await api<{ file: string }>(`/api/keep/import`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ data: pv.preview.b64, name: previewName(pv), folder }),
+      });
     return await api<{ file: string }>(`/api/keep/save`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },

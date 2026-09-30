@@ -3,7 +3,6 @@ import { create } from "zustand";
 import type { AnyCard, CardKind } from "../store/cards";
 import type { LibItem } from "../store/blockLib";
 import type { Block } from "../lib/blocks";
-import { isPreviewFile } from "../store/previews";
 
 /** 카드 드래그 — **포인터 이벤트로 직접 구현한다.**
  *
@@ -71,8 +70,6 @@ type Zone = {
   dir: DragDir;
   prio: number;
   rect: () => DOMRect | null;
-  /** 이 끌기를 받나 — 없으면 종류만 맞으면 받는다 (`useDropZone` 의 `accepts`) */
-  accepts?: (d: Dragging) => boolean;
   onDrop: (d: Dragging) => void;
 };
 
@@ -109,7 +106,7 @@ export const useDrag = create<S>((set, get) => ({
     if (!drag) return;
     let hit: Zone | null = null;
     for (const z of zones) {
-      if (!z.kinds.includes(drag.kind) || z.dir !== drag.dir || (z.accepts && !z.accepts(drag))) continue;
+      if (!z.kinds.includes(drag.kind) || z.dir !== drag.dir) continue;
       const r = z.rect();
       if (!r) continue;
       if (x < r.left || x > r.right || y < r.top || y > r.bottom) continue;
@@ -150,10 +147,6 @@ function rehit() {
 }
 
 /** 드롭 존 등록 — 반환한 ref 를 DOM 요소에 붙인다. */
-/** 파일로 있는 그림만 받는다 — 저장하지 않은 그림(`preview:3`)은 거절한다 (`useDropZone` 의 `accepts`).
- *  ★서버가 **원본 파일**에서 굽거나 옮기는 자리(보관·썸네일)에 건다. 바이트로 되는 자리(이미지 입력)에는 안 건다. */
-export const savedImage = (d: Dragging): boolean => !d.img || !isPreviewFile(d.img.file);
-
 export function useDropZone(opts: {
   id: string;
   /** 받는 끌기의 종류. 여럿이면 목록으로 준다 (이미지 입력 칸은 `image` 와 `imageInput` 을 둘 다 받는다) */
@@ -167,10 +160,6 @@ export function useDropZone(opts: {
    *    판정이 순수 사각형 겹침이라 잘려 안 보이는 부분까지 유효해지기 때문이다
    *    (사용자 지시 2026-08-19: "해당 카드가 받을 수 있게 노출된 상태일 때만"). */
   clip?: React.RefObject<HTMLElement | null>;
-  /** ★종류가 맞아도 **이 끌기는 안 받는다**를 가른다 — 안 받으면 밝아지지도 않고 놓아도 아무 일이 없다.
-   *  파일이 있어야 하는 자리가 저장하지 않은 그림을 거절할 때 쓴다 (사용자 지시 2026-09-30: 저장 없이
-   *  불가능한 동작은 비활성화). */
-  accepts?: (d: Dragging) => boolean;
   onDrop: (d: Dragging) => void;
 }) {
   const ref = useRef<HTMLDivElement | null>(null);
@@ -178,8 +167,6 @@ export function useDropZone(opts: {
   //  — 등록/해제를 매 렌더 반복하면 드래그 중에 존이 사라진다
   const cb = useRef(opts.onDrop);
   cb.current = opts.onDrop;
-  const acc = useRef(opts.accepts);
-  acc.current = opts.accepts;
 
   const { id, dir = "apply", prio = 0 } = opts;
   // ★목록은 렌더마다 새로 만들어지므로 글자로 묶어 딸림값에 넣는다 (배열을 넣으면 매 렌더 다시 등록된다)
@@ -206,16 +193,13 @@ export function useDropZone(opts: {
           if (right <= left || bottom <= top) return null;
           return new DOMRect(left, top, right - left, bottom - top);
         },
-        accepts: (d) => !acc.current || acc.current(d),
         onDrop: (d) => cb.current(d),
       }),
     [id, kindKey, dir, prio],
   );
 
   const over = useDrag((s) => s.over === id);
-  const active = useDrag(
-    (s) => !!s.drag && kindKey.split(",").includes(s.drag.kind) && s.drag.dir === dir && (!acc.current || acc.current(s.drag)),
-  );
+  const active = useDrag((s) => !!s.drag && kindKey.split(",").includes(s.drag.kind) && s.drag.dir === dir);
   return { ref, over, active };
 }
 

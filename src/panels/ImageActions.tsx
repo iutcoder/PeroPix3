@@ -22,7 +22,7 @@ import { upscaleCost } from "../lib/anlas";
 import { useCurrentSub } from "../store/sub";
 import { currentAccountId } from "../store/accounts";
 import { useWs, type Rec } from "../store/workspace";
-import { isPreviewFile, usePreviews } from "../store/previews";
+import { droppedOf, previewOf, usePreviews } from "../store/previews";
 import type { ImageMeta } from "../store/gallery";
 import { sendToTagger } from "./tools/TaggerTool";
 import { FolderOpenButton } from "../components/FolderOpenButton";
@@ -93,9 +93,10 @@ export function ImageActions({
   /** ★★저장하지 않은 그림이다 (여러 장이면 하나라도). **저장 버튼 말고는 어디서도 저장하지 않는다**
    *  (사용자 지시 2026-09-30: *"명시적으로 저장 버튼 누른 거 아니면 전부 자동 저장되면 안 됨. 저장 없이
    *  해당 액션이 불가능하면 비활성화"*).
-   *  ★NAI 로 보내는 것(i2i·인페인트·인핸스·업스케일)과 읽기(프롬프트 보기·설정 불러오기)는 **바이트로** 돈다 —
-   *    공홈도 저장 없이 된다. 업스케일 결과는 미저장으로 원본 곁에 붙는다.
-   *  ★파일이 있어야 하는 앱 기능(Tagger·폴더 열기·보내기 메뉴의 앱 갈래)은 **꺼 두고** 툴팁으로 이유를 말한다. */
+   *  ★저장 없이 되는 것은 **다 켠다** (같은 날 사용자 지시). NAI 로 보내는 것(i2i·인페인트·인핸스·업스케일)과
+   *    읽기(프롬프트 보기·설정 불러오기)는 바이트로, 보조도구·보관·복제는 데이터로 돈다 (`Canvas` 의 ★★주).
+   *    업스케일 결과는 미저장으로 원본 곁에 붙는다.
+   *  ★파일 자체가 있어야 하는 **폴더 열기만** 꺼 두고 툴팁으로 이유를 말한다. */
   unsaved?: boolean;
   onKeep?: () => void | Promise<void>;
   /** 「일괄 변환으로 보내기」 — 워크스페이스 파일에만 뜻이 있다 (캔버스가 준다) */
@@ -260,7 +261,7 @@ export function ImageActions({
       const list = many ? upscale.files! : [upscale.file];
       for (const f of list) {
         // ★★미저장은 **바이트를 보내고** 결과도 미저장으로 받는다 — 저장하지 않는다 (`unsaved` 의 ★★주)
-        const pv = isPreviewFile(f) ? usePreviews.getState().items.find((x) => x.file === f) : undefined;
+        const pv = previewOf(f);
         if (pv) {
           const r = await api<{ b64: string; fmt: string; ts: string }>("/api/upscale", {
             method: "POST",
@@ -324,17 +325,13 @@ export function ImageActions({
    *  지금의 태거 버튼을 태거로 보내기로"*) — 결과 창구는 보조도구 › Tagger 하나다.
    *  일괄 변환으로 보내기와 같은 몸짓(`rel`)으로 싣는다. */
   const toTagger = async () => {
-    if (!upscale || busy || unsaved) return;
+    if (!upscale || busy) return;
     setBusy(true);
     try {
       // ★여러 장 골랐으면 전부 싣는다 (사용자 지시 2026-08-29: "다중 선택도 대응")
       const files = isMulti && upscale.files?.length ? upscale.files : [upscale.file];
-      const items = files
-        .filter((f): f is string => !!f)
-        .map((f) => ({
-          name: f.split("/").pop() ?? f,
-          rel: `${upscale.ws}/${f}`,
-        }));
+      // ★미저장은 데이터로 싣는다 (`droppedOf`)
+      const items = files.filter((f): f is string => !!f).map((f) => droppedOf(upscale.ws, f));
       if (items.length) sendToTagger(items);
     } finally {
       setBusy(false);
@@ -374,9 +371,9 @@ export function ImageActions({
           <button
             data-act-tagger
             onClick={() => void toTagger()}
-            disabled={busy || unsaved}
-            data-tip={unsaved ? t("act.needSaved") : t("act.tagger")}
-            style={{ ...iconBtn, opacity: unsaved ? 0.45 : 1 }}
+            disabled={busy}
+            data-tip={t("act.tagger")}
+            style={iconBtn}
           >
             {Icon.tagger}
           </button>
@@ -500,13 +497,13 @@ export function ImageActions({
         <SendMenu
           busy={busy}
           img={url ? { url, name } : undefined}
-          items={([
-            onClone && { mark: "clone", label: t("act.clone"), run: runClone, off: unsaved },
-            onKeep && { mark: "keep", label: t("gallery.keep"), run: onKeep, off: unsaved },
-            onConvert && { mark: "convert", label: t("tools.sendConvert"), run: onConvert, off: unsaved },
-            onCensor && { mark: "censor", label: t("tools.sendCensor"), run: onCensor, off: unsaved },
-            onEdit && { mark: "edit", label: t("tools.sendEdit"), run: onEdit, off: unsaved },
-          ] as (SendItem | undefined)[]).filter((x): x is SendItem => !!x)}
+          items={[
+            onClone && { mark: "clone", label: t("act.clone"), run: runClone },
+            onKeep && { mark: "keep", label: t("gallery.keep"), run: onKeep },
+            onConvert && { mark: "convert", label: t("tools.sendConvert"), run: onConvert },
+            onCensor && { mark: "censor", label: t("tools.sendCensor"), run: onCensor },
+            onEdit && { mark: "edit", label: t("tools.sendEdit"), run: onEdit },
+          ].filter((x): x is SendItem => !!x)}
         />
         {extra}
 
@@ -763,8 +760,7 @@ const btn: React.CSSProperties = {
   fontSize: "var(--text-2xs)",
 };
 
-/** `off` — 꺼 둔 갈래 (저장하지 않은 그림에서 파일이 있어야 하는 것, `ImageActions` 의 `unsaved`) */
-type SendItem = { mark: string; label: string; run: () => void | Promise<void>; off?: boolean };
+type SendItem = { mark: string; label: string; run: () => void | Promise<void> };
 
 /** 「보내기」 — 이 그림을 **다른 자리로** 보내는 갈래를 한 단추에 모은다.
  *
@@ -866,10 +862,7 @@ function SendMenu({ busy, items: given, img }: { busy: boolean; items: SendItem[
                 key={it.mark}
                 data-act-send-to={it.mark}
                 onClick={() => fire(it)}
-                disabled={it.off}
-                data-tip={it.off ? t("act.needSaved") : undefined}
                 style={{
-                  opacity: it.off ? 0.45 : 1,
                   textAlign: "left",
                   padding: "6px var(--sp-3)",
                   borderRadius: "var(--r-1)",

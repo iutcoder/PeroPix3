@@ -1,6 +1,7 @@
 import { create } from "zustand";
 import { api } from "../lib/backend";
 import { localTs, type Rec } from "../lib/takes";
+import type { Dropped } from "../lib/dropImages";
 
 /** **미저장 그림** — 「자동 저장」을 껐을 때 나온 결과 (v2 `auto_save` 이식 2026-08-18).
  *
@@ -137,6 +138,23 @@ export const usePreviews = create<S>((set, get) => ({
     return r.record;
   },
 }));
+
+/** 그 미저장 그림 (파일이면 없다) */
+export const previewOf = (file: string): PreviewTake | undefined =>
+  isPreviewFile(file) ? usePreviews.getState().items.find((x) => x.file === file) : undefined;
+
+/** 미저장 그림을 밖으로 보낼 때 붙이는 이름 — 보관함·보조도구 목록에 이 이름으로 뜬다 */
+export const previewName = (p: PreviewTake): string => `${p.cell || "image"}_${p.seed}.${p.preview.fmt}`;
+
+/** ★★보조도구(Tagger·검열·일괄 변환·이미지 편집)로 보낼 한 장 — 파일이면 경로, **미저장이면 데이터**를 싣는다
+ *  (사용자 지시 2026-09-30: 저장하지 않고 되는 기능은 다 켠다 · 저장 버튼 말고는 어디서도 저장하지 않는다).
+ *  ★받는 쪽은 밖에서 떨군 그림과 같은 갈래로 읽는다 (`Dropped.data`, 서버 `tools._read`). */
+export function droppedOf(ws: string, file: string): Dropped {
+  const pv = previewOf(file);
+  return pv
+    ? { name: previewName(pv), data: `data:image/${pv.preview.fmt};base64,${pv.preview.b64}` }
+    : { name: file.split("/").pop() ?? file, rel: `${ws}/${file}` };
+}
 
 /** 저장된 결과 + 미저장 그림을 **한 목록으로** 만든다.
  *

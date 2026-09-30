@@ -24,12 +24,9 @@ import { allScenes } from "../store/workspace";
 import { api } from "../lib/backend";
 import type { ImageMeta } from "../store/gallery";
 import { hasMeta, metaParams } from "../lib/metaApply";
-import { isPreviewFile, usePreviews, type PreviewTake } from "../store/previews";
-
-/** 저장하지 않은 그림이면 그 미리보기 — ★★바이트로 강화한다 (사용자 지시 2026-09-30: *"공홈은 저장 안 해도
- *  인핸스·업스케일·i2i 전부 쓸 수 있다"* · 저장 버튼 말고는 어디서도 저장하지 않는다) */
-const previewOf = (f: string): PreviewTake | undefined =>
-  isPreviewFile(f) ? usePreviews.getState().items.find((x) => x.file === f) : undefined;
+// ★★저장하지 않은 그림은 바이트로 강화한다 (사용자 지시 2026-09-30: *"공홈은 저장 안 해도 인핸스·업스케일·i2i
+//   전부 쓸 수 있다"* · 저장 버튼 말고는 어디서도 저장하지 않는다)
+import { previewOf } from "../store/previews";
 
 /** ★Magnitude → 강도·노이즈. v2 `magnitudePresets` 원문 그대로 (index.html:23953).
  *  숫자를 바꾸면 결과가 달라진다 — "적당히 비슷한 값"으로 손대지 말 것. */

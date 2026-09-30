@@ -13,6 +13,7 @@ import { wrapSetTabInCard } from "../lib/sceneCards";
 export { takesOf, takesOfScene, dedupeByFile, type Rec } from "../lib/takes";
 import { dedupeByFile, takesOf } from "../lib/takes";
 import type { Rec } from "../lib/takes";
+import { previewOf, usePreviews } from "./previews";
 import { moveTo } from "../lib/moveTo";
 import { planDelete, type DelPlan, type DelTarget } from "../lib/delPlan";
 export type { DelPlan, DelTarget } from "../lib/delPlan";
@@ -1292,8 +1293,13 @@ export const useWs = create<S>((set, get) => ({
     //   (`/api/keep/origin`). 출처를 모르는 보관함 그림은 찾아볼 자리가 아예 없다.
     const origin = o.from === "keep" ? (o.origin ?? null) : { ws: current, file };
     const local = origin?.ws === current;
-    const rec = local ? records.find((r) => r.file === origin!.file) : undefined;
-    const saved = origin
+    /* ★★미저장 그림은 파일도 기록도 없다 — 구조는 **들고 있는 것**(`PreviewTake.env`)을 쓰고, 새 탭에도
+       **미저장으로** 옮긴다 (사용자 지시 2026-09-30: 저장하지 않고 되는 기능은 다 켠다 · 저장 버튼 말고는 저장하지 않는다) */
+    const pv = o.from === "keep" ? undefined : previewOf(file);
+    const rec = pv ?? (local ? records.find((r) => r.file === origin!.file) : undefined);
+    const saved = pv
+      ? { env: (pv.env as ShotEnv | null | undefined) ?? null }
+      : origin
       ? await api<{ env: ShotEnv | null }>(
           `/api/workspaces/${encodeURIComponent(origin.ws)}/env?file=${encodeURIComponent(origin.file)}`,
         ).catch(() => ({ env: null }))
@@ -1379,7 +1385,19 @@ export const useWs = create<S>((set, get) => ({
     // ★`load` 는 저장을 예약하지 않는다 (`prompt.ts` 의 `onEdit` 는 편집에만 붙는다) —
     //   여기서 한 번 흘려보내야 새 탭의 프롬프트가 파일에 남는다
     await get().save();
-    const r = await api<{ file: string; record: Rec }>(
+    const tabName = (sp.tabs ?? []).find((c) => c.id === sp.activeTab)?.name ?? null;
+    /** 미저장 한 장을 새 탭의 그 씬에 **미저장으로** 앉힌다 — 서버에 아무것도 안 쓴다 */
+    const seat = (f: string): string | null => {
+      const it = previewOf(f);
+      if (!it) return null;
+      return usePreviews.getState().add({
+        workspace: current, scene_group: tab.name, scene_group_id: tab.id, cell: cell.name, cell_id: cell.id,
+        seed: it.seed, enhance_of: it.enhance_of, tab: tabName, cell_no: 1, exclude_slot_number: o.excludeNo,
+        env: it.env ?? null, inference: it.inference ?? null, b64: it.preview.b64, fmt: it.preview.fmt,
+      }).file;
+    };
+    const first = seat(file);
+    const r = first ? { file: first, record: null } : await api<{ file: string; record: Rec }>(
       `/api/workspaces/${encodeURIComponent(current)}/copy`,
       {
         method: "POST",
@@ -1407,10 +1425,11 @@ export const useWs = create<S>((set, get) => ({
     );
     // ★목록을 다시 읽지 않는다 — 서버가 돌려준 레코드 한 줄만 얹으면 화면이 따라온다
     //   (업스케일·「파일로 저장」과 같은 방식)
-    get().addRecord(r.record);
+    if (r.record) get().addRecord(r.record);
     /* ★다중 선택 복제 (사용자 지시 2026-08-29) — 나머지 장도 **같은 씬**으로 보낸다.
        같은 자리라 테이크로 쌓이고, 구조·설정은 첫 장이 이미 세웠다. */
     for (const f of o.extraFiles ?? []) {
+      if (seat(f)) continue;
       const more = await api<{ file: string; record: Rec }>(
         `/api/workspaces/${encodeURIComponent(current)}/copy`,
         {

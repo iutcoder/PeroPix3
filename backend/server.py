@@ -713,10 +713,12 @@ class WildcardBody(BaseModel):
 
 
 class PinBody(BaseModel):
-    """어느 생성물을 고정 썸네일로 굳힐지. **바이트를 올리지 않는다** — 서버가 원본에서 굽는다."""
+    """어느 생성물을 고정 썸네일로 굳힐지. 파일이면 **바이트를 올리지 않는다** — 서버가 원본에서 굽는다."""
 
     workspace: str
-    file: str
+    file: str | None = None
+    #: ★파일이 없는 그림(저장하지 않은 그림)의 base64 — 그때만 싣는다 (사용자 지시 2026-09-30: 저장하지 않고 되는 기능은 다 켠다)
+    data: str | None = None
 
 
 class ThumbBody(BaseModel):
@@ -1664,7 +1666,15 @@ async def pin_thumb(body: PinBody):
       같은 주소를 평범한 <img> 로 먼저 띄운 적이 있으면 CORS 헤더 없는 캐시 항목이
       재사용돼 **조용히 실패**했다 (실사용: "적용을 눌러도 반응이 없다").
       서버가 원본에서 직접 구우면 그 경로 자체가 없다."""
-    src = store.file_path(body.workspace, body.file)
+    if body.data:
+        try:
+            tid = pins.pin_bytes(base64.b64decode(body.data, validate=True))
+        except (binascii.Error, ValueError):
+            raise HTTPException(400, "그림 데이터를 읽지 못했습니다.")
+        if not tid:
+            raise HTTPException(500, "썸네일을 만들지 못했습니다.")
+        return {"tid": tid}
+    src = store.file_path(body.workspace, body.file) if body.file else None
     if not src:
         raise HTTPException(404, "원본을 찾을 수 없습니다.")
     tid = pins.pin(src, f"{body.workspace}/{body.file}")

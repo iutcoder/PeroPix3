@@ -18,7 +18,8 @@ import { MaskEditor } from "../components/MaskEditor";
 import { useImageInput } from "../store/imageInput";
 import { EnhanceDialog } from "./EnhanceDialog";
 import { useGallery, type ImageMeta } from "../store/gallery";
-import { isPreviewFile, usePreviews, withPreviews } from "../store/previews";
+import { droppedOf, isPreviewFile, usePreviews, withPreviews } from "../store/previews";
+import type { Dropped } from "../lib/dropImages";
 import { api } from "../lib/backend";
 import { wheelIsOver } from "../lib/wheelAt";
 import {
@@ -225,11 +226,13 @@ function SceneActions() {
    *  ★★**저장 버튼 말고는 어디서도 저장하지 않는다** (사용자 지시 2026-09-30: *"명시적으로 저장 버튼
    *    누른 거 아니면 전부 자동 저장되면 안 됨. 저장 없이 해당 액션이 불가능하면 비활성화"*). 예전에는 보관·
    *    강화·복제 같은 것을 누르면 먼저 저장해서, 자동 저장을 끈 사람의 그림이 버튼 하나로 저장돼 버렸다.
-   *    · NAI 로 보내는 것(i2i·인페인트·인핸스·업스케일)은 **바이트로** 돈다 — 공홈도 저장 없이 된다
-   *    · 파일이 있어야 하는 앱 기능(보관·폴더 열기·복제·보내기·Tagger)은 **꺼 둔다** (`ImageActions` 의 `unsaved`)
+   *    · 저장 없이 되는 것은 **다 켠다** (같은 날 사용자 지시). NAI 로 보내는 것(i2i·인페인트·인핸스·업스케일)은
+   *      바이트로 돌고, 보조도구(Tagger·검열·일괄 변환·이미지 편집)는 **데이터로** 받는다 (`droppedOf`).
+   *      보관은 보관함에 데이터로 들이고, 새 탭으로 복제는 새 탭에도 **미저장으로** 옮긴다 (`cloneToNewTab`).
+   *    · 파일 자체가 있어야 하는 것(폴더 열기·별표)만 **꺼 둔다** (`ImageActions` 의 `unsaved`)
    *  ★읽기만 하는 것(프롬프트 보기·설정)도 바이트를 그대로 보내 메타데이터만 읽는다 (`/api/tools/meta-upload`). */
   const un = previews.find((x) => x.file === file);
-  /** 파일이 있어야 하는 것을 끌지 — 여러 장이면 **하나라도** 미저장이면 끈다 (섞인 것을 조용히 빼지 않는다) */
+  /** 파일 자체가 있어야 하는 것(폴더 열기)을 끌지 — 여러 장이면 **하나라도** 미저장이면 끈다 */
   const unsaved = many > 1 ? picked.some(isPreviewFile) : !!un;
   /** 「저장」 버튼 — ★저장하는 **유일한** 자리다. 저장한 그 장을 그대로 보고 있게 한다 (`saveTake`) */
   const saveNow = async () => {
@@ -244,8 +247,8 @@ function SceneActions() {
     }
   };
   /** 다중 처리의 대상 — 여러 장 골랐으면 전부, 아니면 보고 있는 한 장 (사용자 지시 2026-08-29).
-   *  ★미저장이 섞였으면 부르는 버튼이 꺼져 있다 (위 `unsaved`) */
-  const targets = (): string[] => (unsaved ? [] : many > 1 ? picked : [file]);
+   *  ★미저장이 섞여 있어도 그대로다 — 받는 쪽이 미저장을 데이터로 다룬다 (위 ★★주) */
+  const targets = (): string[] => (many > 1 ? picked : [file]);
 
   const rec = records.find((r) => r.file === file);
   /** ★미저장이면 **바이트를 보내** 읽는다 — 저장하지 않는다 (위 주석) */
@@ -302,8 +305,6 @@ function SceneActions() {
     }
     try {
       const m = await loadMeta().catch(() => null);
-      // ★구조는 **레코드**에서 온다 — 미저장이면 버튼이 꺼져 있다 (`unsaved`)
-      if (unsaved) return;
       const landed = await useWs.getState().cloneToNewTab(file, {
         excludeNo: useGen.getState().params.exclude_slot_number,
         apply: hasMeta(m)
@@ -397,10 +398,9 @@ function SceneActions() {
           // ★여러 장 골랐으면 전부 싣는다 (사용자 지시 2026-08-29)
           const files = targets();
           if (!files.length) return;
-          const had = new Set(useConvertQueue.getState().items.map((i) => i.rel ?? i.path ?? i.name));
-          const add = files
-            .map((f) => ({ name: f.split("/").pop() ?? f, rel: `${ws}/${f}` }))
-            .filter((i) => !had.has(i.rel));
+          const key = (i: Dropped) => i.rel ?? i.path ?? i.name;
+          const had = new Set(useConvertQueue.getState().items.map(key));
+          const add = files.map((f) => droppedOf(ws, f)).filter((i) => !had.has(key(i)));
           if (add.length) useConvertQueue.getState().add(add);
           useUi.getState().setMode("utility");
           useUi.getState().setView("tab", "tools", "convert" as never);
@@ -412,7 +412,7 @@ function SceneActions() {
           const files = targets();
           if (!files.length) return;
           const { useCensor } = await import("../store/censor");
-          await useCensor.getState().addImages(files.map((f) => ({ name: f.split("/").pop() ?? f, rel: `${ws}/${f}` })));
+          await useCensor.getState().addImages(files.map((f) => droppedOf(ws, f)));
           useCensor.getState().setTab("before");
           useUi.getState().setMode("censor");
         }}
@@ -421,7 +421,7 @@ function SceneActions() {
         onEdit={async () => {
           const files = targets();
           if (!files.length) return;
-          await sendToEditor(files.map((f) => ({ name: f.split("/").pop() ?? f, rel: `${ws}/${f}` })));
+          await sendToEditor(files.map((f) => droppedOf(ws, f)));
         }}
         extra={
           <>

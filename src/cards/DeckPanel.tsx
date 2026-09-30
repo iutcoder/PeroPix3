@@ -5,7 +5,7 @@ import { useUi, flashStyle, useFlashAt } from "../store/ui";
 import { useI18n } from "../i18n";
 import { useCards, type AnyCard, type CardKind } from "../store/cards";
 import { uniqueName } from "../lib/uniqueName";
-import { savedImage, useDrag, useDragSource, useDropZone, dragSourceStyle, type DragImage, type SectionThumb } from "./dragStore";
+import { useDrag, useDragSource, useDropZone, dragSourceStyle, type DragImage, type SectionThumb } from "./dragStore";
 import { DropVeil } from "./DropVeil";
 import { CardEditor } from "./CardEditor";
 import { saveCardWithThumb } from "./saveCard";
@@ -475,8 +475,6 @@ function PanelCard({
     dir: "image",
     prio: 20,
     clip: view,
-    // ★썸네일은 서버가 원본 파일에서 굽는다 (`/api/pin`) — 저장하지 않은 그림은 받지 않는다
-    accepts: savedImage,
     onDrop: (d) => d.img && onImageDrop(kind, card, d.img),
   });
 

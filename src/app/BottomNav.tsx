@@ -1,6 +1,6 @@
 import { useI18n } from "../i18n";
 import { MODES, useUi } from "../store/ui";
-import { savedImage, useDropZone } from "../cards/dragStore";
+import { useDropZone } from "../cards/dragStore";
 import { useGallery } from "../store/gallery";
 import { useWs } from "../store/workspace";
 import { toast } from "../store/toast";
@@ -90,8 +90,6 @@ function GalleryTab({ on, onClick }: { on: boolean; onClick: () => void }) {
     kind: "image",
     dir: "image",
     prio: 30,
-    // ★보관은 서버가 원본 파일을 옮긴다 — 저장하지 않은 그림은 받지 않는다
-    accepts: savedImage,
     onDrop: (d) => {
       const img = d.img;
       if (!img) return;
