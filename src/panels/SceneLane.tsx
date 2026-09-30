@@ -968,7 +968,7 @@ export function SceneLane() {
                 stepOf={(id) => steps[stepKey(ws, id)] ?? ""}
                 isStarred={isStarred}
                 /* ★미저장은 별을 못 단다 — 별표는 파일 경로로 저장된다 (별의 ★★주) */
-                onStar={(f) => !isPreviewFile(f) && toggleStar(f)}
+                onStar={toggleStar}
                 queuedOf={(cellId) => queued.filter((p) => p.cellId === cellId)}
                 /* ★★**서버가 말하는 씬**의 대기 칸에 「생성 중」을 붙인다 (2026-08-25).
                    예전에는 `queued[0]`(내 목록의 맨 앞)을 찍었는데, 배치가 겹치면 그 순서가
@@ -2177,12 +2177,10 @@ function SceneRow(
                      보인다 — 늘 떠 있으면 수십 장이 별 밭이 된다 (`.thumb-star` 규칙).
                    ★12px 은 썸네일 위에서 작았다 → 18px (사용자 지시 2026-08-18).
                    ★★미저장 그림에도 **같은 자리에 선다**(사용자 지시 2026-09-30: *"자동저장을 하든 안 하든 최대한
-                     UI 동일하게"*). 다만 별표는 **파일 경로**로 저장되므로 미저장에서는 **꺼져 있고** 이유가
-                     툴팁으로 뜬다 — 저장 버튼 말고는 어디서도 저장하지 않는다 (같은 날 사용자 지시). */
+                     UI 동일하게"*). 미저장의 별표는 메모리의 그 그림에 붙고, 저장하면 새 경로로 옮겨 적힌다
+                     (`workspace.setStars` · `sceneTakes.saveTake`). */
                 <span
                   data-take-star={r.file}
-                  data-off={r.preview ? "" : undefined}
-                  data-tip={r.preview ? t("act.needSaved") : undefined}
                   onClick={(e) => {
                     e.stopPropagation();
                     p.onStar(r.file);
@@ -2192,8 +2190,7 @@ function SceneRow(
                     right: 2,
                     top: 1,
                     display: "grid",
-                    color: p.isStarred(r.file) ? "var(--warn)" : r.preview ? "rgba(255,255,255,0.35)" : "rgba(255,255,255,0.8)",
-                    cursor: r.preview ? "not-allowed" : undefined,
+                    color: p.isStarred(r.file) ? "var(--warn)" : "rgba(255,255,255,0.8)",
                     opacity: p.isStarred(r.file) ? 1 : 0,
                     /* ★★**어두운 받침을 깐다** (사용자 지적 2026-08-27: *"별표한 게 너무
                        안 보임. 일러스트 위에 있어서 일러스트랑 섞여서 보여"*). 그림자만으로는

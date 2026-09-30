@@ -2,7 +2,7 @@ import { useUi } from "../store/ui";
 import { nextAfter } from "./pickNext";
 import { newestFirst, takesOfScene, type Rec } from "./takes";
 import { allCells, useWs } from "../store/workspace";
-import { isPreviewFile, usePreviews, withPreviews } from "../store/previews";
+import { isPreviewFile, previewOf, usePreviews, withPreviews } from "../store/previews";
 import { useSceneFocus } from "../store/sceneFocus";
 import { useQueue } from "../store/queue";
 import { pushUndo } from "./undo";
@@ -178,12 +178,16 @@ export function removeTakes(): string[] {
 
 /** 미저장 그림을 **파일로 남긴다** — 「저장」 버튼만 부른다 (사용자 지시 2026-09-30: 저장 버튼을 누른 것이
  *  아니면 어디서도 저장하지 않는다. 파일이 있어야 하는 일은 미저장에서 꺼 둔다). 이미 파일이면 그대로 돌려준다.
- *  ★저장하면 그 장을 가리키던 자리(보고 있는 장 · 고른 것)가 **새 경로**를 따라간다. 안 그러면
+ *  ★저장하면 그 장을 가리키던 자리(보고 있는 장 · 고른 것 · 별표)가 **새 경로**를 따라간다. 안 그러면
  *    방금 저장한 장이 화면에서 빠진 자리를 가리킨다. */
 export async function saveTake(file: string): Promise<string> {
   if (!isPreviewFile(file)) return file;
+  const starred = !!previewOf(file)?.starred;
   const rec = await usePreviews.getState().save(file);
-  useWs.getState().addRecord(rec);
+  const ws = useWs.getState();
+  ws.addRecord(rec);
+  // ★별표를 옮겨 적는 것은 되돌리기 목록에 안 넣는다 — 사용자가 켠 별표가 아니라 이미 켜 둔 것이 따라가는 것이다
+  if (starred) ws.restoreStars([...(useWs.getState().spec?.selection.starred ?? []), rec.file]);
   const f = useSceneFocus.getState();
   if (f.picked.includes(file)) f.setPicked(f.picked.map((x) => (x === file ? rec.file : x)));
   if (f.file === file) f.focus(f.cell, rec.file);

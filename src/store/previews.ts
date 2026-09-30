@@ -48,6 +48,9 @@ export type PreviewTake = Rec & {
   env?: Record<string, unknown> | null;
   /** 인퍼런스였으면 그 참조와 배치. `env` 와 같은 이유로 들고 있다가 되돌린다 (설정 불러오기가 참조를 되살린다) */
   inference?: Record<string, unknown> | null;
+  /** 별표 — 저장된 그림은 `selection.starred` 에 경로로 적히지만 이것에는 경로가 없어 여기 든다.
+   *  「저장」하면 `saveTake` 가 새 경로로 옮겨 적는다. */
+  starred?: boolean;
 };
 
 type S = {
@@ -59,6 +62,8 @@ type S = {
   /** 여러 장을 버리고 **도로 넣는 함수**를 돌려준다 — `Del`·삭제 버튼의 되돌리기가 부른다
    *  (`lib/sceneTakes.removeTakes`). 저장된 그림이 휴지통을 거쳐 `Ctrl+Z` 로 돌아오는 것과 같게 한다. */
   discard: (files: string[]) => () => void;
+  /** 여러 장의 별표를 켜고 끄고 **도로 되돌리는 함수**를 돌려준다 (`workspace.setStars` 의 되돌리기) */
+  star: (files: string[], on: boolean) => () => void;
   /** **파일로 저장** — 보통 생성과 같은 이름 규칙을 쓴다 (`/api/save-preview`).
    *  성공하면 그 미리보기는 목록에서 빠지고, 진짜 레코드가 그 자리를 잇는다. */
   save: (file: string) => Promise<Rec>;
@@ -107,6 +112,13 @@ export const usePreviews = create<S>((set, get) => ({
       const have = new Set(get().items.map((x) => x.file));
       set({ items: [...get().items, ...taken.filter((x) => !have.has(x.file))] });
     };
+  },
+
+  star(files, on) {
+    const touched = new Set(files);
+    const before = new Map(get().items.filter((x) => touched.has(x.file)).map((x) => [x.file, !!x.starred]));
+    set({ items: get().items.map((x) => (touched.has(x.file) ? { ...x, starred: on } : x)) });
+    return () => set({ items: get().items.map((x) => (before.has(x.file) ? { ...x, starred: before.get(x.file) } : x)) });
   },
 
   async save(file) {

@@ -13,7 +13,7 @@ import { wrapSetTabInCard } from "../lib/sceneCards";
 export { takesOf, takesOfScene, dedupeByFile, type Rec } from "../lib/takes";
 import { dedupeByFile, takesOf } from "../lib/takes";
 import type { Rec } from "../lib/takes";
-import { previewOf, usePreviews } from "./previews";
+import { isPreviewFile, previewOf, usePreviews } from "./previews";
 import { moveTo } from "../lib/moveTo";
 import { planDelete, type DelPlan, type DelTarget } from "../lib/delPlan";
 export type { DelPlan, DelTarget } from "../lib/delPlan";
@@ -1222,14 +1222,22 @@ export const useWs = create<S>((set, get) => ({
   setStars(files, on) {
     const spec = get().spec;
     if (!spec || files.length === 0) return;
+    // ★미저장 그림은 경로가 없어 별표를 그 그림(메모리)에 붙인다 — 저장하면 `saveTake` 가 옮겨 적는다
+    const pv = files.filter(isPreviewFile);
+    const real = files.filter((f) => !isPreviewFile(f));
     const cur = spec.selection.starred ?? [];
-    const touched = new Set(files);
+    const touched = new Set(real);
     const next = on
-      ? [...cur, ...files.filter((f) => !cur.includes(f))]
+      ? [...cur, ...real.filter((f) => !cur.includes(f))]
       : cur.filter((f) => !touched.has(f));
-    if (next.length === cur.length && on) return;
+    if (next.length === cur.length && on && pv.every((f) => get().isStarred(f))) return;
+    const pvBack = pv.length ? usePreviews.getState().star(pv, on) : null;
     // ★되돌리는 방법을 **그때 만들어** 로그에 담는다 (`lib/undo`)
-    pushUndo(t("common.undoStar"), () => get().restoreStars(cur));
+    pushUndo(t("common.undoStar"), () => {
+      pvBack?.();
+      if (real.length) get().restoreStars(cur);
+    });
+    if (!real.length) return;
     set({ spec: { ...spec, selection: { ...spec.selection, starred: next } } });
     queueSave(get);
   },
@@ -1508,7 +1516,8 @@ export const useWs = create<S>((set, get) => ({
   },
 
   /** ★`?? []` — 별표가 없던 시절에 저장된 워크스페이스에는 이 칸이 아예 없다 */
-  isStarred: (file) => !!get().spec?.selection.starred?.includes(file),
+  isStarred: (file) =>
+    isPreviewFile(file) ? !!previewOf(file)?.starred : !!get().spec?.selection.starred?.includes(file),
 
   activeSceneGroup: () => get().spec?.sceneGroups.find((t) => t.id === get().spec!.activeSceneGroup),
 
