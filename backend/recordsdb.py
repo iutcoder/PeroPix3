@@ -176,21 +176,28 @@ def keys(d: Path) -> set[str]:
 
 def copy(src: Path, dst: Path, want: list[str]) -> int:
     """그 열쇠들의 기록을 다른 워크스페이스에 **베낀다** (탭 옮기기). 주는 쪽은 그대로 둔다 —
-    빼는 것은 부르는 쪽이 색인을 옮긴 **뒤에** 한다 (`forget`). 베낀 수를 돌려준다."""
+    빼는 것은 부르는 쪽이 색인을 옮긴 **뒤에** 한다 (`forget`). 베낀 수를 돌려준다.
+    ★★**풀지 않고 DB 끼리 베낀다** (`ATTACH`). 풀어서 다시 적으면 옮기는 기록 전부가 메모리에 오른다
+      (실측 2026-09-30: 76MB 기록에 최대 199MB · 6초 — 10만 장이면 몇 GB 다)."""
     if not want or not (src / NAME).is_file():
         return 0
-    rows: list[tuple[str, dict]] = []
-    cache: dict[str, str] = {}
-    with connect(src) as s:
-        for k in want:
-            row = s.execute("SELECT data FROM rec WHERE key=?", (k,)).fetchone()
-            if row is not None:
-                rows.append((k, _unpack(s, json.loads(row[0]), cache)))
-    if rows:
-        with connect(dst) as t:
-            for k, heavy in rows:
-                put(t, k, heavy)
-    return len(rows)
+    with connect(dst) as t:
+        t.execute("ATTACH DATABASE ? AS s", (str(src / NAME),))
+        t.execute("CREATE TEMP TABLE want(key TEXT PRIMARY KEY)")
+        t.executemany("INSERT OR IGNORE INTO temp.want VALUES(?)", [(k,) for k in want])
+        # ★받는 쪽에 같은 열쇠가 이미 있으면 바꾼다 (`put` 과 같다) — 그 기록만 쓰던 blob 은 뒤에서 뺀다
+        old = [h for (h,) in t.execute("SELECT hash FROM main.uses WHERE key IN (SELECT key FROM temp.want)")]
+        t.execute("DELETE FROM main.uses WHERE key IN (SELECT key FROM temp.want)")
+        n = t.execute("INSERT OR REPLACE INTO main.rec SELECT key, data FROM s.rec"
+                      " WHERE key IN (SELECT key FROM temp.want)").rowcount
+        t.execute("INSERT OR IGNORE INTO main.uses SELECT key, hash FROM s.uses"
+                  " WHERE key IN (SELECT key FROM temp.want)")
+        t.execute("INSERT OR IGNORE INTO main.blob SELECT hash, data, b64 FROM s.blob WHERE hash IN"
+                  " (SELECT hash FROM s.uses WHERE key IN (SELECT key FROM temp.want))")
+        _gc(t, old)
+        t.commit()
+        t.execute("DETACH DATABASE s")   # ★트랜잭션 밖에서만 된다 — 그래서 먼저 적는다
+    return max(n, 0)
 
 
 def forget(d: Path, gone: set[str] | list[str]) -> int:

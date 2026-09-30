@@ -310,6 +310,8 @@ def _records_phase() -> None:
             try:
                 n = store.records_todo(d.name)
             except Exception as e:
+                # ★화면에도 알린다 — 로그에만 남기면 그 워크스페이스는 옮겨지지 않은 채 아무 말이 없다
+                _RECORDS["failed"].append(d.name)
                 say("error", "records", f"{d.name}: 옛 기록을 살피지 못했습니다 ({e!r})")
                 continue
             if n:
