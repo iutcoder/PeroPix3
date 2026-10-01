@@ -570,7 +570,7 @@ function withGroupMoved(spec: Spec, groupId: string, toTabId: string, fillGroup:
 
 /** 탭·씬 그룹의 **이름을 바꾸고 그림을 새 이름의 폴더로 옮긴다** (사용자 결정 2026-09-29).
  *
- *  ★★저장 자리는 이름으로 짓는다 (`output/멀티/<탭>/<씬 그룹>/`). 예전에는 이름만 바꿔서 이미 만든
+ *  ★★저장 자리는 이름으로 짓는다 (`output/<탭>/<씬 그룹>/`). 예전에는 이름만 바꿔서 이미 만든
  *    그림이 옛 폴더에 남았고, 비워진 옛 이름을 나중에 다른 탭이 받으면 한 폴더에 섞였다.
  *    옮기는 것은 서버다 (`Store.rename_place`). 배선은 `moveGroupToTab` 과 같다 — 밀린 편집을 먼저
  *    쓰고, 이름은 바로 바꿔 보이고, 끝날 때까지 조작과 자동 저장을 멈추고, 답은 화면이 아직 이
@@ -580,6 +580,40 @@ function withGroupMoved(spec: Spec, groupId: string, toTabId: string, fillGroup:
  *  ★옮길 그림이 없으면 서버를 안 부른다 — 이름만 바뀌는 것은 예전과 같다.
  *  ★되돌리기 기록은 **비우지 않는다** (`lib/undo` 의 ★★주 — 씬 번호 개명 `runRenumber` 도 같다).
  *  @returns 못 바꿨으면 그 이유 (조수가 그대로 전한다) */
+/** 옮긴 그림을 **편집 캔버스**에도 따라 보낸다 (2026-10-01) — 원본 자리(덮어쓰기·하위 output 저장의 근거)와
+ *  만화 컷의 후보. `moves` 는 워크스페이스 기준 옛 경로 → 새 경로, `to` 는 받는 워크스페이스(탭 옮기기)다.
+ *  ★서버가 `state.json` 을 고치면 안 된다 — 화면이 캔버스를 들고 있다가 통째로 다시 쓴다. 부팅 이전만
+ *    화면이 뜨기 전이라 서버가 고친다 (`backend/server.py` 의 `_carry_editor`).
+ *  ★값으로 부르면 순환이 된다 (`editor/cutGen` 이 이 파일을 읽는다) — **부를 때** 싣는다 (`generating` 과 같다). */
+async function carryEditor(ws: string, moves: Record<string, string> | undefined, to?: string): Promise<void> {
+  if (!moves || !Object.keys(moves).length) return;
+  const { useEditor } = await import("../editor/store");
+  const dst = to ?? ws;
+  let hit = false;
+  const docs = useEditor.getState().docs.map((d) => {
+    let nd = d;
+    const rel = d.src?.rel;
+    if (rel?.startsWith(`${ws}/`) && moves[rel.slice(ws.length + 1)]) {
+      nd = { ...nd, src: { ...d.src!, rel: `${dst}/${moves[rel.slice(ws.length + 1)]}` } };
+      hit = true;
+    }
+    if (d.layers.some((l) => l.panel?.gen?.takes.some((k) => k.ws === ws && moves[k.file]))) {
+      nd = {
+        ...nd,
+        layers: nd.layers.map((l) => {
+          const g = l.panel?.gen;
+          if (!l.panel || !g || !g.takes.some((k) => k.ws === ws && moves[k.file])) return l;
+          const takes = g.takes.map((k) => (k.ws === ws && moves[k.file] ? { ws: dst, file: moves[k.file] } : k));
+          return { ...l, panel: { ...l.panel, gen: { ...g, takes } } };
+        }),
+      };
+      hit = true;
+    }
+    return nd;
+  });
+  if (hit) useEditor.setState({ docs });
+}
+
 async function renamePlace(
   get: () => S,
   set: (p: Partial<S>) => void,
@@ -632,6 +666,7 @@ async function renamePlace(
       // ★보던 장·고른 장도 경로로 적혀 있다 — 안 옮기면 씬에서 보던 자리를 잃는다
       if (r.moved) useSceneFocus.getState().remap(r.moves ?? {});
     }
+    void carryEditor(cur, r.moves);
     return null;
   } catch (e) {
     if (get().current === cur) set({ spec: before });
@@ -688,8 +723,18 @@ async function runRenumber(
     const now = get().spec;
     if (!now) return;
     const sel = now.selection;
+    void carryEditor(current, Object.fromEntries(moves));
     set({
-      records: get().records.map((x) => (moves.has(x.file) ? { ...x, file: moves.get(x.file)! } : x)),
+      // ★강화·업스케일 결과가 가리키는 원본(`enhance_of`)도 — 서버 색인도 같이 고친다 (`_rewrite_paths`)
+      records: get().records.map((x) =>
+        moves.has(x.file) || (x.enhance_of && moves.has(x.enhance_of))
+          ? {
+              ...x,
+              file: moves.get(x.file) ?? x.file,
+              enhance_of: x.enhance_of ? (moves.get(x.enhance_of) ?? x.enhance_of) : x.enhance_of,
+            }
+          : x,
+      ),
       spec: {
         ...now,
         // ★별표는 경로로 적혀 있다 — 안 옮기면 조용히 풀린다
@@ -1414,7 +1459,7 @@ export const useWs = create<S>((set, get) => ({
           file,
           /* ★그림이 앉는 자리는 **세트**다 (`CopyBody`). 2026-08-24 개명 뒤에도 여기가
              옛 열쇠(`tab`·`tab_id`)로 남아 있어 서버가 `set` 을 못 받았다.
-             ★`tab` 은 이제 **탭 이름**이다 — 저장 경로 한 칸(`멀티/<탭>/<세트>/`)이 된다. */
+             ★`tab` 은 이제 **탭 이름**이다 — 저장 경로 한 칸(`output/<탭>/<세트>/`)이 된다. */
           scene_group: tab.name,
           scene_group_id: tab.id,
           // ★씬 값을 **넷 다** 싣는다 — 하나라도 비면 그 그림이 어느 씬 것인지 화면이 못 찾는다
@@ -1729,10 +1774,11 @@ export const useWs = create<S>((set, get) => ({
     try {
       // ★끝날 때까지 **조작을 잠근다** (`store/busy` 의 ★★주) — 그 사이의 편집은 갈 곳이 없다
       const r = await withBusy(t("busy.movingTab", { name: tab.name }), () =>
-        api<{ spec: Spec; records: Rec[]; moved: number }>(
+        api<{ spec: Spec; records: Rec[]; moved: number; moves?: Record<string, string> }>(
         `/api/workspaces/${encodeURIComponent(cur)}/tabs/${encodeURIComponent(tabId)}/move`,
         { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ to, fill }) },
       ));
+      void carryEditor(cur, r.moves, to);
       if (get().current === cur) {
         // ★옮기는 동안 사용자가 다른 탭을 열었을 수 있다 — 그 자리를 지킨다 (`keepView` 의 ★★주)
         const next = keepView(migrate(r.spec), get().spec);
@@ -1788,10 +1834,11 @@ export const useWs = create<S>((set, get) => ({
     try {
       // ★끝날 때까지 **조작을 잠근다** (`store/busy` 의 ★★주)
       const r = await withBusy(t("busy.movingGroup", { name: g.name }), () =>
-        api<{ spec: Spec; records: Rec[]; moved: number }>(
+        api<{ spec: Spec; records: Rec[]; moved: number; moves?: Record<string, string> }>(
         `/api/workspaces/${encodeURIComponent(cur)}/scene-groups/${encodeURIComponent(groupId)}/move`,
         { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ to_tab: toTabId, fill }) },
       ));
+      void carryEditor(cur, r.moves);
       if (get().current === cur) {
         /* ★★**보고 있는 탭은 화면이 정본이다** (사용자 지적 2026-08-28: *"옮긴 탭으로 들어갔는데
              옮기는 게 완료된 후에 강제로 원래 있던 탭이 열림"*). 옮기는 동안에는 자동 저장을

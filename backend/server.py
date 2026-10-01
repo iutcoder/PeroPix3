@@ -14,6 +14,7 @@ import io
 import json
 import math
 import os
+import shutil
 import threading
 import time
 import traceback
@@ -286,7 +287,54 @@ for _root in ((DATA_DIR / "cards", DATA_DIR / "chats", DATA_DIR / "vibe-cache", 
 #: ★★부팅 때 기록을 옮기는 동안의 상태 (사용자 결정 2026-09-30). `/api/health` 가 화면에 알려 준다.
 #:  `busy` 동안은 `RecordsGate` 가 상태 확인 말고는 전부 막는다. `done`·`total` 은 바이트,
 #:  `ws`·`wsTotal` 은 몇 번째 워크스페이스인지, `failed` 는 옮기지 못한 워크스페이스 이름이다.
-_RECORDS: dict = {"busy": False, "done": 0, "total": 0, "ws": 0, "wsTotal": 0, "failed": []}
+_RECORDS: dict = {"busy": False, "stage": "records", "done": 0, "total": 0, "ws": 0, "wsTotal": 0,
+                  "failed": [], "layoutFailed": []}
+
+
+def _carry_outside(fn) -> None:
+    """그림이 옮겨졌을 때 **워크스페이스 밖**의 경로를 따라 보낸다 (`Store.carry_outside`, 2026-10-01).
+    `fn("<ws>/<옛 상대경로>") → "<ws>/<새 상대경로>" | None`.
+    ★보관함 출처 표 · 파일 관리 휴지통 장부(`workspaces/.trash`, 열쇠가 같은 모양이다).
+    ★편집 캔버스는 여기 없다 — 화면이 들고 있다가 통째로 다시 쓰므로 화면이 고친다
+      (`store/workspace.ts` 의 `carryEditor`). 부팅 이전만 화면이 뜨기 전이라 `_carry_editor` 가 파일을 고친다."""
+    keep.carry_sources(KEEP_DIR, fn)
+    trash.remap_index(trash.trash_root(WS_ROOT), fn)
+
+
+store.carry_outside = _carry_outside
+
+
+def _carry_editor(fn) -> int:
+    """편집 캔버스 상태(`data/editor/state.json`)의 원본 경로·컷 후보를 따라 보낸다 — **부팅 이전에서만** 부른다
+    (`_carry_outside` 의 ★주). 고치기 전에 한 번 베낀다. 고친 수를 준다."""
+    p = EDIT_DIR / "state.json"
+    if not p.is_file():
+        return 0
+    st = json.loads(p.read_text("utf-8"))
+    n = 0
+    for d in st.get("docs") or []:
+        src = d.get("src") if isinstance(d, dict) else None
+        if isinstance(src, dict) and src.get("rel"):
+            new = fn(str(src["rel"]))
+            if new:
+                src["rel"] = new
+                n += 1
+        for layer in (d.get("layers") or []) if isinstance(d, dict) else []:
+            gen = ((layer or {}).get("panel") or {}).get("gen") if isinstance(layer, dict) else None
+            for tk in (gen or {}).get("takes") or []:
+                if isinstance(tk, dict) and tk.get("ws") and tk.get("file"):
+                    new = fn(f"{tk['ws']}/{tk['file']}")
+                    if new:
+                        tk["ws"], _, tk["file"] = new.partition("/")
+                        n += 1
+    if n:
+        b = p.with_name(p.name + ".bak-layout")
+        if not b.exists():
+            shutil.copy2(p, b)
+        tmp = p.with_name(p.name + ".tmp")
+        tmp.write_text(json.dumps(st, ensure_ascii=False), "utf-8")
+        tmp.replace(p)
+    return n
 
 
 def _records_todo() -> list[tuple[str, int]]:
@@ -308,7 +356,23 @@ def _records_todo() -> list[tuple[str, int]]:
     return todo
 
 
-def _records_phase(todo: list[tuple[str, int]]) -> None:
+def _layout_todo() -> list[str]:
+    """옛 배치(`output/멀티/…`)가 남은 워크스페이스 (`Store.layout_todo`). ★싸다 — 폴더 두셋을 본다.
+    옮길 것이 없는 워크스페이스에는 그 자리에서 새 배치 표식만 세운다."""
+    out: list[str] = []
+    for d in sorted(WS_ROOT.iterdir()) if WS_ROOT.is_dir() else []:
+        if not d.is_dir() or d.name.startswith("."):
+            continue
+        try:
+            if store.layout_todo(d.name):
+                out.append(d.name)
+        except Exception as e:
+            _RECORDS["layoutFailed"].append(d.name)
+            say("error", "layout", f"{d.name}: 저장 폴더를 살피지 못했습니다 ({e!r})")
+    return out
+
+
+def _records_phase(todo: list[tuple[str, int]], layout: list[str] | None = None) -> None:
     """옛 기록(곁파일 `records-env.jsonl` · 쪼개기 전 색인 · 열쇠 없는 줄)을 워크스페이스마다
     `records.db` 로 옮기고, 워크스페이스 휴지통을 비우며 비운 그림의 기록을 뺀다.
 
@@ -343,6 +407,23 @@ def _records_phase(todo: list[tuple[str, int]]) -> None:
                 say("error", "records", f"{ws}: 기록을 옮기지 못했습니다 ({e!r}) — 다음 실행에서 다시 합니다")
                 print(traceback.format_exc(), flush=True)
             _RECORDS["done"] = start + n
+        # ★★저장 폴더 이전은 기록 이전 **다음**이다 (사용자 결정 2026-10-01) — 색인을 새 모양으로 고친 뒤에
+        #   경로를 바꾼다. 휴지통 비우기보다는 **앞**이다: 비운 그림의 기록을 빼는 `forget` 이 새 경로로 맞아야 한다.
+        if layout:
+            _RECORDS.update(stage="layout", done=0, total=len(layout), ws=0, wsTotal=len(layout))
+            for i, ws in enumerate(layout):
+                _RECORDS["ws"] = i + 1
+                t0 = time.time()
+                try:
+                    r = store.migrate_layout(ws)
+                    ed = _carry_editor(r["fn"])
+                    say("info", "layout", f"{ws}: 저장 폴더를 output/<탭>/ 으로 옮김 · {r['moved']}개 · 이름 바뀜 "
+                        f"{r['renamed']} · 색인 {r['rows']}줄 · 편집 캔버스 {ed} · {time.time() - t0:.1f}초")
+                except Exception as e:
+                    _RECORDS["layoutFailed"].append(ws)
+                    say("error", "layout", f"{ws}: 저장 폴더를 옮기지 못했습니다 ({e!r}) — 다음 실행에서 다시 합니다")
+                    print(traceback.format_exc(), flush=True)
+                _RECORDS["done"] = i + 1
         for b in trash.sweep(WS_ROOT, forget=store.forget):
             print(f"[휴지통 비움] {b}")
     except Exception as e:
@@ -472,7 +553,7 @@ class RecordsGate:
         await send({"type": "http.response.start", "status": 503,
                     "headers": [(b"content-type", b"application/json; charset=utf-8")]})
         await send({"type": "http.response.body",
-                    "body": json.dumps({"detail": "기록을 옮기는 중입니다. 잠시 뒤 다시 시도하세요."},
+                    "body": json.dumps({"detail": "기록과 저장 폴더를 정리하는 중입니다. 잠시 뒤 다시 시도하세요."},
                                        ensure_ascii=False).encode("utf-8")})
 
 
@@ -601,7 +682,7 @@ class GenBody(BaseModel):
     cell: str | None = None
     # ★슬롯 번호(1부터). 파일 이름 앞에 붙어 **탐색기에서 슬롯 순서**를 만든다
     cell_no: int | None = None
-    # 탭 이름 — 저장 경로 한 칸이 된다 (`멀티/<탭>/<세트>/`)
+    # 탭 이름 — 저장 경로 한 칸이 된다 (`output/<탭>/<세트>/`)
     tab: str | None = None
     # 이 그림이 **어느 그림에서 나왔나** (강화·업스케일·인페인트의 원본 파일).
     # ★**묶는 데 쓰지 않는다.** 결과는 언제나 **각각 별개의 그림**으로 보인다
@@ -774,7 +855,8 @@ async def health():
             "root": str(APP_DIR), "port": CURRENT_PORT,
             "hasLlm": bool(llm_settings().get("key")),
             # ★부팅 때 기록을 옮기는 중이면 화면은 이것을 보며 기다린다 (`_records_phase`)
-            "records": {**_RECORDS, "failed": list(_RECORDS["failed"])}}
+            "records": {**_RECORDS, "failed": list(_RECORDS["failed"]),
+                        "layoutFailed": list(_RECORDS["layoutFailed"])}}
 
 
 # ── 자동 업데이트 ──────────────────────────────────────────────────
@@ -2462,9 +2544,10 @@ async def _start_queue():
     #   ★데몬 스레드: 옮기는 도중에 앱을 꺼도 된다 (`Store.migrate_records` 의 ★「중간에 끊겨도」).
     if os.environ.get("PEROPIX_SERVING") and not _SKIP_MIGRATIONS:
         todo = _records_todo()
-        if todo:
+        layout = _layout_todo()
+        if todo or layout:
             _RECORDS["busy"] = True
-        threading.Thread(target=_records_phase, args=(todo,), name="records", daemon=True).start()
+        threading.Thread(target=_records_phase, args=(todo, layout), name="records", daemon=True).start()
 
 
 @app.on_event("shutdown")

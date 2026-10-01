@@ -5,15 +5,16 @@
       workspace.json     ← spec (의도. 사람·LLM 이 편집)
       records.jsonl      ← 사실의 색인 (코드만 쓴다, append-only)
       records.db         ← 그림 한 장의 무거운 기록 (`recordsdb` 머리 주석)
-      output/싱글/<탭>/*.png              ← 생성물 = 원본. 앱이 자동으로 지우지 않는다
-      output/멀티/<캐릭터>/<포즈세트>/*.png
-      work/<탭>/<셀>/*.png                ← ★옛 경로. **읽기만** 한다 (아래 out_dir 주석)
+      output/<탭>/<씬 그룹>/*.png         ← 생성물 = 원본. 앱이 자동으로 지우지 않는다
+      output/.layout                      ← 위 배치로 옮겨졌다는 표식 (`migrate_layout`)
+      output/싱글/<탭>/*.png · work/<탭>/<셀>/*.png   ← ★옛 경로. **읽기만** 한다 (아래 out_dir 주석)
 
 ★records.jsonl 은 인덱스이지 정본이 아니다. 정본은 PNG 메타데이터다.
   손상되면 이미지 폴더를 훑어 재구축할 수 있어야 한다.
 """
 from __future__ import annotations
 
+import contextlib
 import copy
 import hashlib
 import json
@@ -58,10 +59,15 @@ STARS_NAME = "stars.jsonl"
 #: 쪼개기 전 원본을 한 번 남긴다 (지워도 앱은 돈다 — 되살릴 때만 쓴다)
 PRESPLIT_NAME = "records-before-split.jsonl"
 OUT_DIR = "output"     # 생성물이 사는 곳 (사용자 결정 2026-08-08)
-#: ★그 아래 한 겹. 「싱글/멀티」로 갈리던 시절의 이름이 그대로 남은 것이다 —
-#:  갈래는 2026-08-24 에 없어졌고(`out_dir` 의 ★★주) 이름만 **호환을 위해** 둔다.
-#:  바꾸면 이미 만든 그림과 새 그림이 두 폴더로 갈린다.
-MULTI_DIR = "멀티"
+#: ★★옛 배치의 한 겹 — `output/멀티/<탭>/<씬 그룹>/` 이었다 (「싱글/멀티」로 갈리던 시절의 이름).
+#:  2026-10-01 에 걷었다 (사용자 결정): 새 그림은 `output/<탭>/<씬 그룹>/` 에 앉고, 옛 그림은 부팅 때
+#:  옮긴다 (`migrate_layout`). 이 이름은 그 이전과 옛 경로로 오는 요청(`_legacy_alias`)만 쓴다.
+LEGACY_MULTI = "멀티"
+#: 그 워크스페이스가 새 배치라는 표식 — `output/` 안의 빈 파일. ★폴더가 있느냐로 판정하면 안 된다:
+#:  탭 이름이 「멀티」면 새 배치에서도 `output/멀티/` 가 생긴다.
+LAYOUT_MARK = ".layout"
+#: 옮기는 동안 옛 폴더를 비켜 두는 이름 — 끊겼다가 다음 부팅에 이어 간다
+LAYOUT_TMP = ".멀티-이전중"
 # 파생 썸네일 캐시 — 원본에서 자동으로 굽는다. 지워도 다시 생긴다 (thumbs.py 참조)
 THUMB_DIR = ".thumbs"
 
@@ -141,6 +147,10 @@ class Store:
         #: 이 실행에서 **지운 워크스페이스의 id** (`save` 의 ★★주). 뒤늦게 온 저장이 지운
         #  워크스페이스를 도로 만드는 것을 막는다.
         self._buried: dict[str, str] = {}
+        #: ★★그림이 옮겨졌을 때 **워크스페이스 밖**에서 경로를 든 곳을 고치는 자리 (2026-10-01).
+        #:  `fn("<ws>/<옛 상대경로>") → "<ws>/<새 상대경로>" | None`. 서버가 단다 (보관함 출처 · 파일 관리 휴지통).
+        #:  이 모듈은 그 저장소들을 모른다 — 밖의 뿌리를 아는 것은 서버다.
+        self.carry_outside = None
         self.root = root
         self.root.mkdir(parents=True, exist_ok=True)
 
@@ -354,8 +364,9 @@ class Store:
     def out_dir(self, ws: str, scene_group_name: str, tab_name: str | None = None) -> Path:
         """저장 자리 — **그림이 앉는 슬롯의 자리**를 그대로 따른다.
 
-            <ws>/output/멀티/<탭>/<세트>/       <씬번호>_<씬이름>_<순번>.png
+            <ws>/output/<탭>/<세트>/       <씬번호>_<씬이름>_<순번>.png
 
+        ★★**「멀티」 한 겹을 걷어냈다** (사용자 결정 2026-10-01). 옛 그림은 부팅 때 옮긴다 (`migrate_layout`).
         ★★**「싱글」 갈래를 걷어냈다** (사용자 지시 2026-08-24: *"싱글이라는 개념은 없어졌음.
           싱글에 저장하는 것 자체가 레거시가 남아있는 이슈"*). 2026-08-11 에 싱글 탭이
           없어졌는데 저장 자리만 그 갈래를 들고 있어서, 씬을 못 찾은 그림(강화·옛 경로로 온
@@ -366,13 +377,16 @@ class Store:
           (사용자 지시 2026-08-08). 옛 경로(`싱글/`·`멀티/`·`work/`)의 그림은 **옮기지 않는다** —
           records 의 상대경로와 썸네일 tid 가 통째로 바뀌어 꽂아 둔 커버가 깨진다.
           읽는 쪽은 상대경로를 그대로 쓰므로 옛것도 계속 보인다.
-        ★`멀티/` 라는 이름도 그 시절의 자국이지만 **그대로 둔다** — 폴더 이름을 바꾸면
-          이미 만든 그림과 새 그림이 두 폴더로 갈린다 (`CLAUDE.md` 「저장 경로」 절).
+        ★`output/` 을 처음 만드는 워크스페이스에는 새 배치 표식을 함께 둔다 (`LAYOUT_MARK`) — 그래야
+          나중에 「멀티」라는 탭이 생겨도 옛 폴더로 오인하지 않는다.
         ★씬 폴더를 만들지 않는다 — 씬은 **파일 이름 앞의 번호**다. 그래야 탐색기에서 한 세트가
           한자리에 모이고 씬 순서대로 정렬된다 (페로픽스파이 `001_이름_00001_.png` 과 같은 취지).
         ★탭·세트 이름이 없으면(옛 세션·이름을 못 받은 경우) 그 칸을 건너뛴다 — 「무제」 같은
           폴더를 지어내면 그 이름의 진짜 세트와 섞인다."""
-        p = self.dir_of(ws) / OUT_DIR / MULTI_DIR
+        p = self.dir_of(ws) / OUT_DIR
+        if not p.is_dir():
+            p.mkdir(parents=True, exist_ok=True)
+            (p / LAYOUT_MARK).touch()
         if tab_name:
             p = p / safe_name(tab_name)
         if scene_group_name:
@@ -483,7 +497,7 @@ class Store:
     ) -> str:
         """생성물을 **자리에 앉히고** 상대경로를 돌려준다 — ★이름 규칙의 **유일한 창구**다.
 
-        자리는 `out_dir` 하나가 정한다 (`output/멀티/<탭>/<세트>/`). 씬 폴더 대신 **파일 앞
+        자리는 `out_dir` 하나가 정한다 (`output/<탭>/<세트>/`). 씬 폴더 대신 **파일 앞
         씬 번호**를 쓰고, 이름은 시각이 아니라 **순번**이다 (`file_lead`).
 
         부르는 곳이 셋이다 — 평소 생성(`_generate_one`) · 미저장 그림의 「파일로 저장」
@@ -584,6 +598,7 @@ class Store:
         moves = {p["file"]: p["to"] for p in pairs}
         self._move_thumbs(ws, moves)
         self._rewrite_paths(ws, moves)
+        self._announce(ws, moves)
         return {"pairs": pairs}
 
     def _move_thumbs(self, ws: str, moves: dict[str, str], dst_ws: str | None = None) -> None:
@@ -615,6 +630,19 @@ class Store:
     _FILE_KEY_B = b'"file": "'
 
     _KEY_KEY_B = b'"key": "'
+
+    #: 강화·업스케일 결과가 가리키는 **원본의 경로** — 원본이 옮겨지면 함께 고친다
+    #  (안 고치면 일괄 강화가 이미 강화한 원본을 못 알아본다: `src/lib/enhance.ts`)
+    _ENH_KEY_B = b'"enhance_of": "'
+
+    @classmethod
+    def _enh_of_bytes(cls, raw: bytes) -> bytes | None:
+        i = raw.find(cls._ENH_KEY_B)
+        if i < 0:
+            return None
+        i += len(cls._ENH_KEY_B)
+        j = raw.find(b'"', i)
+        return raw[i:j] if j > 0 else None
 
     @classmethod
     def _key_of_bytes(cls, raw: bytes) -> bytes | None:
@@ -649,6 +677,8 @@ class Store:
         """색인의 `file` 을 새 경로로 바꾼다 (`renumber`·`move_scene_group`).
 
         ★`patch` 를 주면 그 줄에 값을 함께 심는다 (세트 이름이 바뀌었을 때).
+        ★★`enhance_of`(그 줄이 강화·업스케일한 원본)가 옮겨진 그림을 가리키면 그것도 고친다 (2026-10-01).
+          예전에는 `file` 만 고쳐서, 원본을 옮기면 결과 줄이 없는 경로를 가리켰다.
         ★★**무거운 기록(`records.db`)은 안 건드린다** (사용자 승인 2026-08-28). 둘을 잇는 것이
           경로가 아니라 `key` 라, 경로가 바뀌어도 기록은 그대로 맞다 (`append_record` 의 ★★주).
         ★★**바이트로 훑는다**. 바뀌는 줄만 풀고 나머지는 바이트 그대로 흘려 쓴다.
@@ -666,12 +696,17 @@ class Store:
                 if not raw.strip():
                     continue
                 f = self._file_of_bytes(raw)
-                if f is not None and f in hit:
+                e = self._enh_of_bytes(raw)
+                mine = f is not None and f in hit
+                if mine or (e is not None and e in hit):
                     try:
                         row = json.loads(raw.decode("utf-8"))
-                        row["file"] = moves[f.decode("utf-8")]
-                        if patch:
-                            row.update(patch)
+                        if mine:
+                            row["file"] = moves[f.decode("utf-8")]
+                            if patch:
+                                row.update(patch)
+                        if e is not None and e in hit:
+                            row["enhance_of"] = moves[e.decode("utf-8")]
                         fout.write(json.dumps(row, ensure_ascii=False).encode("utf-8") + b"\n")
                         continue
                     except Exception:
@@ -985,6 +1020,154 @@ class Store:
             dead.add(str(k))
         return recordsdb.forget(d, dead)
 
+    # ── 옛 배치(`output/멀티/…`)를 새 배치로 (사용자 결정 2026-10-01) ─────────
+    def layout_todo(self, ws: str) -> bool:
+        """옮길 옛 배치가 남았나. ★싸다 — 폴더 두셋을 본다 (부팅이 문을 닫을지 정하는 자리라 먼저 센다).
+        ★옮길 것이 없는데 표식도 없으면 **표식만 세운다** — 그래야 나중에 「멀티」라는 탭이 생겨도
+          옛 폴더로 오인하지 않는다 (`LAYOUT_MARK`)."""
+        out = self.dir_of(ws) / OUT_DIR
+        if not out.is_dir() or (out / LAYOUT_MARK).exists():
+            return False
+        if (out / LEGACY_MULTI).is_dir() or (out / LAYOUT_TMP).is_dir():
+            return True
+        (out / LAYOUT_MARK).touch()
+        return False
+
+    def migrate_layout(self, ws: str) -> dict:
+        """옛 배치 `output/멀티/<탭>/<씬 그룹>/` 를 새 배치 `output/<탭>/<씬 그룹>/` 로 옮긴다.
+
+        ★★**폴더째 옮긴다.** 그림 폴더 안에는 색인에 없는 파일도 산다 (일괄 변환·검열 결과의 하위
+          `output/`, 사람이 넣은 것). 줄 단위로 옮기면 그것들이 옛 폴더에 남는다.
+        ★`output/멀티` 를 먼저 비켜 두고(`LAYOUT_TMP`) 그 안을 `output/` 으로 올린다 — 탭 이름이 「멀티」여도
+          제 부모 자리로 들어가는 꼴이 안 된다. 같은 이름이 이미 있으면(옛 `output/싱글` 과 이름이 같은 탭 ·
+          끊긴 이전 뒤에 생긴 것) 폴더는 합치고, 겹치는 파일만 번호를 붙인다 (`trash._free`, 덮지 않는다).
+        ★★경로를 든 곳을 전부 고친다: 색인(`file`·`enhance_of`, 파일이 없는 줄까지 — 이름 세기가 쓴다) ·
+          별표 · 워크스페이스 휴지통 장부 · 썸네일 캐시 · 워크스페이스 밖(`carry_outside`). 편집 캔버스는
+          서버가 따로 고친다 (화면이 뜨기 전이라 화면 대신 파일을 고친다). 고치기 전에 원본을 베낀다 (`.bak-layout`).
+        ★끊겨도 된다 — 비켜 둔 폴더가 남아 다음 부팅에 이어 가고, 경로 고치기는 옛 경로만 바꾸므로 두 번 돌아도
+          같다. 표식은 맨 끝에 세운다.
+        돌려주는 것: 옮긴 항목 수 · 이름이 바뀐 것 수 · 고친 색인 줄 수 · 경로 바꾸기(`fn`, `"<ws>/<rel>"` 를 받는다)."""
+        d = self.dir_of(ws)
+        out = d / OUT_DIR
+        head = f"{OUT_DIR}/{LEGACY_MULTI}"
+        renamed: dict[str, str] = {}
+
+        def fn(rel: str) -> str | None:
+            r = (rel or "").replace("\\", "/")
+            if not r.startswith(head + "/"):
+                return None
+            parts = r.split("/")
+            # ★이름이 바뀐 것은 그 자리(또는 그 폴더) 아래 전부가 따라간다
+            for i in range(len(parts), 2, -1):
+                hit = renamed.get("/".join(parts[:i]))
+                if hit:
+                    return "/".join([hit, *parts[i:]])
+            return f"{OUT_DIR}/{r[len(head) + 1:]}"
+
+        def full(key: str) -> str | None:
+            w, _, rel = (key or "").partition("/")
+            new = fn(rel) if w == ws else None
+            return f"{ws}/{new}" if new else None
+
+        with self.locked(ws):
+            if not out.is_dir() or (out / LAYOUT_MARK).exists():
+                return {"moved": 0, "renamed": 0, "rows": 0, "fn": full}
+            for f in (d / RECORDS_NAME, d / SPEC_NAME, trash.trash_root(d) / trash.INDEX):
+                b = f.with_name(f.name + ".bak-layout")
+                if f.is_file() and not b.exists():
+                    shutil.copy2(f, b)
+
+            # ① 폴더 — 끊긴 이전이 비켜 둔 것이 있으면 **그것만** 이어 간다. 그때 `output/멀티` 가 있다면
+            #   「멀티」라는 탭이 이미 올라온 것이다 (옛 폴더는 비켜 둘 때 이름이 바뀌었다) — 다시 올리면 안 된다
+            old, tmp = out / LEGACY_MULTI, out / LAYOUT_TMP
+            moved = 0
+            if not tmp.is_dir() and old.is_dir():
+                old.rename(tmp)
+            if tmp.is_dir():
+                moved += self._lift(d, tmp, out, head, renamed)
+                tmp.rmdir()        # ★빈 폴더만 지운다 — 남은 것이 있으면 여기서 멈추고 다음 부팅에 이어 간다
+
+            # ② 색인 — 파일이 없는 줄까지 (이름을 지을 때 「쓴 적 있는 이름」으로 센다)
+            rows = self._rewrite_all(ws, fn)
+            # ③ 별표
+            spec = self.load(ws)
+            starred = ((spec or {}).get("selection") or {}).get("starred")
+            if isinstance(starred, list):
+                now = [fn(str(x)) or x for x in starred]
+                if now != starred:
+                    spec["selection"]["starred"] = now
+                    self.save(ws, spec)
+            # ④ 워크스페이스 휴지통 — 되살리면 새 자리로 온다
+            trash.remap_index(trash.trash_root(d), fn)
+            # ⑤ 썸네일 캐시 — 이름이 경로에서 나온다 (`thumbs.flat_name`). 없으면 다시 구울 뿐이다
+            self._move_thumbs(ws, renamed)
+            td = d / THUMB_DIR
+            old_flat = thumbs.flat_name(head + "/")[:-len(".webp")]
+            new_flat = thumbs.flat_name(OUT_DIR + "/")[:-len(".webp")]
+            if td.is_dir():
+                for t in td.iterdir():
+                    if t.is_file() and t.name.startswith(old_flat):
+                        to = td / (new_flat + t.name[len(old_flat):])
+                        if not to.exists():
+                            with contextlib.suppress(OSError):
+                                t.rename(to)
+            # ⑥ 워크스페이스 밖 (보관함 출처 · 파일 관리 휴지통)
+            if self.carry_outside:
+                self.carry_outside(full)
+            (out / LAYOUT_MARK).touch()
+        return {"moved": moved, "renamed": len(renamed), "rows": rows, "fn": full}
+
+    def _lift(self, base: Path, src: Path, dst: Path, head: str, renamed: dict[str, str]) -> int:
+        """`src` 안의 것을 `dst` 로 올린다 (`migrate_layout` ①). 같은 이름의 폴더는 안으로 합치고, 겹치는
+        파일은 번호를 받는다 — 그때 옛 경로(`head/…`) → 새 경로를 `renamed` 에 적는다."""
+        n = 0
+        for c in sorted(src.iterdir()):
+            t = dst / c.name
+            if not t.exists():
+                c.rename(t)
+                n += 1
+            elif c.is_dir() and t.is_dir():
+                n += self._lift(base, c, t, f"{head}/{c.name}", renamed)
+                c.rmdir()
+            else:
+                nt = trash._free(t)
+                c.rename(nt)
+                renamed[f"{head}/{c.name}"] = nt.relative_to(base).as_posix()
+                n += 1
+        return n
+
+    def _rewrite_all(self, ws: str, fn) -> int:
+        """색인의 **모든 줄**에서 `file`·`enhance_of` 를 `fn` 으로 바꾼다 (`migrate_layout` ②). 바꾼 줄 수를 준다.
+        ★`_rewrite_paths` 는 정해진 경로 표로 고치고, 이것은 규칙(옛 앞머리)으로 고친다 — 파일이 없는 줄도 바뀐다.
+        ★못 읽는 줄은 그대로 둔다. 임시 파일에 쓰고 바꿔치기한다 (`_rewrite_paths` 와 같다)."""
+        p = self.dir_of(ws) / RECORDS_NAME
+        if not p.is_file():
+            return 0
+        n = 0
+        tmp = p.with_suffix(p.suffix + ".tmp")
+        with p.open("rb") as fin, tmp.open("wb") as fout:
+            for raw in fin:
+                if not raw.strip():
+                    continue
+                if b"output/" in raw:
+                    try:
+                        row = json.loads(raw.decode("utf-8"))
+                        hit = False
+                        for k in ("file", "enhance_of"):
+                            new = fn(str(row.get(k) or "")) if row.get(k) else None
+                            if new:
+                                row[k] = new
+                                hit = True
+                        if hit:
+                            fout.write(json.dumps(row, ensure_ascii=False).encode("utf-8") + b"\n")
+                            n += 1
+                            continue
+                    except Exception:
+                        pass
+                fout.write(raw if raw.endswith(b"\n") else raw + b"\n")
+        self._replace(tmp, p)
+        return n
+
     def thumb_path(self, ws: str, rel: str) -> Path | None:
         """생성물의 **파생 썸네일**. 히스토리 줄·셀 그리드가 이걸 쓴다.
 
@@ -996,6 +1179,9 @@ class Store:
         # ★캐시 이름도 **지금 이름**으로 짓는다 — 옛 이름으로 물어 왔다고 옛 이름의 캐시를
         #   또 만들면 같은 그림의 썸네일이 두 벌이 된다 (`_moved` 의 ★★주).
         cw, crel = self._current(ws, rel)
+        alias = self._legacy_alias(crel)
+        if alias and src == (self.dir_of(cw) / alias).resolve():
+            crel = alias                     # ★옛 경로로 물었다 — 캐시도 새 자리의 이름으로
         return thumbs.derive(src, self.dir_of(cw) / THUMB_DIR / thumbs.flat_name(crel))
 
     def file_path(self, ws: str, rel: str) -> Path | None:
@@ -1018,12 +1204,40 @@ class Store:
             if not nxt:
                 break
             cur = nxt
+        alias = self._legacy_alias(rel)
+        if alias:
+            base = self.dir_of(ws).resolve()
+            p = (base / alias).resolve()
+            if str(p).startswith(str(base)) and p.exists():
+                return p
         return None
+
+    def _announce(self, ws: str, moves: dict[str, str], dst_ws: str | None = None) -> None:
+        """옮긴 그림을 **워크스페이스 밖**에 알린다 (`carry_outside`). 실패해도 옮기기는 이미 끝났다 — 적고 넘어간다."""
+        if not moves or not self.carry_outside:
+            return
+        to = dst_ws or ws
+        full = {f"{ws}/{a}": f"{to}/{b}" for a, b in moves.items()}
+        try:
+            self.carry_outside(full.get)
+        except Exception as e:
+            print(f"[워크스페이스] {ws}: 옮긴 경로를 밖에 알리지 못했습니다 ({e!r})")
+
+    @staticmethod
+    def _legacy_alias(rel: str) -> str | None:
+        """옛 배치의 경로(`output/멀티/…`)면 **새 배치의 같은 자리**를 준다 (`migrate_layout`).
+
+        ★★앱이 고치지 못하는 곳에 옛 경로가 남는다 — 플러그인의 데이터(만화 제작기 프로젝트), 조수가
+          대화에 적어 둔 경로. 이전이 그 그림을 옮겼어도 옛 경로로 물으면 찾아 준다.
+        ★`file_path` 가 그 자리에 없을 때만 쓴다 — 새 배치에서도 「멀티」라는 탭이면 `output/멀티/` 가 있다."""
+        head = f"{OUT_DIR}/{LEGACY_MULTI}/"
+        r = (rel or "").replace("\\", "/")
+        return f"{OUT_DIR}/{r[len(head):]}" if r.startswith(head) else None
 
     # ── 그림을 다른 자리로 (탭 옮기기·씬 그룹 옮기기가 함께 쓴다) ──
     def _relocate(self, src_ws: str, rows: list[dict], dst_ws: str, tab_name: str,
                   group_name: str | None = None, others: set[str] | None = None) -> dict[str, str]:
-        """그 줄들의 그림을 **`<받는 쪽>/output/멀티/<탭>/<세트>/`** 로 옮기고, 옛 경로 → 새 경로 표를 준다.
+        """그 줄들의 그림을 **`<받는 쪽>/output/<탭>/<세트>/`** 로 옮기고, 옛 경로 → 새 경로 표를 준다.
 
         ★탭을 통째로 옮기는 것(`move_tab`)과 씬 그룹만 옮기는 것(`move_scene_group`)이 여기서는
           **같은 일**이다 — 자리를 정하는 것은 `out_dir` 하나이고, 이름이 겹치면 `next_name` 이
@@ -1098,7 +1312,8 @@ class Store:
         gname = group_name if group_name is not None else str(rows[0].get("scene_group") or "")
         if group_name is None and any(str(r.get("scene_group") or "") != gname for r in rows):
             return None                      # 세트 이름이 줄마다 다르다 — 한 장씩
-        dst_dir = self.dir_of(dst_ws) / OUT_DIR / MULTI_DIR / safe_name(tab_name) / safe_name(gname)
+        # ★`out_dir` 로 뿌리를 얻는다 — 받는 쪽에 `output/` 이 처음 생기면 새 배치 표식도 함께 선다
+        dst_dir = self.out_dir(dst_ws, "") / safe_name(tab_name) / safe_name(gname)
         if dst_dir == src_dir or dst_dir.exists():
             return None                      # 같은 자리이거나 받는 폴더가 이미 있다
         if others and any(o.startswith(src_rel + "/") for o in others):
@@ -1163,7 +1378,7 @@ class Store:
         ★**탭 옮기기의 축소판이다** — 다른 것은 둘뿐이다: (a) 한 워크스페이스 안이라 id 가 겹칠 일이
           없어 새 id 를 주지 않는다 (한 spec 안에서 이미 유일하다), (b) 색인은 줄이 오갈 곳이
           없어 **경로만 갈아 끼운다** (`_rewrite_paths` — 개명이 쓰는 그 경로).
-        ★★파일이 **받는 탭의 폴더로 간다** — 자리는 `output/멀티/<탭>/<세트>/` 라 탭이 바뀌면 자리도
+        ★★파일이 **받는 탭의 폴더로 간다** — 자리는 `output/<탭>/<세트>/` 라 탭이 바뀌면 자리도
           바뀐다. 안 옮기면 탐색기에서는 옛 탭 밑에 있는데 앱에서는 새 탭에 보인다.
         ★★그 탭의 **마지막 세트**를 옮기면 그 자리에 빈 세트를 세운다 — 세트가 하나도 없는 탭은
           생성이 불가능하다 (사용자 지시 2026-08-26, `store/workspace.ts` 의 `migrate` 가 여는
@@ -1218,6 +1433,7 @@ class Store:
         if moves:
             self._rewrite_paths(ws, moves, {"scene_group": name} if name != was else None)
             self._carry_selection(spec, moves)   # ★별표·숨김도 새 경로로 (그 함수의 ★★주)
+            self._announce(ws, moves)
 
         # ③ spec — 받는 탭의 **줄 끝**에 세운다 (줄 차례가 곧 배열 차례다)
         rest = [x for x in groups if x.get("id") != group_id]
@@ -1236,7 +1452,7 @@ class Store:
         if spec.get("activeSceneGroup") == group_id and spec.get("activeTab") == src_tab:
             spec["activeSceneGroup"] = left[0]["id"] if left else new_id
         self.save(ws, spec)
-        return {"ok": True, "moved": len(moves), "spec": spec, "records": self.live_records(ws)}
+        return {"ok": True, "moved": len(moves), "moves": moves, "spec": spec, "records": self.live_records(ws)}
 
     # ── 탭·씬 그룹 이름 바꾸기 — 그림이 새 이름의 폴더로 따라간다 ─────
     def rename_place(self, ws: str, kind: str, place_id: str, name: str) -> dict:
@@ -1301,6 +1517,7 @@ class Store:
             if rewrite:
                 self._rewrite_paths(ws, rewrite, {"scene_group": name} if kind == "sceneGroup" else None)
                 self._carry_selection(spec, moves)   # ★별표도 새 경로로 (그 함수의 ★★주)
+                self._announce(ws, moves)
             self.save(ws, spec)
             return {"ok": True, "moved": len(moves), "moves": moves, "spec": spec,
                     "records": self.live_records(ws)}
@@ -1332,7 +1549,7 @@ class Store:
           `ch_1`·`t_1` 처럼 같은 씨앗에서 번호를 매기므로 겹치는 일이 흔하다. 레코드의
           `scene_group_id`·`cell_id` 도 같은 표로 바꾼다 — 안 바꾸면 그림이 받는 쪽 화면 어디에도
           안 뜬다 (`lib/takes.ts` 는 id 로 묶는다).
-        ★파일은 받는 쪽의 `output/멀티/<탭>/<세트>/` 로 간다 (`out_dir` 하나가 자리를 정한다).
+        ★파일은 받는 쪽의 `output/<탭>/<세트>/` 로 간다 (`out_dir` 하나가 자리를 정한다).
           이름은 그대로 두되 이미 있으면 `next_name` 으로 번호를 새로 받는다.
         ★색인은 **줄 단위로 옮긴다** — 그 줄을 받는 쪽 끝에 붙이고(경로·id 만 고쳐서),
           주는 쪽에서는 그 줄을 뺀 사본으로 바꿔치기한다 (`_rewrite_paths` 와 같은 방식).
@@ -1440,6 +1657,9 @@ class Store:
                         try:
                             row = json.loads(line.decode("utf-8"))
                             row["file"] = to
+                            # ★강화·업스케일 결과면 원본 경로도 (같은 탭이라 함께 옮겨졌다)
+                            if row.get("enhance_of") in moves:
+                                row["enhance_of"] = moves[row["enhance_of"]]
                             for k in ("scene_group_id", "cell_id"):
                                 if row.get(k) in remap:
                                     row[k] = remap[row[k]]
@@ -1458,6 +1678,7 @@ class Store:
 
         # ⑤ 두 spec — 받는 쪽에 붙이고, 주는 쪽에서 뺀다 (활성 탭·그룹은 `removeTab` 과 같은 규칙)
         self._hand_selection(src, dst, moves)   # ★별표·숨김도 함께 건너간다 (그 함수의 ★주)
+        self._announce(src_ws, moves, dst_ws)
         dst.setdefault("tabs", []).append(tab)
         dst.setdefault("sceneGroups", []).extend(groups)
         self.save(dst_ws, dst)
@@ -1479,7 +1700,7 @@ class Store:
             pick = own[0] if own else (src["sceneGroups"][0] if src["sceneGroups"] else None)
             src["activeSceneGroup"] = pick.get("id") if pick else ""
         self.save(src_ws, src)
-        return {"ok": True, "moved": len(moves), "tab_id": tab["id"], "spec": src,
+        return {"ok": True, "moved": len(moves), "moves": moves, "tab_id": tab["id"], "spec": src,
                 "records": self.live_records(src_ws)}
 
     # ── 새 탭으로 복제 ────────────────────────────────────────

@@ -6,6 +6,8 @@ export const en = {
     workspace: "Opening your last workspace…",
     records: "Moving generation records to the new format… (workspace {n}/{m})",
     recordsFailed: "Some workspaces' generation records could not be moved: {names}. They will be retried on the next launch.",
+    layout: "Reorganizing output folders… (workspace {n}/{m})",
+    layoutFailed: "Some workspaces' output folders could not be reorganized: {names}. They will be retried on the next launch.",
     failed: "The backend didn't start. See the log:",
     retry: "Try again",
     retrying: "Trying again…",

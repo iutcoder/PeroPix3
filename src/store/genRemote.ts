@@ -96,7 +96,7 @@ export async function queueToWorkspace(
           cell: c.name,
           cell_id: c.id,
           cell_no: i + 1,
-          // 탭 이름은 저장 경로 한 칸이 된다 (`<ws>/output/멀티/<탭>/<세트>/`)
+          // 탭 이름은 저장 경로 한 칸이 된다 (`<ws>/output/<탭>/<세트>/`)
           tab: (spec.tabs ?? []).find((c) => c.id === (tab.tabId ?? spec.activeTab))?.name ?? null,
         },
         undefined,

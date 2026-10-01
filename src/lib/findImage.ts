@@ -12,7 +12,7 @@
  *  | 절대 경로 | `D:\사진\a.png` · `/home/me/a.png` | **아무 폴더나** — 설치 폴더 밖이어도 된다 |
  *  | `gallery:` + 번호 | `gallery:1` (최신이 1번) | 보관함 |
  *  | `gallery:` + 상대경로 | `gallery:작가/abc.png` | 보관함 |
- *  | `output:` + 상대경로 | `output:멀티/탭/씬/001.png` | 지금 워크스페이스 (`list_files` 가 주는 경로) |
+ *  | `output:` + 상대경로 | `output:output/탭/씬/001.png` | 지금 워크스페이스 (`list_files` 가 주는 경로) |
  *
  *  접두가 없으면 **보관함에서 이름으로** 찾는다 (`abc.png`).
  */

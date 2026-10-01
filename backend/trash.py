@@ -108,6 +108,22 @@ def _write_index(root: Path, rows: list[dict]) -> None:
     tmp.replace(root / INDEX)
 
 
+def remap_index(root: Path, fn) -> int:
+    """장부에 적힌 **원래 자리**를 `fn(원래 자리) → 새 자리 | None` 으로 고친다. 고친 줄 수를 준다.
+    ★그림의 자리가 옮겨졌을 때 부른다 (`Store.migrate_layout`) — 안 고치면 되살린 그림이 옛 자리로 돌아가
+      화면이 가리키는 경로와 어긋난다."""
+    rows = read_index(root)
+    n = 0
+    for r in rows:
+        new = fn(str(r.get("file") or ""))
+        if new and new != r.get("file"):
+            r["file"] = new
+            n += 1
+    if n:
+        _write_index(root, rows)
+    return n
+
+
 def _gone(p: Path) -> bool:
     """지우고 **정말 없어졌는지** 돌려준다 (`_hard_move` 의 ★★주)."""
     for wait in RETRY_RM:

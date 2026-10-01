@@ -88,6 +88,25 @@ def _remap(st: dict, moved: dict[str, str]) -> None:
     st["sources"] = {k: moved.get(v, v) for k, v in st["sources"].items() if moved.get(v, v)}
 
 
+def carry_sources(root: Path, fn) -> int:
+    """**워크스페이스 쪽** 그림이 옮겨졌을 때 출처 표의 열쇠(`<ws>/<상대경로>`)를 따라 보낸다 (2026-10-01).
+    `fn(열쇠) → 새 열쇠 | None`. 고친 수를 준다.
+    ★안 고치면 그 보관 그림의 「새 탭으로 복제」가 출처의 기록(`env`)을 못 찾고, 원본을 다시 보관하면
+      같은 그림이 두 장이 된다 (`save` 의 토글이 열쇠로 판정한다)."""
+    st = _state(root)
+    n = 0
+    now: dict[str, str] = {}
+    for k, v in st["sources"].items():
+        new = fn(k)
+        if new and new != k:
+            n += 1
+        now[new or k] = v
+    if n:
+        st["sources"] = now
+        _put_state(root, st)
+    return n
+
+
 def stars(root: Path) -> list[str]:
     return _state(root)["starred"]
 

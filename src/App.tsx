@@ -192,6 +192,8 @@ export function App() {
           }
           const failed = useHealth.getState().health?.records?.failed ?? [];
           if (failed.length) toast(tGlobal("boot.recordsFailed", { names: failed.join(", ") }), "warn");
+          const unlaid = useHealth.getState().health?.records?.layoutFailed ?? [];
+          if (unlaid.length) toast(tGlobal("boot.layoutFailed", { names: unlaid.join(", ") }), "warn");
           /* ★★**기다리지 않는다** (실측 2026-08-27: 이 한 줄이 **0.94초**였다).
              구독 정보는 NAI 공홈에 물어보는 것이라 인터넷 왕복이 통째로 부팅 사슬에 얹혔다.
              화면이 뜨는 데 필요한 값이 아니다 — 도착하면 그때 배지가 채워진다.
@@ -727,7 +729,7 @@ function Booting({ ready, dead }: { ready: boolean; dead: boolean }) {
         {dead
           ? t("boot.failed")
           : moving
-            ? t("boot.records", { n: rec!.ws, m: rec!.wsTotal })
+            ? t(rec!.stage === "layout" ? "boot.layout" : "boot.records", { n: rec!.ws, m: rec!.wsTotal })
             : ready
               ? t("boot.workspace")
               : t("boot.backend")}
