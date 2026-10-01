@@ -789,7 +789,29 @@ class Store:
                             have.add(os.path.normcase(f"{parent}/{e.name}" if parent else e.name))
             except OSError:
                 continue                  # 폴더째 없다 — 그 안의 줄은 전부 빠진다
-        return [r for r in recs if os.path.normcase(str(r.get("file") or "")) in have]
+        def listed(parent: str) -> None:
+            if parent in seen:
+                return
+            seen.add(parent)
+            try:
+                with os.scandir(d / parent if parent else d) as it:
+                    for e in it:
+                        if e.is_file():
+                            have.add(os.path.normcase(f"{parent}/{e.name}" if parent else e.name))
+            except OSError:
+                pass                      # 폴더째 없다 — 그 안의 줄은 전부 빠진다
+
+        def alive(f: str) -> bool:
+            if os.path.normcase(f) in have:
+                return True
+            # ★옛 배치의 경로면 옮겨 간 자리도 본다 (`_legacy_spots` — 이전이 멈춘 사이에도 그림이 남는다)
+            for alt in self._legacy_spots(f):
+                listed(alt.rpartition("/")[0])
+                if os.path.normcase(alt) in have:
+                    return True
+            return False
+
+        return [r for r in recs if alive(str(r.get("file") or ""))]
 
     def heavy_of(self, ws: str, file: str) -> dict:
         """그 그림의 **무거운 것**(`HEAVY_KEYS`: `resolved`·`env`·`inference`). 없으면 빈 것.
@@ -1204,9 +1226,8 @@ class Store:
             if not nxt:
                 break
             cur = nxt
-        alias = self._legacy_alias(rel)
-        if alias:
-            base = self.dir_of(ws).resolve()
+        base = self.dir_of(ws).resolve()
+        for alias in self._legacy_spots(rel):
             p = (base / alias).resolve()
             if str(p).startswith(str(base)) and p.exists():
                 return p
@@ -1233,6 +1254,15 @@ class Store:
         head = f"{OUT_DIR}/{LEGACY_MULTI}/"
         r = (rel or "").replace("\\", "/")
         return f"{OUT_DIR}/{r[len(head):]}" if r.startswith(head) else None
+
+    @classmethod
+    def _legacy_spots(cls, rel: str) -> list[str]:
+        """옛 경로가 **지금 있을 수 있는 자리** — 새 배치의 자리, 그리고 이전이 멈춘 사이 비켜 둔 폴더 안
+        (`LAYOUT_TMP`, 다음 부팅에 마저 옮긴다). 그 사이에도 그림이 화면에서 빠지지 않게 한다."""
+        alias = cls._legacy_alias(rel)
+        if not alias:
+            return []
+        return [alias, f"{OUT_DIR}/{LAYOUT_TMP}/{alias[len(OUT_DIR) + 1:]}"]
 
     # ── 그림을 다른 자리로 (탭 옮기기·씬 그룹 옮기기가 함께 쓴다) ──
     def _relocate(self, src_ws: str, rows: list[dict], dst_ws: str, tab_name: str,

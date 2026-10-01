@@ -15,6 +15,7 @@ import { dedupeByFile, takesOf } from "../lib/takes";
 import type { Rec } from "../lib/takes";
 import { isPreviewFile, previewOf, usePreviews } from "./previews";
 import { moveTo } from "../lib/moveTo";
+import { carryDocs } from "../lib/carryEditor";
 import { planDelete, type DelPlan, type DelTarget } from "../lib/delPlan";
 export type { DelPlan, DelTarget } from "../lib/delPlan";
 // ★**형만** 가져온다 — `gen.ts` 가 이 파일을 부르므로 값으로 가져오면 순환이 된다
@@ -580,38 +581,15 @@ function withGroupMoved(spec: Spec, groupId: string, toTabId: string, fillGroup:
  *  ★옮길 그림이 없으면 서버를 안 부른다 — 이름만 바뀌는 것은 예전과 같다.
  *  ★되돌리기 기록은 **비우지 않는다** (`lib/undo` 의 ★★주 — 씬 번호 개명 `runRenumber` 도 같다).
  *  @returns 못 바꿨으면 그 이유 (조수가 그대로 전한다) */
-/** 옮긴 그림을 **편집 캔버스**에도 따라 보낸다 (2026-10-01) — 원본 자리(덮어쓰기·하위 output 저장의 근거)와
- *  만화 컷의 후보. `moves` 는 워크스페이스 기준 옛 경로 → 새 경로, `to` 는 받는 워크스페이스(탭 옮기기)다.
+/** 옮긴 그림을 **편집 캔버스**에도 따라 보낸다 (`lib/carryEditor` 의 머리 주석).
  *  ★서버가 `state.json` 을 고치면 안 된다 — 화면이 캔버스를 들고 있다가 통째로 다시 쓴다. 부팅 이전만
  *    화면이 뜨기 전이라 서버가 고친다 (`backend/server.py` 의 `_carry_editor`).
  *  ★값으로 부르면 순환이 된다 (`editor/cutGen` 이 이 파일을 읽는다) — **부를 때** 싣는다 (`generating` 과 같다). */
 async function carryEditor(ws: string, moves: Record<string, string> | undefined, to?: string): Promise<void> {
   if (!moves || !Object.keys(moves).length) return;
   const { useEditor } = await import("../editor/store");
-  const dst = to ?? ws;
-  let hit = false;
-  const docs = useEditor.getState().docs.map((d) => {
-    let nd = d;
-    const rel = d.src?.rel;
-    if (rel?.startsWith(`${ws}/`) && moves[rel.slice(ws.length + 1)]) {
-      nd = { ...nd, src: { ...d.src!, rel: `${dst}/${moves[rel.slice(ws.length + 1)]}` } };
-      hit = true;
-    }
-    if (d.layers.some((l) => l.panel?.gen?.takes.some((k) => k.ws === ws && moves[k.file]))) {
-      nd = {
-        ...nd,
-        layers: nd.layers.map((l) => {
-          const g = l.panel?.gen;
-          if (!l.panel || !g || !g.takes.some((k) => k.ws === ws && moves[k.file])) return l;
-          const takes = g.takes.map((k) => (k.ws === ws && moves[k.file] ? { ws: dst, file: moves[k.file] } : k));
-          return { ...l, panel: { ...l.panel, gen: { ...g, takes } } };
-        }),
-      };
-      hit = true;
-    }
-    return nd;
-  });
-  if (hit) useEditor.setState({ docs });
+  const docs = carryDocs(useEditor.getState().docs, ws, moves, to);
+  if (docs) useEditor.setState({ docs });
 }
 
 async function renamePlace(
