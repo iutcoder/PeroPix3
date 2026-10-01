@@ -1413,7 +1413,7 @@ export const ko: Dict = {
     picked: "{n}장 선택",
     enhanceSkip: "아직 강화 안 한 것만 돌리기",
     cardLabel: "SCENE CARD",
-    numberHint: "파일 이름 앞에 붙는 번호입니다 (001_001.png)",
+    numberHint: "파일 이름 앞에 붙는 번호입니다 (001-001.png)",
     seedReuse: "이 시드로 고정 (랜덤 끔)",
     running: "생성 중…",
     queued: "대기",

@@ -70,8 +70,11 @@ LAYOUT_MARK = ".layout"
 LAYOUT_TMP = ".멀티-이전중"
 # 파생 썸네일 캐시 — 원본에서 자동으로 굽는다. 지워도 다시 생긴다 (thumbs.py 참조)
 THUMB_DIR = ".thumbs"
+#: 생성물 이름에서 **순번 앞** 구분자 (`file_lead` 의 ★주). 읽을 때는 옛 `_` 도 함께 본다 (`SEQ_SEPS`).
+SEQ_SEP = "-"
+SEQ_SEPS = re.compile(r"[-_]")
 
-_SAFE = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
+_SAFE =re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 
 
 def safe_name(s: str, fallback: str = "무제") -> str:
@@ -98,10 +101,14 @@ def safe_tag(s: str, max_length: int = 100) -> str:
 def file_lead(cell_no: int | None, cell: str | None, exclude_no: bool) -> str:
     """생성물 파일 이름의 **앞 조각** — `<번호>_<씬 이름>` (v2 `backend.py:2737-2746`).
 
-        번호+이름   003_수영복_001.png
-        이름만      수영복_001.png        ← 「파일 이름에서 씬 번호 빼기」
-        번호만      003_001.png           ← 씬 이름이 비었거나 쓸 수 없는 글자뿐일 때
+        번호+이름   003_수영복-001.png
+        이름만      수영복-001.png        ← 「파일 이름에서 씬 번호 빼기」
+        번호만      003-001.png           ← 씬 이름이 비었거나 쓸 수 없는 글자뿐일 때
         없음        001.png               ← 씬이 없는 싱글 탭
+
+    ★순번 앞 구분자는 `-` 다 (`SEQ_SEP`, 사용자 결정 2026-10-01). SillyTavern 의 표정 이미지가
+      한 감정의 여러 장을 `joy-1.png` 처럼 점이나 대시로만 알아본다 — 밑줄이면 이름을 바꿔야 했다.
+      번호와 이름 사이는 `_` 그대로다. 옛 그림(`수영복_001.png`)은 이름을 안 바꾸고 `next_name` 이 함께 센다.
 
     ★★「씬 번호 빼기」는 v2 와 같이 **번호만** 뺀다 (사용자 결정 2026-08-18, v2-port-audit D3).
       예전에는 이름이 아예 안 들어가서, 번호를 빼면 그 폴더의 **모든 씬이 한 번호열을 공유**했다
@@ -395,7 +402,7 @@ class Store:
         return p
 
     def next_name(self, d: Path, prefix: str, fmt: str, ws: str | None = None,
-                  names: list[str] | None = None) -> Path:
+                  names: list[str] | None = None, sep: str = SEQ_SEP) -> Path:
         """그 폴더에서 **다음 순번**. 시각이 아니라 순번이라 만든 차례가 그대로 보인다.
         ★번호는 **접두마다 따로** 센다 — 멀티에서 슬롯 1의 3장과 슬롯 2의 3장이
         각각 001~003 이 되어야 슬롯 안에서 몇 번째인지 읽힌다.
@@ -408,8 +415,9 @@ class Store:
           (실측: 씬 삭제 → 이미지 삭제 → 씬 다시 생성 → 1장 생성 → 파일은 생겼는데 안 보임.
            레코드 두 줄의 `file` 이 똑같았다.)
           번호를 건너뛰는 편이 낫다 — 되돌리기(`restore`)로 옛 파일이 제자리에 돌아와도
-          이름이 겹치지 않는다."""
-        head = f"{prefix}_" if prefix else ""
+          이름이 겹치지 않는다.
+        ★★구분자는 `-` 로 짓되 옛 `_` 도 센다 (`SEQ_SEP`). 안 세면 옛 그림이 있는 씬이 001 부터
+          다시 시작해 `수영복_001.png` 곁에 `수영복-001.png` 가 선다."""
         used = 0
         # ★★모으기는 **한 번만** 할 수 있다 — 여러 장을 이어 지을 때는 부르는 쪽이
         #   목록을 들고 있다가 그대로 넘긴다 (`_names_in` 의 ★★주).
@@ -417,11 +425,16 @@ class Store:
             names = self._names_in(d, ws)
         for name in names:
             stem = name.rsplit(".", 1)[0]
-            if not stem.startswith(head):
-                continue
-            part = stem[len(head):].split("_")[0]
+            if prefix:
+                if not stem.startswith(prefix) or stem[len(prefix):len(prefix) + 1] not in ("-", "_"):
+                    continue
+                rest = stem[len(prefix) + 1:]
+            else:
+                rest = stem
+            part = SEQ_SEPS.split(rest, 1)[0]
             if part.isdigit():
                 used = max(used, int(part))
+        head = f"{prefix}{sep}" if prefix else ""
         return d / f"{head}{used + 1:03d}.{fmt}"
 
     def _names_in(self, d: Path, ws: str | None) -> list[str]:
@@ -549,9 +562,10 @@ class Store:
                 continue
             lead = file_lead(it.get("cell_no"), it.get("cell"), bool(it.get("exclude_no")))
             # ★이미 그 접두면 손대지 않는다 — 쓸데없이 순번을 흔들지 않는다
-            if lead and src.name.startswith(f"{lead}_"):
+            #   (옛 구분자 `_` 로 지은 것도 그 접두다 — 구분자만 바꾸려고 순번을 흔들지 않는다)
+            if lead and (src.name.startswith(f"{lead}-") or src.name.startswith(f"{lead}_")):
                 continue
-            if not lead and "_" not in src.name:
+            if not lead and not SEQ_SEPS.search(src.stem):
                 continue
             plan.append((src, lead, src.suffix.lstrip("."), "/".join(parts)))
         if not plan:
@@ -1300,7 +1314,8 @@ class Store:
                 continue                      # ★같은 자리다 (이름이 같은 탭) — 옮길 것이 없다
             if target.exists():
                 # ★이름이 겹치면 같은 접두로 다음 번호를 받는다 (생성과 같은 규칙)
-                lead = p.stem.rsplit("_", 1)[0] if "_" in p.stem else ""
+                cut = max(p.stem.rfind("-"), p.stem.rfind("_"))      # 순번 앞 구분자 (옛 `_` 포함)
+                lead = p.stem[:cut] if cut > 0 else ""
                 got = names.get(d)
                 if got is None:
                     got = names[d] = self._names_in(d, dst_ws)

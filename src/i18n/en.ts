@@ -1371,7 +1371,7 @@ export const en = {
     picked: "{n} selected",
     enhanceSkip: "Only the ones not enhanced yet",
     cardLabel: "SCENE CARD",
-    numberHint: "Prefixes the saved file name (001_001.png)",
+    numberHint: "Prefixes the saved file name (001-001.png)",
     seedReuse: "Reuse this seed (turns Random off)",
     running: "generating…",
     queued: "queued",

@@ -2302,9 +2302,9 @@ async def upscale_image(body: UpscaleBody):
                 "ts": datetime.now().isoformat(timespec="seconds")}
 
     # 원본과 **같은 폴더**에 남긴다 — 버전이라 자리가 갈리면 찾기 어렵다.
-    # ★접두를 따로 둔다(`up_001.png`) — 세트 탭의 셀 번호(`003_002.png`)와 섞이면
-    #   폴더만 보고는 무엇이 무엇인지 알 수 없다.
-    path = store.next_name(src.parent, "up", "png")
+    # ★접두를 따로 둔다(`up_001.png`) — 세트 탭의 셀 번호(`003-002.png`)와 섞이면
+    #   폴더만 보고는 무엇이 무엇인지 알 수 없다. 구분자는 옛 `_` 그대로다 (`SEQ_SEP` 는 씬 그림의 것).
+    path = store.next_name(src.parent, "up", "png", sep="_")
     path.write_bytes(png)
     rel = store.rel(body.workspace, path)
 
