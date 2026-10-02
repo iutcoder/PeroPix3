@@ -261,16 +261,26 @@ type Live = { id: string; name: string; center: Center }[];
 type Surface = { chars: Live; picked: number; place: (i: number, at: Center) => void };
 
 /** 자유 배치 — 끌어서 옮긴다 (공홈 `sV`).
- *  ★빈 곳을 누르면 **지금 고른 인물**이 거기로 간다. 마커 **18px 안**을 누르면 그것을 집는다. */
+ *  ★빈 곳을 누르면 **지금 고른 인물**이 거기로 간다. 마커(번호 원 **과 이름표**)를 누르면 그것을 집는다.
+ *  ★★이름표도 손잡이다 (사용자 지적 2026-10-02: 이름표가 생겼는데 원만 집혀 불편하다).
+ *    잡은 자리와 원의 거리를 들고 끈다 — 이름표 끝을 잡아도 원이 커서로 튀지 않는다. */
 function FreeSurface(p: Surface & { setPicked: (i: number) => void }) {
   const surface = useRef<HTMLDivElement>(null);
-  const dragging = useRef<number | null>(null);
+  const dragging = useRef<{ i: number; dx: number; dy: number } | null>(null);
   const warn = useMemo(() => crowded(p.chars.map((c) => c.center)), [p.chars]);
 
-  /** 누른 자리에서 가장 가까운 마커 — 18px 밖이면 없는 것으로 본다 */
+  /** 누른 자리의 마커 — 그려진 사각형(원 + 이름표) 안이거나 원의 18px 안.
+   *  ★겹치면 위에 그려진 것이다: 고른 인물(`zIndex` 2) → 뒤에 그려진 것 */
   const grab = (px: number, py: number) => {
     const r = surface.current?.getBoundingClientRect();
     if (!r) return undefined;
+    const boxes = [...(surface.current?.querySelectorAll<HTMLElement>("[data-char-marker]") ?? [])];
+    const inside = (i: number) => {
+      const b = boxes[i]?.getBoundingClientRect();
+      return !!b && px >= b.left && px <= b.right && py >= b.top && py <= b.bottom;
+    };
+    if (inside(p.picked)) return p.picked;
+    for (let i = p.chars.length - 1; i >= 0; i--) if (inside(i)) return i;
     let best = 18;
     let hit: number | undefined;
     p.chars.forEach((c, i) => {
@@ -292,18 +302,25 @@ function FreeSurface(p: Surface & { setPicked: (i: number) => void }) {
         const hit = grab(e.clientX, e.clientY);
         const r = surface.current?.getBoundingClientRect();
         if (hit === undefined) {
-          dragging.current = p.picked;
+          dragging.current = { i: p.picked, dx: 0, dy: 0 };
           if (r) p.place(p.picked, toCenter(e.clientX, e.clientY, r));
         } else {
-          dragging.current = hit;
+          const c = p.chars[hit].center;
+          dragging.current = r
+            ? { i: hit, dx: r.left + c.x * r.width - e.clientX, dy: r.top + c.y * r.height - e.clientY }
+            : { i: hit, dx: 0, dy: 0 };
           p.setPicked(hit);
         }
       }}
       onPointerMove={(e) => {
-        if (!e.currentTarget.hasPointerCapture(e.pointerId)) return;
-        const i = dragging.current;
+        if (!e.currentTarget.hasPointerCapture(e.pointerId)) {
+          // 마커 위에서는 집을 수 있다는 것을 커서로 알린다
+          e.currentTarget.style.cursor = grab(e.clientX, e.clientY) === undefined ? "crosshair" : "grab";
+          return;
+        }
+        const g = dragging.current;
         const r = surface.current?.getBoundingClientRect();
-        if (i !== null && r) p.place(i, toCenter(e.clientX, e.clientY, r));
+        if (g && r) p.place(g.i, toCenter(e.clientX + g.dx, e.clientY + g.dy, r));
       }}
       onPointerUp={() => {
         dragging.current = null;
