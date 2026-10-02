@@ -629,6 +629,11 @@ function ScenePreview() {
   const stepImg = useQueue((q) => (cell ? (q.steps[stepKey(ws, cell)] ?? "") : ""));
   /** 지금 그리고 있는 대기 칸 — 씬 줄과 **같은 답**을 본다 (`store/queue.runningPendingId`) */
   const runId = useQueue(() => runningPendingId(activeSceneGroup()?.id));
+  /** ★★그리는 중인 그림의 **완성 크기** (사용자 지적 2026-10-02: 배율을 걸어 두면 스트리밍 그림이 다 된 뒤와
+   *  다른 크기로 보였다). NAI 의 중간 그림은 완성본보다 작을 수 있어(`imgutil.preview_jpeg` 의 ★주), 그 픽셀 크기에
+   *  배율을 곱하면 같은 100% 가 더 작게 그려진다. 대기 칸에 적어 둔 결과 크기(`Pending.size`)를 기준으로 잰다.
+   *  ★적어 둔 것이 없으면(재연결로 되살린 칸) 그림의 크기 그대로다. */
+  const stepSize = useQueue((q) => q.pending.find((x) => x.id === (pendingSel ?? runId))?.size);
   const previews = usePreviews((s) => s.items);
 
   /* ★캐릭터 배치 — 큰 그림 위에 판을 겹친다 (`CharPositioner` 머리 주석).
@@ -874,7 +879,7 @@ function ScenePreview() {
           /* ★크기를 여기서도 잰다 — 배율·가운데 잡기가 **그림의 실제 크기**를 안다는 전제로
              돌아간다. 같은 값이면 스토어가 무시하므로 프레임마다 다시 그리지 않는다
              (`store/previewBox` 의 `setNat`). */
-          onLoad={(e) => setNat({ w: e.currentTarget.naturalWidth, h: e.currentTarget.naturalHeight })}
+          onLoad={(e) => setNat(stepSize ?? { w: e.currentTarget.naturalWidth, h: e.currentTarget.naturalHeight })}
           onPointerMove={panMove}
           onPointerUp={panUp}
           onPointerDown={movable ? panDown : undefined}
