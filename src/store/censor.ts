@@ -409,6 +409,13 @@ export const useCensor = create<S>((set, get) => ({
   setTab(t) {
     if (t === get().tab) return;
     set({ tab: t, undos: [], renderer: null, src: null, error: null });
+    /* ★★**검열 전으로 돌아가면 검열 중이던 판을 통째로 버린다** (사용자 결정 2026-10-02: 취소하거나 검열 전으로
+       돌아가 다시 검열을 누르면 검열 중이던 것이 계속 남아 있었다). 그림 목록 · 탐지 결과 · 칠한 것 전부다.
+       ★`staged` 가 그 판이 있다는 표시다 — 검열 후 탭을 거쳐 돌아와도 같다. */
+    if (t === "before" && get().staged) {
+      scanSeq++;
+      set({ images: [], idx: -1, boxes: {}, paint: {}, scanning: false, staged: false });
+    }
     const s = get();
     if (t === "after") s.select(s.afterIdx >= 0 ? s.afterIdx : 0);
     else s.select(s.idx >= 0 ? s.idx : 0);
@@ -438,6 +445,9 @@ export const useCensor = create<S>((set, get) => ({
 
   async addImages(items) {
     if (!items.length) return;
+    // ★검열 중인 판이 있으면 먼저 버린다 — 보내는 쪽(캔버스·갤러리·편집)이 뒤에 검열 전 탭으로 데려가는데,
+    //   그때 버리면 방금 담은 것까지 사라진다 (`setTab` 의 ★★주)
+    if (get().staged) get().setTab("before");
     const base = await backendUrl();
     // 목록에 그릴 작은 그림·크기는 서버가 준다. 앱에는 경로만 오므로 화면이 못 읽는다
     let probed: { thumb?: string; width?: number; height?: number }[] = [];
@@ -699,9 +709,8 @@ export const useCensor = create<S>((set, get) => ({
   },
 
   cancelProcessing() {
-    // ★취소하면 칠한 것을 **무조건 버린다** (사용자 지시 2026-09-05). 탐지 결과는 남는다
-    set({ tab: "before", undos: [], paint: {}, staged: false, error: null });
-    get().select(get().idx >= 0 ? get().idx : 0);
+    // ★취소는 검열 전으로 돌아가는 것이고, 그때 검열 중이던 판을 통째로 버린다 (`setTab` 의 ★★주, 사용자 결정 2026-10-02)
+    get().setTab("before");
   },
 
   toggleBox(i) {
