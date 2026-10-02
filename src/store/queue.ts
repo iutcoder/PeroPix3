@@ -77,6 +77,12 @@ export type Pending = {
   /** ★어느 워크스페이스에 넣었나 (사용자 실측 2026-09-02: 복제한 워크스페이스는 씬 그룹 id 가 같아서
    *  한쪽에서 생성하면 **모든** 워크스페이스에 「생성 중」 칸이 떴다). 화면은 제 워크스페이스 것만 그린다 */
   workspace: string;
+  /** ★생성될 그림의 값 — 대기 칸을 고른 동안 그림 아래 줄이 이것을 보인다 (사용자 지시 2026-10-02) */
+  seed?: number;
+  /** 결과 크기 — 인퍼런스면 잘라 낸 크기다 (캔버스가 아니다) */
+  size?: { w: number; h: number };
+  /** 자동 저장을 끄고 넣었나 — 줄의 「저장」 버튼이 이것으로 선다 */
+  unsaved?: boolean;
 };
 
 type S = {
@@ -206,6 +212,21 @@ export function runningPendingId(groupId: string | null | undefined): string | n
   return lanes ? null : (mine[0]?.id ?? null);
 }
 
+/** 대기 칸에 적어 둘 **생성될 그림의 값** — 시드 · 결과 크기 · 저장 여부. 항목에 있으면 항목, 없으면 공통 값.
+ *  ★인퍼런스는 캔버스로 나가고 결과는 잘라 낸 자리다 (`imageInput.payload` 의 `inference.crop`). */
+function pendingLooks(base: Record<string, unknown>, it: Record<string, unknown>): Pick<Pending, "seed" | "size" | "unsaved"> {
+  const pick = <T,>(k: string) => (it[k] ?? base[k]) as T | undefined;
+  const seed = pick<number>("seed");
+  const crop = (pick<{ crop?: number[] }>("inference"))?.crop;
+  const w = crop?.[2] ?? pick<number>("width");
+  const h = crop?.[3] ?? pick<number>("height");
+  return {
+    seed: typeof seed === "number" ? seed : undefined,
+    size: w && h ? { w, h } : undefined,
+    unsaved: pick<boolean>("auto_save") === false,
+  };
+}
+
 export const useQueue = create<S>((set, get) => ({
   connected: false,
   progress: EMPTY,
@@ -294,6 +315,7 @@ export const useQueue = create<S>((set, get) => ({
           // ★넣는 쪽이 해석한 계정이다 (`store/gen`·`store/genRemote`) — 서버의 차선과 같은 값
           account: String(base.account ?? ""),
           workspace: String(base.workspace ?? ""),
+          ...pendingLooks(base, it),
         });
       }
     }

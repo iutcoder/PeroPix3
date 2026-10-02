@@ -202,14 +202,17 @@ function SceneActions() {
   const focused = useSceneFocus((s) => s.file);
   /* ★★**고른 그림이 없어도 줄은 남는다** (사용자 지적 2026-10-02). 생성을 누르면 선택이 만들어지는
      대기 칸으로 가서 그림이 비는데, 그때 이 줄이 사라지면 그만큼 큰 그림 자리가 커져 **위치 지정
-     판의 마커가 움직인 것처럼** 보였다. 비어 있는 동안은 마지막으로 보던 그림의 줄을 흐리게 두고
-     누를 수 없게 한다 (`inert`).
-     ★★이름·시드·해상도도 **그대로 둔다.** 창이 좁으면 이 줄이 두 줄로 접히는데, 그것들을 비우면 한 줄로
-       줄어 똑같이 그림 자리가 커졌다 (실측: 66px → 36px). */
+     판의 마커가 움직인 것처럼** 보였다. 비어 있는 동안은 줄을 그대로 두고 버튼만 막는다 (`inert`).
+     ★★대기 칸을 고른 동안은 **생성될 그림의 줄**이다 (사용자 지시 2026-10-02): 시드·해상도는 그 장의 값이고,
+       자동 저장을 끄고 넣었으면 「저장」 버튼까지 선다 (`Pending` 의 `seed`·`size`·`unsaved`).
+     ★대기 칸도 아니면(마지막 장을 지운 뒤 등) 마지막으로 보던 그림의 줄을 둔다. 값을 비우지 않는다 —
+       창이 좁으면 이 줄이 두 줄로 접히는데, 비우면 한 줄로 줄어 똑같이 그림 자리가 커졌다 (실측: 66px → 36px). */
   const last = useRef<string | null>(null);
   if (focused) last.current = focused;
   const idle = !focused;
   const file = focused ?? last.current ?? "";
+  const pendingId = useSceneFocus((s) => s.pending);
+  const pend = useQueue((s) => (idle && pendingId ? s.pending.find((q) => q.id === pendingId) : undefined));
   /** 지금 지우면 몇 장이 가나 — ★**구독해서 읽는다.** 씬 줄에서 고른 것이 늘고 줄면
    *  이 줄의 안내도 따라 바뀌어야 한다 (`getState()` 로만 읽으면 다시 안 그린다). */
   const picked = useSceneFocus((s) => s.picked);
@@ -223,8 +226,8 @@ function SceneActions() {
   const nat = usePreviewBox((s) => s.nat);
   const lastDims = useRef<{ w: number; h: number } | null>(null);
   if (!idle) lastDims.current = nat.w ? nat : null;
-  // ★비어 있는 동안 미리보기는 대기 칸을 잰다 — 줄에는 마지막 그림의 값을 둔다 (위 ★★주)
-  const dims = lastDims.current;
+  // ★비어 있는 동안 미리보기는 대기 칸을 잰다 — 줄에는 생성될 그림(없으면 마지막 그림)의 값을 둔다 (위 ★★주)
+  const dims = pend ? pend.size ?? null : lastDims.current;
   const [saving, setSaving] = useState(false);
 
   /** ★★미저장 그림에도 **같은 줄**이 붙는다 (사용자 지시 2026-08-19 · 2026-09-30 *"자동저장을 하든
@@ -245,7 +248,7 @@ function SceneActions() {
    *  ★읽기만 하는 것(프롬프트 보기·설정)도 바이트를 그대로 보내 메타데이터만 읽는다 (`/api/tools/meta-upload`). */
   const un = previews.find((x) => x.file === file);
   /** 파일 자체가 있어야 하는 것(폴더 열기)을 끌지 — 여러 장이면 **하나라도** 미저장이면 끈다 */
-  const unsaved = many > 1 ? picked.some(isPreviewFile) : !!un;
+  const unsaved = pend ? !!pend.unsaved : many > 1 ? picked.some(isPreviewFile) : !!un;
   /** 「저장」 버튼 — ★저장하는 **유일한** 자리다. 저장한 그 장을 그대로 보고 있게 한다 (`saveTake`) */
   const saveNow = async () => {
     setSaving(true);
@@ -352,8 +355,8 @@ function SceneActions() {
     >
       <ImageActions
         url={un ? `data:image/${un.preview.fmt};base64,${un.preview.b64}` : imgUrl(base, ws, file, rec?.ts)}
-        name={un ? tr("scenes.unsaved") : file.split("/").pop() ?? file}
-        seed={(un ?? rec)?.seed ?? 0}
+        name={pend ? (pend.unsaved ? tr("scenes.unsaved") : "") : un ? tr("scenes.unsaved") : file.split("/").pop() ?? file}
+        seed={pend ? pend.seed : (un ?? rec)?.seed ?? 0}
         loadMeta={loadMeta}
         /* ★설정 불러오기도 **그때 구조**를 쓴다 (사용자 지적 2026-08-19: 블록이 한 뭉텅이로 왔다).
            미저장 그림에는 레코드가 없어 스냅샷도 없다 — 그때는 메타데이터로 떨어진다. */
@@ -470,7 +473,7 @@ function SceneActions() {
               {Icon.trash}
             </button>
             {/* ★저장 안 한 동안만 — 저장하면 이 단추만 사라지고 줄은 그대로다 */}
-            {un && (
+            {(pend ? pend.unsaved : un) && (
               <button
                 data-save-preview
                 disabled={saving}
