@@ -199,7 +199,17 @@ function SceneActions() {
   const vert = useUi((u) => u.laneSide === "right");
   const { base } = useGen();
   const { current: ws, records } = useWs();
-  const file = useSceneFocus((s) => s.file);
+  const focused = useSceneFocus((s) => s.file);
+  /* ★★**고른 그림이 없어도 줄은 남는다** (사용자 지적 2026-10-02). 생성을 누르면 선택이 만들어지는
+     대기 칸으로 가서 그림이 비는데, 그때 이 줄이 사라지면 그만큼 큰 그림 자리가 커져 **위치 지정
+     판의 마커가 움직인 것처럼** 보였다. 비어 있는 동안은 마지막으로 보던 그림의 줄을 흐리게 두고
+     누를 수 없게 한다 (`inert`).
+     ★★이름·시드·해상도도 **그대로 둔다.** 창이 좁으면 이 줄이 두 줄로 접히는데, 그것들을 비우면 한 줄로
+       줄어 똑같이 그림 자리가 커졌다 (실측: 66px → 36px). */
+  const last = useRef<string | null>(null);
+  if (focused) last.current = focused;
+  const idle = !focused;
+  const file = focused ?? last.current ?? "";
   /** 지금 지우면 몇 장이 가나 — ★**구독해서 읽는다.** 씬 줄에서 고른 것이 늘고 줄면
    *  이 줄의 안내도 따라 바뀌어야 한다 (`getState()` 로만 읽으면 다시 안 그린다). */
   const picked = useSceneFocus((s) => s.picked);
@@ -211,9 +221,11 @@ function SceneActions() {
      실제 크기는 하나뿐이니 재는 곳도 하나여야 한다 (사용자 지시: *"생성된 이미지 하단에
      해당 이미지의 해상도도 표기. 시드 옆에"*). */
   const nat = usePreviewBox((s) => s.nat);
-  const dims = nat.w ? nat : null;
+  const lastDims = useRef<{ w: number; h: number } | null>(null);
+  if (!idle) lastDims.current = nat.w ? nat : null;
+  // ★비어 있는 동안 미리보기는 대기 칸을 잰다 — 줄에는 마지막 그림의 값을 둔다 (위 ★★주)
+  const dims = lastDims.current;
   const [saving, setSaving] = useState(false);
-  if (!file) return null;
 
   /** ★★미저장 그림에도 **같은 줄**이 붙는다 (사용자 지시 2026-08-19 · 2026-09-30 *"자동저장을 하든
    *  안 하든 최대한 UI 동일하게"*).
@@ -329,7 +341,15 @@ function SceneActions() {
        버튼들이 하단 모드랑 딱 붙어 있음"*). 아래 모드에서는 이 줄 밑에 **씬 줄**이 이어져
        그것이 간격 노릇을 하는데, 세로 모드에서는 씬이 오른쪽으로 가 버려 이 줄이 곧
        하단바와 맞닿는다. 아래를 0 으로 둔 것은 그 전제 위의 값이었다. */
-    <div style={{ flexShrink: 0, padding: vert ? "var(--sp-3) var(--sp-4)" : "var(--sp-3) var(--sp-4) 0" }}>
+    <div
+      data-scene-actions={idle ? "idle" : "on"}
+      inert={idle}
+      style={{
+        flexShrink: 0,
+        padding: vert ? "var(--sp-3) var(--sp-4)" : "var(--sp-3) var(--sp-4) 0",
+        opacity: idle ? 0.4 : 1,
+      }}
+    >
       <ImageActions
         url={un ? `data:image/${un.preview.fmt};base64,${un.preview.b64}` : imgUrl(base, ws, file, rec?.ts)}
         name={un ? tr("scenes.unsaved") : file.split("/").pop() ?? file}

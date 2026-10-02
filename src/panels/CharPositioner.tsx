@@ -296,7 +296,9 @@ function FreeSurface(p: Surface & { setPicked: (i: number) => void }) {
   return (
     <div
       ref={surface}
-      style={{ width: "100%", height: "100%", position: "relative", cursor: "crosshair", touchAction: "none" }}
+      /* ★★`userSelect: none` — 없으면 번호·이름 글자에서 글자 선택이 시작되어 끌기가 `pointercancel` 로
+         끊긴다 (실측 2026-10-02: 생성을 누른 직후에 끌면 첫 한 칸만 옮겨지고 멈췄다. `useReorder` 의 같은 주) */
+      style={{ width: "100%", height: "100%", position: "relative", cursor: "crosshair", touchAction: "none", userSelect: "none" }}
       onPointerDown={(e) => {
         e.currentTarget.setPointerCapture(e.pointerId);
         const hit = grab(e.clientX, e.clientY);
