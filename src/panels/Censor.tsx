@@ -241,7 +241,10 @@ export function Censor() {
         />
       </div>
 
-      {/* ── 썸네일 띠: 지금 다루는 목록 ── */}
+      {/* ── 썸네일 띠: 지금 다루는 목록 ──
+          ★★장 수·비우기는 **스크롤 밖**이다 (사용자 지적 2026-10-02: 그림을 많이 넣으면 비우기 버튼이 밀려 안 보였다).
+            띠는 가로로 스크롤되는 칸과 오른쪽 끝에 붙은 칸 둘로 나뉜다. */}
+      <div style={{ ...card, flexShrink: 0, height: 68, display: "flex", alignItems: "center", gap: "var(--sp-2)", padding: "var(--sp-2)" }}>
       <div
         ref={stripRef}
         data-censor-strip
@@ -252,13 +255,12 @@ export function Censor() {
           e.currentTarget.scrollLeft += e.deltaY;
         }}
         style={{
-          ...card,
-          flexShrink: 0,
-          height: 68,
+          flex: 1,
+          minWidth: 0,
+          height: "100%",
           display: "flex",
           alignItems: "center",
           gap: "var(--sp-2)",
-          padding: "var(--sp-2)",
           overflowX: "auto",
           overflowY: "hidden",
         }}
@@ -337,7 +339,7 @@ export function Censor() {
             {t("censor.emptyList")}
           </span>
         )}
-        <span style={{ flex: 1 }} />
+      </div>
         {!!list.length && (
           <span style={{ flexShrink: 0, paddingRight: "var(--sp-2)", fontSize: "var(--text-2xs)", color: "var(--ink-faint)", fontVariantNumeric: "tabular-nums" }}>
             {at + 1} / {list.length}
