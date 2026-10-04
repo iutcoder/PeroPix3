@@ -2,6 +2,10 @@ import { create } from "zustand";
 import { api, type TrashEntry } from "../lib/backend";
 import { t } from "../i18n";
 import { toast, undoToast } from "./toast";
+import { loadTags } from "../lib/tagData";
+import { isArtist, normTag, tallyTags, type IndexEntry, type TagHit } from "../lib/tagSearch";
+import { useUi } from "./ui";
+import { previewName, previewOf } from "./previews";
 
 /** 갤러리 — 워크스페이스에 쌓인 그림을 훑어 본다.
  *
@@ -12,7 +16,14 @@ import { toast, undoToast } from "./toast";
 
 /** ★칸 이름은 **서버가 주는 그대로**다 (`size`). 예전엔 `bytes` 로 적어 두고 서버는
  *  `size` 를 줘서 값이 언제나 undefined 였다 (`docs/v2-port-audit.md` F절). */
-export type GalleryImage = { file: string; name: string; size: number; mtime: number };
+export type GalleryImage = {
+  file: string;
+  name: string;
+  size: number;
+  mtime: number;
+  /** 작가 필터가 걸렸을 때 **이 그림이 가진 그 작가들** (고른 차례대로). 썸네일에 적는다. */
+  artists?: string[];
+};
 export type GalleryFolder = { path: string; count: number };
 
 export type ImageMeta = {
@@ -58,6 +69,26 @@ export type ImageMeta = {
 /** 폴더 전체를 뜻하는 값. `null` 은 "아직 안 정함"과 구분이 안 돼 쓰지 않는다. */
 export const ALL = "";
 
+/** 색인 훑기의 진행 (`backend/tagindex.py` 의 `status`) */
+export type IndexStatus = { running: boolean; done: number; total: number; error: string; built: number };
+
+/** 작가 거르기가 볼 범위 — 전체 폴더가 기본이다 (사용자 지시 2026-09-21) */
+export type ArtistScope = "all" | "folder";
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/* ★★**파일 → 작가들**을 한 번만 짓고 들고 있는다 (`artistsByFile`).
+   여는 열쇠는 `artistTags` **그 자체**다 — 훑고 나면 새 Map 으로 갈리므로, 같은 것이면
+   지어 둔 것을 그대로 준다. 칸마다 훑으면 수천 번을 돌고, 화면마다 따로 지으면 창구가 둘이 된다. */
+let _byFileFor: Map<string, TagHit> | null = null;
+let _byFile = new Map<string, string[]>();
+
+/** 그 파일이 이 폴더에 **바로** 놓여 있나 — 폴더 목록과 같은 판정이다 (하위는 안 센다) */
+const inFolder = (rel: string, folder: string) => {
+  const at = rel.lastIndexOf("/");
+  return (at < 0 ? "" : rel.slice(0, at)) === folder;
+};
+
 type S = {
   folders: GalleryFolder[];
   items: GalleryImage[];
@@ -70,7 +101,14 @@ type S = {
    *  섞이면 옮기기·지우기가 그쪽 규칙을 따라야 하는 것처럼 보인다. */
   vibeMode: boolean;
   setVibeMode: (on: boolean) => void;
+  /** 지금 **들여다보는 한 장** — 오른쪽 그림 정보 패널이 이것을 읽는다 */
   focus: string | null;
+  /** ★★**크게 보기가 열려 있나** (사용자 지시 2026-09-10: *"클릭하면 선택, 더블클릭하면
+   *  크게보기로 변경 … 클릭으로 선택했을 때도 우측 그림정보 패널에 생성정보 뜨게"*).
+   *  예전에는 `focus` 하나가 「정보 패널이 볼 한 장」과 「크게 띄웠나」를 겸해서, 고르기만
+   *  해도 창이 열렸다. 두 뜻을 갈라 둔다 — `focus` 는 눌러 둔 한 장, `big` 은 그것을 띄웠나. */
+  big: boolean;
+  setBig: (on: boolean) => void;
   meta: ImageMeta | null;
   metaFor: string | null;
   /** 일괄 작업 대상 (여러 장) */
@@ -85,12 +123,46 @@ type S = {
   total: number;
   hasMore: boolean;
 
+  /* ── 작가 거르기 (사용자 지시 2026-09-21) ──────────────────────────────
+     ★보관함 전체의 프롬프트를 서버가 곁파일에 모아 두고(`/api/keep/tags/*`), **태그로 쪼개고
+       작가인지 가르는 일은 화면이 한다** (`lib/tagSearch`). 쪼개는 규칙이 앱에 하나여야 해서다
+       (`backend/tagindex.py` 머리 ★★주).
+     ★파일마다 시각·크기가 곁파일에 함께 있어서, 걸러진 격자는 **서버에 다시 묻지 않고** 그것으로
+       그린다 (`artistItems`). */
+  artistBusy: boolean;
+  artistStatus: IndexStatus | null;
+  /** 곁파일 통째 (파일 → 시각·크기·프롬프트 원문들) */
+  artistIndex: Record<string, IndexEntry>;
+  /** 태그 → 그 태그가 쓰인 파일들. 작가인 것만 든다 */
+  artistTags: Map<string, TagHit>;
+  artistQuery: string;
+  /** 눌러 둔 작가들 (`normTag` 를 지난 열쇠, **고른 차례대로**). 비면 안 거른다.
+   *  ★여럿이면 **하나라도 들었으면** 보여 준다 (사용자 지시 2026-09-21). */
+  artists: string[];
+  artistScope: ArtistScope;
+  setArtistQuery: (q: string) => void;
+  /** 누를 때마다 켜고 끈다 */
+  toggleArtist: (tag: string) => void;
+  clearArtists: () => void;
+  setArtistScope: (v: ArtistScope) => void;
+  /** 색인을 증분으로 훑고 다시 센다 */
+  rescanArtists: () => Promise<void>;
+  /** 지금 조건으로 걸러진 목록 — 작가를 안 골랐으면 `null`(서버 목록을 그대로 쓴다) */
+  artistItems: () => GalleryImage[] | null;
+  /** ★★**파일 → 그 그림이 가진 작가들** — 「이 그림의 작가가 누구인가」를 묻는 **하나의 창구**다.
+   *  쓰는 자리 둘: 격자 칸에 이름을 적는 곳(`panels/Gallery`)과 고른 그림의 작가를 보여 주는 곳
+   *  (`panels/GalleryFolders`). 자리마다 따로 짜면 한쪽만 고쳐져 같은 그림에 다른 작가가 뜬다.
+   *  ★색인이 바뀔 때만 다시 짓는다 (아래 `_byFile` 주석). */
+  artistsByFile: () => Map<string, string[]>;
+
   load: (ws: string) => Promise<void>;
   /** 다음 쪽 — 스크롤이 바닥에 가까워지면 부른다 */
   more: (ws: string) => Promise<void>;
   setFolder: (ws: string, folder: string) => Promise<void>;
   setFocus: (ws: string, file: string | null) => Promise<void>;
   togglePick: (file: string) => void;
+  /** 고른 것을 통째로 갈아 끼운다 — 클릭(이 한 장만)·Shift+클릭(범위)이 쓴다 */
+  setPicked: (files: string[]) => void;
   pickAll: () => void;
   clearPick: () => void;
   isStarred: (file: string) => boolean;
@@ -113,6 +185,8 @@ type S = {
   dropFolder: (ws: string, name: string) => Promise<void>;
   /** 폴더를 다른 폴더 아래로 (`dest` 가 빈 문자열이면 뿌리). 보고 있던 폴더가 함께 옮겨지면 따라간다 */
   moveFolder: (ws: string, name: string, dest: string) => Promise<string>;
+  /** 폴더 이름만 바꾼다 (줄을 더블클릭). 자리는 그대로 — 옮기는 것은 끌어다 놓기의 일이다 */
+  renameFolder: (ws: string, name: string, next: string) => Promise<string>;
   rename: (ws: string, file: string, name: string) => Promise<string>;
   /** 탐색기에서 연다. 비우면 보관함 뿌리 */
   reveal: (path?: string) => Promise<void>;
@@ -128,8 +202,10 @@ export const useGallery = create<S>((set, get) => ({
   items: [],
   folder: ALL,
   vibeMode: false,
-  setVibeMode: (on) => set({ vibeMode: on, focus: null }),
+  setVibeMode: (on) => set({ vibeMode: on, focus: null, big: false }),
   focus: null,
+  big: false,
+  setBig: (on) => set({ big: on }),
   meta: null,
   metaFor: null,
   picked: new Set(),
@@ -139,12 +215,110 @@ export const useGallery = create<S>((set, get) => ({
   total: 0,
   hasMore: false,
 
+  artistBusy: false,
+  artistStatus: null,
+  artistIndex: {},
+  artistTags: new Map(),
+  artistQuery: "",
+  artists: [],
+  artistScope: "all",
+
+  setArtistQuery: (artistQuery) => set({ artistQuery }),
+  toggleArtist(tag) {
+    const key = normTag(tag);
+    const now = get().artists;
+    // ★고른 차례를 지킨다 — 그 차례가 곧 격자에서 무리가 서는 차례다
+    set({ artists: now.includes(key) ? now.filter((x) => x !== key) : [...now, key],
+          picked: new Set(), focus: null, big: false });
+  },
+  clearArtists: () => set({ artists: [], picked: new Set(), focus: null, big: false }),
+  setArtistScope: (artistScope) => set({ artistScope }),
+
+  async rescanArtists() {
+    if (get().artistBusy) return;
+    set({ artistBusy: true });
+    try {
+      // 작가인지 가르려면 사전이 있어야 한다 — 한 번만 읽는다
+      await loadTags();
+      await api("/api/keep/tags/index", { method: "POST" });
+      for (;;) {
+        const st = await api<IndexStatus>("/api/keep/tags/status");
+        set({ artistStatus: st });
+        if (!st.running) break;
+        await sleep(400);
+      }
+      const d = await api<{ files: Record<string, IndexEntry> }>("/api/keep/tags/data");
+      const all = tallyTags(d.files);
+      // ★작가만 남긴다 — 이 칸의 쓸모가 그것 하나다. 나머지 태그까지 세면 목록이 수만 줄이 된다.
+      const artists = new Map<string, TagHit>();
+      for (const [key, hit] of all) if (isArtist(hit.t)) artists.set(key, hit);
+      set({ artistIndex: d.files, artistTags: artists });
+    } catch (e) {
+      toast(String(e), "warn");
+    } finally {
+      set({ artistBusy: false });
+    }
+  },
+
+  artistsByFile() {
+    const { artistTags } = get();
+    if (_byFileFor !== artistTags) {
+      _byFileFor = artistTags;
+      _byFile = new Map();
+      for (const hit of artistTags.values())
+        for (const rel of hit.files) {
+          const had = _byFile.get(rel);
+          if (had) had.push(hit.t);
+          else _byFile.set(rel, [hit.t]);
+        }
+    }
+    return _byFile;
+  },
+
+  /* ★곁파일이 시각·크기를 들고 있으므로 서버에 다시 묻지 않고 그대로 칸을 짓는다.
+     ★★차례는 **작가별로 모은다** (사용자 지시 2026-09-21). 무리가 서는 차례는 **고른 차례**이고,
+       한 그림에 고른 작가가 여럿이면 **맨 앞 것**의 무리에 든다. 무리 안은 최신순이다. */
+  artistItems() {
+    const { artists, artistTags, artistIndex, artistScope, folder } = get();
+    if (!artists.length) return null;
+    /** 파일 → 그 파일이 가진 고른 작가들 (고른 차례대로 쌓인다) */
+    const got = new Map<string, string[]>();
+    for (const key of artists) {
+      const hit = artistTags.get(key);
+      if (!hit) continue;
+      for (const rel of hit.files) {
+        if (artistScope === "folder" && !inFolder(rel, folder)) continue;
+        if (!artistIndex[rel]) continue;
+        const had = got.get(rel);
+        if (had) had.push(hit.t);
+        else got.set(rel, [hit.t]);
+      }
+    }
+    const out: GalleryImage[] = [];
+    for (const key of artists) {
+      const rels = [...got.keys()].filter((rel) => normTag(got.get(rel)![0]) === key);
+      rels.sort((a, b) => artistIndex[b].m - artistIndex[a].m);
+      for (const rel of rels) {
+        const e = artistIndex[rel];
+        out.push({ file: rel, name: rel.split("/").pop() ?? rel, size: e.s, mtime: e.m, artists: got.get(rel) });
+      }
+    }
+    return out;
+  },
+
   async load(ws) {
     if (!ws) return;
     set({ loading: true });
     const f = get().folder;
+    /* ★★**폴더 목록은 먼저 화면에 올린다** (사용자 지적 2026-09-13: *"폴더 트리 로드 시간이
+       너무 느림 … 특히 폴더는 바로 뜨게"*). 셋을 한꺼번에 기다렸다가 한 번에 올리고 있어서,
+       폴더 트리가 **그림 목록·별표까지 다 와야** 그려졌다. 세 요청은 그대로 나란히 나가고,
+       폴더만 도착하는 즉시 올린다 (서로 다른 칸이라 따로 올려도 어긋날 것이 없다). */
     const [folders, r, s] = await Promise.all([
-      api<{ folders: GalleryFolder[] }>(`/api/keep/folders`),
+      api<{ folders: GalleryFolder[] }>(`/api/keep/folders`).then((v) => {
+        set({ folders: v.folders });
+        return v;
+      }),
       api<Page<GalleryImage>>(`/api/keep/images?page=1${f ? `&folder=${q(f)}` : ""}`),
       api<{ starred: string[] }>(`/api/keep/stars`),
     ]);
@@ -159,6 +333,8 @@ export const useGallery = create<S>((set, get) => ({
       // ★별표는 **목록에 없는 것도 그대로 둔다** — 다른 폴더를 보고 있을 뿐이다
       starred: new Set(s.starred),
       focus,
+      // ★보던 그림이 사라졌으면 크게 보기도 닫는다 — 없는 그림을 띄워 둘 수 없다
+      big: focus ? get().big : false,
       loading: false,
       page: r.page,
       total: r.total,
@@ -206,6 +382,16 @@ export const useGallery = create<S>((set, get) => ({
   },
 
   async keep(ws, file, folder = "") {
+    /* ★★미저장 그림은 **데이터로 들인다** (사용자 지시 2026-09-30: 저장하지 않고 되는 기능은 다 켠다).
+       밖에서 떨군 그림과 같은 창구다 (`/api/keep/import`) — 워크스페이스에는 파일이 안 생긴다.
+       ★출처 표에는 안 적힌다 (적을 파일이 없다). 그래서 보관함에서 「새 탭으로 복제」하면 메타데이터로 세운다. */
+    const pv = previewOf(file);
+    if (pv)
+      return await api<{ file: string }>(`/api/keep/import`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ data: pv.preview.b64, name: previewName(pv), folder }),
+      });
     return await api<{ file: string }>(`/api/keep/save`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -245,6 +431,19 @@ export const useGallery = create<S>((set, get) => ({
       body: JSON.stringify({ name, dest }),
     });
     // ★보고 있던 폴더가 옮겨졌으면 새 자리를 따라간다 — 안 그러면 없는 폴더를 계속 부른다
+    const cur = get().folder;
+    if (cur === name || cur.startsWith(name + "/")) set({ folder: r.path + cur.slice(name.length) });
+    await get().load(ws);
+    return r.path;
+  },
+
+  async renameFolder(ws, name, next) {
+    const r = await api<{ path: string }>(`/api/keep/folder/rename`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name, new: next }),
+    });
+    // ★보고 있던 폴더(또는 그 상위)의 이름이 바뀌었으면 새 이름을 따라간다 — `moveFolder` 와 같은 규칙
     const cur = get().folder;
     if (cur === name || cur.startsWith(name + "/")) set({ folder: r.path + cur.slice(name.length) });
     await get().load(ws);
@@ -292,7 +491,8 @@ export const useGallery = create<S>((set, get) => ({
 
   async setFocus(_ws, file) {
     set({ focus: file });
-    if (!file) return set({ meta: null, metaFor: null });
+    // ★볼 그림이 없어졌으면 크게 보기도 함께 닫는다
+    if (!file) return set({ meta: null, metaFor: null, big: false });
     if (get().metaFor === file) return;
     const r = await api<{ meta: ImageMeta | null }>(
       `/api/keep/meta?file=${q(file)}`,
@@ -306,6 +506,7 @@ export const useGallery = create<S>((set, get) => ({
     picked.has(file) ? picked.delete(file) : picked.add(file);
     set({ picked });
   },
+  setPicked: (files) => set({ picked: new Set(files) }),
   pickAll: () => set({ picked: new Set(get().items.map((i) => i.file)) }),
   clearPick: () => set({ picked: new Set() }),
 
@@ -329,6 +530,9 @@ export const useGallery = create<S>((set, get) => ({
     });
     if (!only) set({ picked: new Set() });
     await get().load(ws);
+    // ★곁파일에는 지운 그림이 아직 남아 있다 — 다시 훑어야 작가 거르기에서도 빠진다.
+    //   증분이라 바뀐 것만 읽고, 기다리지 않는다 (지우기가 그만큼 늦어질 이유가 없다).
+    if (useUi.getState().artistOpen) void get().rescanArtists();
     if (r.trashed?.length)
       undoToast(t("common.trashed", { n: r.trashed.length }), t("common.undo"), async () => {
         await api(`/api/keep/restore`, {
@@ -353,6 +557,8 @@ export const useGallery = create<S>((set, get) => ({
     });
     set({ picked: new Set() });
     await get().load(ws);
+    // 옮기면 곁파일의 경로가 어긋난다 — 위 `remove` 와 같은 이유로 다시 훑는다
+    if (useUi.getState().artistOpen) void get().rescanArtists();
     return r.moved.length;
   },
 }));

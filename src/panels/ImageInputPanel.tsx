@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { useI18n } from "../i18n";
 import { Icon } from "../components/Icon";
 import { Help } from "../components/Tip";
+import { ValueBox } from "../components/ValueBox";
 import {
   MAX_VIBES,
   fileToBase64,
@@ -9,14 +10,20 @@ import {
   pushVibe,
   useImageInput,
   type BaseMode,
+  type ImageInputStore,
 } from "../store/imageInput";
 import { canFocus } from "../lib/focused";
+import { INFERENCE_MODEL, INFER_AUX } from "../lib/inference";
 import { fitSizeToBase, modelCaps, useGen } from "../store/gen";
 import { flashStyle, useFlashAt } from "../store/ui";
 import { toast } from "../store/toast";
 import { NAI_VIBE_EXT, isNaiVibeFile, parseNaiVibeFile } from "../lib/naiVibeFile";
 import { useTauriDrop } from "../lib/dropImages";
 import { api } from "../lib/backend";
+import { urlToBase64 } from "../lib/findImage";
+import { imgUrl } from "../lib/imgUrl";
+import { useDropZone, type DragImage } from "../cards/dragStore";
+import { DropVeil } from "../cards/DropVeil";
 import { VibeCache } from "./VibeCache";
 
 /** 앱 창에 떨군 파일 하나를 서버가 읽어 준다 (`POST /api/tools/read`) */
@@ -31,12 +38,29 @@ const readDropped = (path: string) =>
  *
  *  ★v2 의 `Vibe / Character Ref` 절과 베이스 이미지 절을 옮긴 것이다
  *    (index.html:8998-9063 · 18362-18700). 값·범위·배타 규칙은 **원문 그대로**다. */
-export function ImageInputPanel() {
+export function ImageInputPanel({
+  store = useImageInput,
+  model: own,
+  refsOnly = false,
+}: {
+  /** 어느 한 벌을 보이나. 없으면 생성 모드 것. 만화 캔버스는 자기 것을 준다 (`editor/cutGen` 의 `useComicInput`) */
+  store?: ImageInputStore;
+  /** 그 한 벌이 따르는 모델. 없으면 생성 옵션의 모델 */
+  model?: string;
+  /** Vibe · Precise Reference 만 (만화 캔버스는 베이스 그림을 안 쓴다. 컷 인페인트가 그 자리다) */
+  refsOnly?: boolean;
+} = {}) {
   const t = useI18n((s) => s.t);
-  const s = useImageInput();
-  const model = useGen((g) => g.params.model);
+  const s = store();
+  const genModel = useGen((g) => g.params.model);
+  const model = own ?? genModel;
   const cap = modelCaps(model);
   const [cache, setCache] = useState(false);
+  // ★인퍼런스의 결과 크기는 해상도 칸을 따라 바뀐다. 그 값을 들어야 다시 그린다
+  useGen((g) => g.params.width);
+  useGen((g) => g.params.height);
+  const ride = s.riding();
+  const plan = s.inferPlan();
 
   /** ★서버에 구워 둔 인코딩이 있으면 「구워 둠」이 뜨고 비용에서도 빠진다.
    *
@@ -46,14 +70,14 @@ export function ImageInputPanel() {
    *    `encoded` 를 채우는 순간 배열이 새로 만들어져 무한히 돌게 된다. */
   const vibeKey = s.vibes.map((v) => `${v.image.length}:${v.info_extracted}`).join("|");
   useEffect(() => {
-    void useImageInput.getState().syncVibeCache();
-  }, [vibeKey, model]);
+    void store.getState().syncVibeCache();
+  }, [vibeKey, model, store]);
 
   /** 밖에서 가져온 바이브 파일 한 장 */
   const importVibeText = (text: string, name: string) => {
     try {
       const v = parseNaiVibeFile(text, name);
-      if (!pushVibe(v)) {
+      if (!pushVibe(v, store)) {
         toast(t("imgIn.vibeFull", { n: MAX_VIBES }), "warn");
         return;
       }
@@ -74,7 +98,7 @@ export function ImageInputPanel() {
       toast(t("imgIn.vibeFileBad"), "warn");
     }
   };
-  /** 참조·베이스도 같은 길로 받는다. 그림만 오므로 `data` 하나면 된다 */
+  /** 참조·베이스도 같은 경로로 받는다. 그림만 오므로 `data` 하나면 된다 */
   const addRefPath = async (path: string) => {
     const r = await readDropped(path).catch(() => null);
     if (!r?.data) {
@@ -98,6 +122,41 @@ export function ImageInputPanel() {
     }
     s.setBase(r.data, r.name);
     await fitSizeToBase(r.data);
+  };
+  const addInferPath = async (path: string) => {
+    const r = await readDropped(path).catch(() => null);
+    if (!r?.data) {
+      toast(t("imgIn.dropBad"), "warn");
+      return;
+    }
+    s.setInfer(r.data, r.name);
+  };
+  /** 씬·큰 그림에서 끌어온 한 장의 바이트와 이름. 저장된 그림은 원본을 받아 오고,
+   *  미저장은 끌 때 실어 온 data URL 이 곧 그림 전체다 (`SceneLane` 의 `takeSrc`) */
+  const dragged = async (img: DragImage, unsaved: boolean) =>
+    unsaved
+      ? { data: img.url.split(",")[1] ?? "", name: t("scenes.unsaved") }
+      : {
+          data: await urlToBase64(imgUrl(useGen.getState().base, img.ws, img.file, img.v)),
+          name: img.file.split("/").pop() || img.file,
+        };
+  const dropBase = async (img: DragImage, unsaved: boolean) => {
+    try {
+      const g = await dragged(img, unsaved);
+      s.setBase(g.data, g.name);
+      // ★해상도를 그림에 맞춘다. 밖에서 떨군 그림을 베이스로 걸 때와 같다 (`app/DropImport` 의 `asBase`)
+      await fitSizeToBase(g.data);
+    } catch (e) {
+      toast(String(e), "warn");
+    }
+  };
+  const dropInfer = async (img: DragImage, unsaved: boolean) => {
+    try {
+      const g = await dragged(img, unsaved);
+      s.setInfer(g.data, g.name);
+    } catch (e) {
+      toast(String(e), "warn");
+    }
   };
 
   return (
@@ -128,6 +187,8 @@ export function ImageInputPanel() {
             src={`data:image/png;base64,${v.image}`}
             name={v.name}
             badge={v.encoded ? t("imgIn.cached") : ""}
+            on={v.on !== false}
+            onToggle={() => s.patchVibe(i, { on: v.on === false })}
             onRemove={() => s.removeVibe(i)}
             data-vibe={i}
           >
@@ -186,6 +247,8 @@ export function ImageInputPanel() {
             key={i}
             src={`data:image/png;base64,${r.preview}`}
             name={r.name}
+            on={r.on !== false}
+            onToggle={() => s.patchRef(i, { on: r.on === false })}
             onRemove={() => s.removeRef(i)}
             data-ref={i}
           >
@@ -242,7 +305,86 @@ export function ImageInputPanel() {
       </Section>
       )}
 
+      {/* ★★인퍼런스는 V5 Full 에서만 뜬다 (사용자 결정 2026-09-29, 설계 `docs/inference-design.md`).
+          한 장만 받고 그림 전체를 쓴다. 배치는 앱이 정하고, 결과 크기는 해상도 칸의 목록에서 고른다 */}
+      {!refsOnly && model === INFERENCE_MODEL && (
+      <DropSlot id="infer" label={t("imgIn.dropInfer")} onImage={dropInfer}>
+      <Section
+        label={t("imgIn.inference")}
+        help={t("imgIn.inferenceHint")}
+        on={s.inferOn}
+        onToggle={s.setInferOn}
+        data-sec="inference"
+      >
+        {s.infer ? (
+          <Card
+            src={`data:image/png;base64,${s.infer.image}`}
+            name={s.infer.name}
+            onRemove={s.clearInfer}
+            data-infer
+          >
+            {plan && (
+              <span
+                data-infer-out={`${plan.crop.w}x${plan.crop.h}`}
+                style={{ fontSize: "var(--text-2xs)", color: "var(--ink-dim)", fontVariantNumeric: "tabular-nums" }}
+              >
+                {t("imgIn.inferOut", { w: plan.crop.w, h: plan.crop.h })}
+              </span>
+            )}
+            {/* ★보조 프롬프트는 켜고 끄기만 한다. 글은 고칠 수 없고, 무엇이 들어가는지 그대로 보인다 (사용자 지시 2026-09-29) */}
+            <Check
+              label={t("imgIn.inferAux")}
+              checked={s.inferAux}
+              onChange={s.setInferAux}
+              data-infer-aux={s.inferAux ? "on" : "off"}
+            />
+            <code
+              data-infer-aux-text
+              style={{
+                fontFamily: "var(--font-mono)",
+                fontSize: "var(--text-2xs)",
+                lineHeight: 1.5,
+                padding: "var(--sp-1) var(--sp-2)",
+                borderRadius: "var(--r-1)",
+                background: "var(--bg)",
+                color: "var(--ink-soft)",
+                wordBreak: "break-word",
+                opacity: s.inferAux ? 1 : 0.45,
+              }}
+            >
+              {INFER_AUX}
+            </code>
+          </Card>
+        ) : (
+          <Pick
+            label={t("imgIn.inferAdd")}
+            data-add="inference"
+            onFile={async (f) => s.setInfer(await fileToBase64(f), f.name)}
+            onPath={addInferPath}
+          />
+        )}
+      </Section>
+      </DropSlot>
+      )}
+
+      {!refsOnly && (
+      // ★인퍼런스가 실리는 동안에는 받지 않는다. 흐려 둔 칸이 물들면 받는 자리로 읽힌다
+      <DropSlot id="base" label={t("imgIn.dropBase")} off={!!ride.infer} onImage={dropBase}>
       <Section label={t("imgIn.base")} data-sec="base" flashKey="base">
+        {/* ★인퍼런스가 실리는 동안에는 베이스가 안 나간다 (둘 다 인페인트 경로다). 감추지 않고 흐리게 두고 이유를 적는다 */}
+        {ride.infer && (
+          <span data-base-blocked style={{ fontSize: "var(--text-2xs)", color: "var(--ink-faint)", lineHeight: 1.45 }}>
+            {t("imgIn.inferNoBase")}
+          </span>
+        )}
+        <div
+          style={{
+            display: "flex",
+            flexDirection: "column",
+            gap: "var(--sp-2)",
+            ...(ride.infer ? { opacity: 0.45, pointerEvents: "none" as const } : null),
+          }}
+        >
         {s.baseImage ? (
           <Card
             src={`data:image/png;base64,${s.baseImage}`}
@@ -346,9 +488,12 @@ export function ImageInputPanel() {
             />
           </>
         )}
+        </div>
       </Section>
+      </DropSlot>
+      )}
 
-      {cache && <VibeCache onClose={() => setCache(false)} />}
+      {cache && <VibeCache store={store} onClose={() => setCache(false)} />}
     </div>
   );
 }
@@ -538,12 +683,49 @@ function Section({
   );
 }
 
+/** 이미지 입력 칸들의 드롭존 id 앞머리. 접어 둔 묶음을 끌기 동안 펴 준 쪽이 「여기 놓였나」를 이것으로 본다 (`OptionsPanel`) */
+export const INPUT_ZONE = "image-input";
+
+/** 씬·큰 그림에서 끌어온 그림을 받는 칸 (저장된 그림 `image` · 미저장 `imageInput`).
+ *  ★받는 자리는 그 절 전체다. 표시는 앱의 공통 양식이고(`cards/DropVeil`), 어둠 위로 올리는 것은
+ *    이 칸이 아니라 묶음 전체다 (`OptionsPanel` 의 `opt-img` 에 `spot`).
+ *  ★`off` 면 안 받는다. */
+function DropSlot({
+  id,
+  label,
+  off,
+  onImage,
+  children,
+}: {
+  id: string;
+  label: string;
+  off?: boolean;
+  onImage: (img: DragImage, unsaved: boolean) => void;
+  children: React.ReactNode;
+}) {
+  const z = useDropZone({
+    id: `${INPUT_ZONE}-${id}`,
+    kind: ["image", "imageInput"],
+    dir: "image",
+    prio: 5,
+    onDrop: (d) => d.img && onImage(d.img, d.kind === "imageInput"),
+  });
+  return (
+    <div ref={off ? undefined : z.ref} style={{ position: "relative" }}>
+      {children}
+      {!off && z.active && <DropVeil over={z.over} label={label} name={`input-${id}`} />}
+    </div>
+  );
+}
+
 /** 그림 한 장 + 그 그림의 값들 */
 function Card({
   src,
   name,
   badge,
   mask,
+  on,
+  onToggle,
   onRemove,
   children,
   ...rest
@@ -554,10 +736,15 @@ function Card({
   /** 칠해 둔 마스크 (base64). 있으면 **썸네일 위에 그대로 겹쳐** 보여 준다
    *  (사용자 지시 2026-08-19) — 「마스크 있음」 같은 글자보다 어디를 칠했는지가 중요하다 */
   mask?: string;
+  /** ★★**이 한 장을 쓰나** (사용자 지시 2026-09-21). 안 주면 켜고 끄는 자리가 없다
+   *  (베이스 그림은 한 장뿐이라 끄는 것이 곧 빼는 것이다). */
+  on?: boolean;
+  onToggle?: () => void;
   onRemove: () => void;
   children: React.ReactNode;
 } & Record<string, unknown>) {
   const t = useI18n((s) => s.t);
+  const off = onToggle && on === false;
   return (
     <div
       style={{
@@ -568,6 +755,8 @@ function Card({
         flexDirection: "column",
         gap: "var(--sp-2)",
         background: "var(--surface)",
+        // ★꺼진 것은 **흐리게** — 프롬프트 블록과 같은 표시다 (`blocks/BlockRow`)
+        opacity: off ? 0.45 : 1,
       }}
       {...rest}
     >
@@ -595,6 +784,19 @@ function Card({
         </span>
         {badge && (
           <span style={{ fontSize: "var(--text-3xs, 10px)", color: "var(--ok, var(--accent))" }}>{badge}</span>
+        )}
+        {/* ★★**프롬프트 블록과 같은 점 단추**다 (`blocks/BlockRow` 의 `data-block-on`) —
+            같은 「하나씩 켜고 끄기」라 생김새도 조작도 같아야 한다.
+            ★차례도 앱 전체와 같다: 켜고끄기 다음이 삭제다. */}
+        {onToggle && (
+          <button
+            data-input-on={on === false ? undefined : ""}
+            onClick={onToggle}
+            data-tip={on === false ? t("imgIn.itemOn") : t("imgIn.itemOff")}
+            style={{ color: "var(--ink-faint)", display: "grid" }}
+          >
+            {on === false ? Icon.dotOff : Icon.dotOn}
+          </button>
         )}
         <button onClick={onRemove} data-tip={t("imgIn.baseClear")} style={{ color: "var(--ink-faint)", display: "grid" }}>
           {Icon.close}
@@ -696,85 +898,6 @@ function Slide({
   );
 }
 
-/** 슬라이더 옆 숫자. 누르면 입력칸이 되어 **범위 밖의 값도** 넣을 수 있다.
- *
- *  ★v2 의 Precise Reference 가 그랬다 (index.html:18833-18866): 슬라이더는 0~1 로 묶어 두고
- *    참조 강도만 1 을 넘겨 넣을 수 있었다. 옮기면서 빠져 있던 것을 되돌린다
- *    (사용자 결정 2026-08-18). */
-function ValueBox({
-  value,
-  step,
-  onCommit,
-}: {
-  value: number;
-  step: number;
-  onCommit: (v: number) => void;
-}) {
-  const [edit, setEdit] = useState(false);
-  const [text, setText] = useState(String(value));
-  /** Esc 로 나갈 때는 반영하지 않는다. blur 가 그 뒤에 오므로 표식이 필요하다 */
-  const cancel = useRef(false);
-
-  if (!edit)
-    return (
-      <span
-        data-slide-value
-        // ★label 안이라 그냥 두면 클릭이 슬라이더로 넘어간다
-        onClick={(e) => {
-          e.preventDefault();
-          setText(String(value));
-          setEdit(true);
-        }}
-        style={{
-          width: 30,
-          textAlign: "right",
-          fontVariantNumeric: "tabular-nums",
-          color: "var(--accent-ink)",
-          cursor: "pointer",
-        }}
-      >
-        {value}
-      </span>
-    );
-
-  return (
-    <input
-      data-slide-input
-      type="number"
-      autoFocus
-      step={step}
-      value={text}
-      onClick={(e) => e.preventDefault()}
-      onChange={(e) => setText(e.target.value)}
-      onBlur={() => {
-        if (!cancel.current) {
-          const v = parseFloat(text);
-          onCommit(Number.isFinite(v) ? v : value);
-        }
-        cancel.current = false;
-        setEdit(false);
-      }}
-      onKeyDown={(e) => {
-        if (e.key === "Enter") (e.target as HTMLInputElement).blur();
-        if (e.key === "Escape") {
-          cancel.current = true;
-          (e.target as HTMLInputElement).blur();
-        }
-      }}
-      style={{
-        width: 44,
-        textAlign: "right",
-        fontSize: "inherit",
-        padding: "1px 3px",
-        borderRadius: "var(--r-1)",
-        border: "1px solid var(--accent)",
-        background: "var(--panel)",
-        color: "var(--ink)",
-      }}
-    />
-  );
-}
-
 /** 그림 고르기 — 누르면 파일 선택, **끌어다 놓아도** 받는다 */
 function Pick({
   label,
@@ -853,4 +976,78 @@ function Pick({
       />
     </>
   );
+}
+
+/** ★★**지금 생성에 실리는 그림이 있다**를 알리는 작은 딱지 — 장 수 칸 오른쪽에 뜬다
+ *  (사용자 지시 2026-09-21: *"생성 버튼쪽에 표시. 장 수 정하는 곳 우측에 표시하면 될듯"*).
+ *  커서를 대면 무엇이 들었는지 한 줄씩 말한다.
+ *
+ *  ★★**생성 버튼 곁이라야 한다.** 「베이스 이미지」 묶음은 접히면 안이 통째로 언마운트돼서
+ *    (`Category` 의 `{!folded && children}`), 넣어 둔 베이스 그림이 화면 어디에도 안 보인 채
+ *    생성에 실려 나갔다 (사용자 신고 2026-09-21). 누르기 직전에 보이는 자리가 여기다.
+ *  ★★**세는 것은 「실제로 실리는 것」뿐이다** (사용자 지시 2026-09-21: *"켜둔것만 기준으로 표시.
+ *    꺼둔건 포함 안함. 실제 생성에 들어가는 것만 체크"* · *"v5로 바꾸면 현재 상태에 맞게 표시.
+ *    담아뒀어도 지금 안보이면 없는걸로 취급"*). 꺼 둔 한 장 · 꺼 둔 묶음 · 그 모델에 없는 절은
+ *    전부 빠진다. 판정은 앱에 하나다 — `useImageInput.riding()`. */
+export function ImageInputBadge() {
+  const t = useI18n((s) => s.t);
+  const s = useImageInput();
+  // ★모델을 바꾸면 딸려 바뀐다 — V5 로 가면 바이브·레퍼런스가 통째로 빠진다
+  useGen((g) => g.params.model);
+  const ride = s.riding();
+  // ★인퍼런스가 실리면 베이스는 안 나간다 (`payload`). 세지 않는다
+  const n = (s.baseImage && !ride.infer ? 1 : 0) + ride.vibes.length + ride.refs.length + (ride.infer ? 1 : 0);
+  if (!n) return null;
+  return (
+    <span
+      data-input-badge={n}
+      data-tip={inputTip(s, ride, t)}
+      style={{
+        flexShrink: 0,
+        display: "inline-flex",
+        alignItems: "center",
+        gap: 3,
+        padding: "1px 6px 1px 4px",
+        borderRadius: 999,
+        background: "var(--accent)",
+        color: "var(--accent-on)",
+        fontSize: "var(--text-3xs)",
+        fontWeight: "var(--w-semi)",
+        lineHeight: 1.4,
+        fontVariantNumeric: "tabular-nums",
+      }}
+    >
+      {Icon.picture12}
+      {n}
+    </span>
+  );
+}
+
+/** 목록은 여섯 줄에서 끊는다 — 바이브는 16장까지 들어가는데 다 적으면 툴팁이 화면을 덮는다 */
+const TIP_MAX = 6;
+
+/** 딱지의 툴팁 — **실리는 것만** 한 줄씩 적는다 (딱지가 세는 것과 같은 목록이다).
+ *  ★★**조각을 코드에서 잇지 않는다** (`lib/tipText.test.ts` ⑤번 판정). 괄호도 가운뎃점도
+ *    세는 말도 번역 문구 안에 넣고, 여기서는 **줄바꿈으로만** 잇는다. */
+function inputTip(
+  s: ReturnType<typeof useImageInput.getState>,
+  ride: ReturnType<ReturnType<typeof useImageInput.getState>["riding"]>,
+  t: (key: string, vars?: Record<string, string | number>) => string,
+) {
+  const out = [t("imgIn.sumTitle")];
+  const group = (label: string, list: { name: string }[]) => {
+    if (!list.length) return;
+    out.push(t("imgIn.sumGroup", { label, n: list.length }));
+    for (const it of list.slice(0, TIP_MAX)) out.push(t("imgIn.sumItem", { name: it.name }));
+    if (list.length > TIP_MAX) out.push(t("imgIn.sumMore", { n: list.length - TIP_MAX }));
+  };
+  if (s.baseImage && !ride.infer) {
+    // ★베이스 그림에는 켜고 끄는 스위치가 없어 걸려 있으면 언제나 나간다 (인퍼런스가 실릴 때만 빼고)
+    out.push(t("imgIn.sumBase", { mode: t(s.baseMode === "inpaint" ? "imgIn.inpaint" : "imgIn.i2i") }));
+    if (s.baseName) out.push(t("imgIn.sumItem", { name: s.baseName }));
+  }
+  group(t("imgIn.vibe"), ride.vibes);
+  group(t("imgIn.ref"), ride.refs);
+  group(t("imgIn.inference"), ride.infer ? [ride.infer] : []);
+  return out.join("\n");
 }

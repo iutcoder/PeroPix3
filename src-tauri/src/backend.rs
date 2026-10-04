@@ -4,32 +4,116 @@
 //! 당시 막힌 것은 빌드 배관이었지 이 구조가 아니다. 같은 형태를 유지하되
 //! 프로세스 수명 관리를 셸이 확실히 하도록 정리했다.
 
+use std::collections::HashMap;
 use std::fs::File;
-use std::io::Write;
+use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::Mutex;
+use std::sync::{Arc, Condvar, Mutex};
+use std::time::{Duration, Instant};
 
 pub const DEFAULT_PORT: u16 = 8770;
 
-/// 백엔드 포트 — **한 번 정하고 그대로 쓴다** (`OnceLock`).
+/// 파이썬에게 **먼저 잡아 보라고** 건네는 포트와, 차 있으면 빈 포트로 옮겨 가도 되는지.
 ///
 /// ★**환경변수로 갈아 끼운다** (사용자 지시 2026-08-08). 예전엔 상수라, QA 인스턴스와
 /// 사용자 앱이 같은 8770 을 다퉜다 — 나중에 켠 쪽은 사이드카를 못 띄워 창은 뜨는데
 /// API 가 없는 상태(502)가 됐고, 원인이 화면에 안 나왔다.
-/// `qa\host.cmd` 가 `PEROPIX_BACKEND_PORT=8771` 을 넣어 준다.
+/// `qa\host.cmd` 가 `PEROPIX_BACKEND_PORT=8771` 을 넣어 준다. 그때는 옮겨 가지 않는다 (하네스가 그 번호로 붙는다).
 ///
 /// ★★**비어 있는 포트를 스스로 찾는다** (사용자 지시 2026-08-26, 포터블 배포 준비).
 ///   포터블은 **여러 벌을 다른 폴더에 풀어 두고 함께 쓰는** 형식이라, 번호를 하나로 박아
 ///   두면 나중에 켠 쪽이 남의 백엔드에 붙는다 — 창은 이쪽인데 데이터는 저쪽이 된다.
 ///   ★그래도 **8770 이 비어 있으면 그것을 쓴다** — 로그·문서·MCP 설정에 익숙한 번호가
 ///     유지되는 편이 낫고, 혼자 켤 때가 대부분이다.
-///   ★잡았다 놓는 사이에 남이 채 갈 수는 있다. 그때는 사이드카가 못 떠서 **눈에 보이게**
-///     실패한다 (조용히 남의 것에 붙는 지금보다 낫다).
+/// ★★**고르는 것은 파이썬이다** (사용자 제보 2026-09-29: 개발본이 「백엔드가 뜨지 않았습니다」로 멈춤).
+///   여기서 비어 있는지 보고 놓으면, 파이썬이 실제로 잡는 수 초 뒤까지 비어 있다는 보장이 없다.
+///   두 앱을 몇 초 차이로 켜면 둘 다 8770 을 골라 나중 것이 멈췄다. 파이썬은 잡기 직전에 고르고
+///   `PORT_MARK` 줄로 알려 준다 (`backend/server.py` 의 `pick_port`). 화면은 그 번호를 받는다 (`backend_port`).
 /// ★★**CSP 도 함께 열어 두어야 한다** (`tauri.conf.json` 의 `app.security.csp`).
 ///   거기 포트를 번호로 박아 두면(예전에는 `127.0.0.1:8770`), 다른 포트로 뜬 인스턴스는
 ///   웹뷰가 **제 백엔드를 막아** 창만 뜨고 아무것도 못 한다. 그래서 `127.0.0.1:*` 이다.
 ///   ★그 설정 파일에는 주석을 못 단다 (스키마가 모르는 열쇠를 거부한다) — 그래서 여기 적는다.
+pub fn wanted_port() -> (u16, bool) {
+    match std::env::var("PEROPIX_BACKEND_PORT")
+        .ok()
+        .and_then(|s| s.trim().parse::<u16>().ok())
+    {
+        Some(p) => (p, false),
+        None => (DEFAULT_PORT, true),
+    }
+}
+
+/// 파이썬이 실제로 잡을 포트를 알리는 줄의 머리. `backend/server.py` 의 `PORT_MARK` 와 같아야 한다.
+pub const PORT_MARK: &str = "[backend] port = ";
+
+/// 파이썬이 포트를 알려 오기를 기다리는 한도. 넘으면 건넨 포트로 답하고, 화면이 거기서 못 붙으면
+/// 실패 화면으로 간다 (`App.tsx` 의 15초).
+const PORT_WAIT: Duration = Duration::from_secs(15);
+
+/// 지금 띄운 백엔드가 알려 온 것. `gen` 은 띄울 때마다 오른다. 내린 백엔드의 중계 스레드가 뒤늦게
+/// 끝나도 새로 띄운 쪽의 값을 건드리지 못하게 한다 (`restart_backend`).
+struct Live {
+    gen: u64,
+    port: Option<u16>,
+    /// 자식이 끝났다 (파이프가 닫혔다). 알려 온 것이 없으면 더 기다릴 것도 없다.
+    ended: bool,
+}
+
+static LIVE: Mutex<Live> = Mutex::new(Live { gen: 0, port: None, ended: false });
+static LIVE_CV: Condvar = Condvar::new();
+
+fn live() -> std::sync::MutexGuard<'static, Live> {
+    LIVE.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// 새로 띄운다. 모르는 상태로 되돌리고 이번 차례의 번호를 준다.
+fn live_begin() -> u64 {
+    let mut g = live();
+    g.gen += 1;
+    g.port = None;
+    g.ended = false;
+    g.gen
+}
+
+fn live_port(gen: u64, port: u16) {
+    let mut g = live();
+    if g.gen == gen {
+        g.port = Some(port);
+        LIVE_CV.notify_all();
+    }
+}
+
+fn live_end(gen: u64) {
+    let mut g = live();
+    if g.gen == gen {
+        g.ended = true;
+        LIVE_CV.notify_all();
+    }
+}
+
+/// 지금 백엔드가 **실제로 잡은** 포트. 파이썬이 알려 줄 때까지 기다린다 (많아야 `PORT_WAIT`).
+/// ★못 들었으면(자식이 끝났거나 한도를 넘었으면) 건넨 포트로 답한다.
+/// ★기다리는 함수다. 명령에서 부를 때는 따로 돌린다 (`lib.rs` 의 `backend_url`).
+pub fn backend_port() -> u16 {
+    let want = wanted_port().0;
+    let until = Instant::now() + PORT_WAIT;
+    let mut g = live();
+    loop {
+        if let Some(p) = g.port {
+            return p;
+        }
+        if g.ended {
+            return want;
+        }
+        let left = until.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return want;
+        }
+        g = LIVE_CV.wait_timeout(g, left).unwrap_or_else(|e| e.into_inner()).0;
+    }
+}
+
 /// 이번 실행의 **열쇠** — 주소 앞머리(`/k/<열쇠>`)로 실려 나간다.
 ///
 /// ★★**왜 있나** (2026-08-26, 첫 공개 배포 점검에서 잡았다): 백엔드는 `127.0.0.1` 에만
@@ -67,28 +151,7 @@ pub fn backend_key() -> &'static str {
     })
 }
 
-pub fn backend_port() -> u16 {
-    use std::sync::OnceLock;
-    static PORT: OnceLock<u16> = OnceLock::new();
-    *PORT.get_or_init(|| {
-        if let Some(p) = std::env::var("PEROPIX_BACKEND_PORT")
-            .ok()
-            .and_then(|s| s.trim().parse::<u16>().ok())
-        {
-            return p;
-        }
-        let free = |port: u16| {
-            std::net::TcpListener::bind(("127.0.0.1", port))
-                .and_then(|l| l.local_addr())
-                .map(|a| a.port())
-                .ok()
-        };
-        free(DEFAULT_PORT).or_else(|| free(0)).unwrap_or(DEFAULT_PORT)
-    })
-}
-
-/// 사용자 데이터가 사는 자리. 개발 중에는 저장소 루트, 번들에서는 macOS Application
-/// Support를 쓴다. `.app/Contents/Resources`는 코드 서명의 일부이며 쓰기 가능한 저장소가 아니다.
+/// Writable user data directory; bundled resources remain read-only.
 pub fn root() -> PathBuf {
     if let Some(path) = std::env::var_os("PEROPIX_DATA_DIR") {
         return PathBuf::from(path);
@@ -104,7 +167,7 @@ pub fn root() -> PathBuf {
 
 /// 자식 프로세스 핸들.
 ///
-/// ★종료는 `kill()` 을 종료 이벤트에서 **명시적으로** 부르는 것이 정본이다.
+/// ★종료는 `kill()` 을 종료 이벤트에서 **명시적으로** 부르는 것이 기준이다.
 /// `Drop` 은 process::exit 경로에서 실행되지 않아 백엔드가 고아로 남는다 — 실측으로 확인됨.
 /// Drop 은 마지막 안전망으로만 둔다.
 pub struct Backend(pub Mutex<Option<Child>>);
@@ -121,6 +184,13 @@ impl Backend {
         }
     }
 }
+
+/// 자식의 **자손까지** 끝낸다 (Windows: `taskkill /T` — pid 로만, 이름으로 죽이지 않는다).
+///
+/// ★개발 중(`PEROPIX_DEV_RELOAD`)의 uvicorn 은 감시자 + 워커 두 프로세스다. 감시자만 죽이면 워커가 남아
+///   포트를 쥐고, 다시 띄운 백엔드가 바인딩에 실패한다 (같은 증상의 실측: 상단 `adopt_into_job` 주).
+///   앱이 나갈 때는 잡(Job)이 자손을 거두지만, **앱은 살아 있고 백엔드만 다시 띄울 때**(`restart_backend`)는
+///   잡이 닫히지 않으므로 여기서 직접 거둔다.
 
 impl Drop for Backend {
     fn drop(&mut self) {
@@ -232,6 +302,12 @@ const LOG_KEEP: u64 = 128 * 1024;
 const LOG_HARD: u64 = 1024 * 1024;
 /// 앞이 잘렸을 때 남기는 표시 — 읽는 사람이 「여기가 처음이 아니다」를 알아야 한다
 const CUT_NOTE: &str = "…(앞부분이 잘렸습니다)\n";
+/// 이번 실행이 천장(`LOG_HARD`)에 닿았을 때 마지막으로 남기는 줄
+const CAP_NOTE: &str = "…(이번 실행의 로그가 상한을 넘어 이후 줄을 적지 않습니다)\n";
+/// 같은 줄을 다시 적기까지 기다리는 시간 — 화면 쪽 억제(`src/lib/report.ts`)와 같은 10초다.
+const REPEAT_WINDOW: Duration = Duration::from_secs(10);
+/// 억제 장부가 이보다 커지면 통째로 비운다 — 장부 자체가 메모리를 먹지 않게.
+const SEEN_MAX: usize = 1000;
 
 /// 로그 이름 — ★★**파일은 하나뿐이다** (사용자 지시 2026-08-27: *"로그 파일은 하나만
 /// 생기게"*). 파이썬의 두 물줄기(stdout·stderr)도 여기로 함께 흘린다.
@@ -291,6 +367,28 @@ fn trim_bytes(bytes: &[u8], keep: u64, hard: u64) -> String {
     }
 }
 
+/// 파일의 **꼬리만** 읽는다 — 많아야 `want` 바이트.
+///
+/// ★★**통째로 읽지 않는다** (사용자 제보 2026-09-16). 옛 코드는 `std::fs::read` 로 파일 전체를
+///   메모리에 올린 뒤 잘랐다. 로그가 **1.9GB** 까지 자란 제보자의 컴퓨터에서는 그 한 줄이
+///   1.9GB 를 읽어 들이느라 앱이 켜지는 자리에서 한참 붙들렸고, 화면 쪽 대기가 먼저 끝나
+///   「백엔드가 뜨지 않았습니다」로 넘어갔다. **자르기가 있어야 할 자리에서 자르기가 앱을
+///   막고 있었다.** 읽는 양에 천장이 있으면 파일이 얼마나 크든 이 함수의 값은 일정하다.
+/// ★남길 양(`LOG_KEEP`)보다 넉넉히 읽는 이유는 그 안에서 실행 경계(`MARK`)를 찾아야 하기
+///   때문이다. 천장(`LOG_HARD`)만큼 읽으면 결과도 언제나 천장 안으로 들어온다.
+/// ★꼬리에서 시작하므로 첫 글자가 반 토막일 수 있다 — `trim_bytes` 가 `from_utf8_lossy` 로
+///   받고 경계에서 다시 자르므로 그대로 흘려보낸다.
+fn read_tail(path: &Path, len: u64, want: u64) -> Option<Vec<u8>> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut f = File::open(path).ok()?;
+    if len > want {
+        f.seek(SeekFrom::Start(len - want)).ok()?;
+    }
+    let mut buf = Vec::new();
+    f.take(want).read_to_end(&mut buf).ok()?;
+    Some(buf)
+}
+
 fn open_log(root: &Path) -> Option<File> {
     let dir = root.join("logs");
     let _ = std::fs::create_dir_all(&dir);
@@ -301,13 +399,141 @@ fn open_log(root: &Path) -> Option<File> {
         let _ = std::fs::remove_file(dir.join(old));
     }
 
-    if std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0) > LOG_MAX {
-        if let Ok(bytes) = std::fs::read(&path) {
+    let len = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+    if len > LOG_MAX {
+        if let Some(bytes) = read_tail(&path, len, LOG_HARD) {
             let _ = std::fs::write(&path, trim_bytes(&bytes, LOG_KEEP, LOG_HARD));
         }
     }
 
     std::fs::OpenOptions::new().create(true).append(true).open(&path).ok()
+}
+
+/// 자식의 출력을 로그 파일로 옮기는 창구 — **두 물줄기(stdout·stderr)가 이 하나를 나눠 쓴다.**
+///
+/// ★★**왜 중계하나** (사용자 제보 2026-09-16): 옛 코드는 로그 파일의 핸들을 자식에게 그대로
+///   물려주었다. 그러면 자식이 적는 양을 껍데기가 **아예 모르므로** 상한을 재는 자리가 앱을
+///   켤 때 한 번뿐이었다. 파이썬이 같은 오류를 쉬지 않고 쏟는 상태에 빠지면(미들웨어가 예외마다
+///   자취를 통째로 찍는다 — `backend/server.py` 의 `_log_errors`) 앱이 켜져 있는 **그동안**
+///   파일이 한없이 커졌고, 실제로 1.9GB 가 된 제보를 받았다.
+/// ★그래서 껍데기가 파이프로 받아 **한 줄씩 적으면서** 둘을 본다: 같은 줄이 되풀이되면 억제하고,
+///   이번 실행이 천장(`LOG_HARD`)에 닿으면 거기서 멈춘다. 둘 다 **적는 순간** 걸리므로 앱이
+///   켜져 있는 동안에도 파일 크기에 천장이 생긴다.
+/// ★`log_line` 은 이 창구를 거치지 않는다 — 껍데기가 부팅 때 적는 몇 줄이라 셀 것이 없다.
+struct Sink<W: Write> {
+    out: W,
+    /// 이번 실행이 적은 양 (실행 경계와 머리말을 포함한다)
+    written: u64,
+    /// 천장에 닿아 더 적지 않는 상태
+    capped: bool,
+    /// 줄마다 「마지막으로 적은 시각, 그 뒤로 생략한 횟수」
+    seen: HashMap<String, (Instant, u32)>,
+}
+
+impl<W: Write> Sink<W> {
+    fn new(out: W, written: u64) -> Self {
+        Self { out, written, capped: false, seen: HashMap::new() }
+    }
+
+    /// 한 줄 적는다 — 줄바꿈은 여기서 붙인다. `now` 를 받는 것은 판정이 시간을 앞으로
+    /// 돌려 볼 수 있게 하기 위해서다 (`Instant` 는 손으로 만들 수 없다).
+    fn line(&mut self, line: &str, now: Instant) {
+        // ★빈 줄은 억제하지 않는다 — 자취 사이의 빈 줄까지 「N회 생략」으로 바꾸면 읽을 수가
+        //   없다. 천장은 그대로 걸리므로 빈 줄만 쏟아져도 파일은 안 커진다.
+        let skipped = if line.is_empty() {
+            0
+        } else {
+            match self.seen.get_mut(line) {
+                Some((at, n)) if now.duration_since(*at) < REPEAT_WINDOW => {
+                    *n += 1;
+                    return;
+                }
+                Some((at, n)) => {
+                    *at = now;
+                    std::mem::replace(n, 0)
+                }
+                None => {
+                    if self.seen.len() >= SEEN_MAX {
+                        self.seen.clear();
+                    }
+                    self.seen.insert(line.to_string(), (now, 0));
+                    0
+                }
+            }
+        };
+        if skipped > 0 {
+            self.put(&format!("{line}    … 같은 줄 {skipped}회 생략\n"));
+        } else {
+            self.put(&format!("{line}\n"));
+        }
+    }
+
+    /// 억제해 둔 횟수를 흘려보낸다 — 자식이 끝났을 때 마지막 줄이 억제된 채로 남으면
+    /// 그 줄이 몇 번 났는지가 영영 사라진다.
+    fn flush_repeats(&mut self) {
+        let mut left: Vec<(String, u32)> = Vec::new();
+        for (line, (_, n)) in self.seen.iter_mut() {
+            if *n > 0 {
+                left.push((line.clone(), *n));
+                *n = 0;
+            }
+        }
+        left.sort();
+        for (line, n) in left {
+            self.put(&format!("{line}    … 같은 줄 {n}회 생략\n"));
+        }
+    }
+
+    fn put(&mut self, text: &str) {
+        if self.capped {
+            return;
+        }
+        if self.written + text.len() as u64 > LOG_HARD {
+            self.capped = true;
+            let _ = self.out.write_all(CAP_NOTE.as_bytes());
+            return;
+        }
+        self.written += text.len() as u64;
+        let _ = self.out.write_all(text.as_bytes());
+    }
+}
+
+/// 자식의 한 물줄기를 로그로 옮기는 스레드를 띄운다. 자식이 끝나면(파이프가 닫히면)
+/// 스레드도 스스로 끝난다.
+///
+/// ★줄 단위로 읽는다 — 억제도 천장도 줄을 단위로 세기 때문이다.
+/// ★**바이트째** 받아 `from_utf8_lossy` 로 옮긴다. `lines()` 를 쓰면 UTF-8 이 아닌 바이트
+///   하나에 그 줄이 통째로 오류가 되어 사라진다 (자식에게 `PYTHONIOENCODING=utf-8` 을 주지만,
+///   파이썬을 거치지 않고 나오는 줄도 있다).
+/// ★포트를 알리는 줄(`PORT_MARK`)도 여기서 듣는다. 로그를 못 열었으면(`sink` 없음) 적지 않고 읽기만 한다.
+fn relay(
+    pipe: impl std::io::Read + Send + 'static,
+    sink: Option<Arc<Mutex<Sink<File>>>>,
+    gen: u64,
+) -> std::thread::JoinHandle<()> {
+    std::thread::spawn(move || {
+        let mut r = BufReader::new(pipe);
+        let mut buf = Vec::new();
+        loop {
+            buf.clear();
+            match r.read_until(b'\n', &mut buf) {
+                Ok(0) | Err(_) => break,
+                Ok(_) => {}
+            }
+            let text = String::from_utf8_lossy(&buf);
+            let line = text.trim_end_matches(|c| c == '\r' || c == '\n');
+            if let Some(p) = line.strip_prefix(PORT_MARK).and_then(|s| s.trim().parse::<u16>().ok()) {
+                live_port(gen, p);
+            }
+            if let Some(Ok(mut s)) = sink.as_ref().map(|s| s.lock()) {
+                s.line(line, Instant::now());
+            }
+        }
+        live_end(gen);
+        if let Some(Ok(mut s)) = sink.as_ref().map(|s| s.lock()) {
+            s.flush_repeats();
+        }
+    })
 }
 
 /// 껍데기가 **로그 파일에 한 줄** 적는다.
@@ -344,13 +570,16 @@ pub fn spawn() -> std::io::Result<Child> {
     }
     print!("{head}");
 
-    let out = log.as_ref().and_then(|f| f.try_clone().ok());
-    let err = log.as_ref().and_then(|f| f.try_clone().ok());
-
+    // ★★**파일 핸들을 자식에게 물려주지 않는다** — 파이프로 받아 우리가 적는다 (`Sink` 주석).
+    //   ★로그를 못 열었어도 **파이프는 연다.** 포트를 알리는 줄이 이 파이프로 오고(`PORT_MARK`),
+    //     중계 스레드가 늘 읽어 비우므로 버퍼가 차서 자식이 멈출 일이 없다.
+    let (want, fallback) = wanted_port();
     let mut cmd = Command::new(&python);
-    cmd.arg(&script)
-        .arg("--port")
-        .arg(backend_port().to_string())
+    cmd.arg(&script).arg("--port").arg(want.to_string());
+    if fallback {
+        cmd.arg("--port-fallback");
+    }
+    cmd
         // ★열쇠는 **환경변수로만** 넘긴다 — 명령줄에 실으면 작업 관리자에서 그대로 보인다
         .env("PEROPIX_KEY", backend_key())
         .env("PEROPIX_DATA_DIR", &root)
@@ -360,18 +589,78 @@ pub fn spawn() -> std::io::Result<Child> {
         .env("PYTHONIOENCODING", "utf-8")
         .env("PYTHONUTF8", "1")
         .current_dir(&root)
-        .stdout(out.map(Stdio::from).unwrap_or_else(Stdio::null))
-        .stderr(err.map(Stdio::from).unwrap_or_else(Stdio::null));
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
 
     use std::os::unix::process::CommandExt;
     cmd.process_group(0);
 
-    cmd.spawn()
+    // ★띄우기 **전에** 모르는 상태로 되돌린다. 띄우지 못했으면 기다리는 쪽을 바로 풀어 준다
+    let gen = live_begin();
+    let mut child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(e) => {
+            live_end(gen);
+            return Err(e);
+        }
+    };
+
+    // ★두 물줄기가 **창구 하나**를 나눠 쓴다 — 억제 장부와 이번 실행의 누적량이 한 벌이라야
+    //   stdout 으로 온 줄과 stderr 로 온 줄이 서로를 센다.
+    let sink = log.map(|f| Arc::new(Mutex::new(Sink::new(f, head.len() as u64))));
+    if let Some(o) = child.stdout.take() {
+        let _ = relay(o, sink.clone(), gen); // 스레드는 자식이 끝나면 스스로 끝난다
+    }
+    if let Some(e) = child.stderr.take() {
+        let _ = relay(e, sink, gen);
+    }
+    Ok(child)
+}
+
+/// ★★**두 앱을 몇 초 차이로 켜도 나중 것이 멈추지 않는다** (사용자 제보 2026-09-29).
+///   전역 상태(`LIVE`)를 쓰므로 판정은 한 함수에 모은다 (나누면 병렬로 돌며 서로를 덮는다).
+#[cfg(test)]
+mod port_tests {
+    use super::{backend_port, live_begin, live_end, live_port, relay, wanted_port, PORT_MARK};
+    use std::io::Cursor;
+    use std::time::Duration;
+
+    #[test]
+    fn 파이썬이_알려_온_포트로_답한다() {
+        // 파이썬과 줄 머리가 같아야 한다. 한쪽만 고치면 화면이 언제나 건넨 포트로 붙는다
+        let py = include_str!("../../backend/server.py");
+        assert!(py.contains(&format!("PORT_MARK = \"{PORT_MARK}\"")), "server.py 의 PORT_MARK 가 다르다");
+
+        // 중계 스레드가 그 줄을 듣는다 (앞뒤 줄은 그냥 로그다)
+        let g1 = live_begin();
+        let out = format!("[plugins] loaded []\n{PORT_MARK}51676\r\nINFO: started\n");
+        relay(Cursor::new(out.into_bytes()), None, g1).join().unwrap();
+        assert_eq!(backend_port(), 51676);
+
+        // 백엔드를 다시 띄운 뒤 옛 스레드가 뒤늦게 끝나거나 줄을 내도 새 쪽은 그대로 기다린다
+        let g2 = live_begin();
+        live_end(g1);
+        live_port(g1, 1);
+        let t = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(150));
+            live_port(g2, 51677);
+        });
+        assert_eq!(backend_port(), 51677, "옛 차례의 줄을 받았거나, 새 줄을 기다리지 않았다");
+        t.join().unwrap();
+
+        // 알리기 전에 끝났으면 기다리지 않고 건넨 포트로 답한다
+        let g3 = live_begin();
+        let at = std::time::Instant::now();
+        live_end(g3);
+        assert_eq!(backend_port(), wanted_port().0);
+        assert!(at.elapsed() < Duration::from_secs(1), "끝난 자식을 한도까지 기다렸다");
+    }
 }
 
 #[cfg(test)]
 mod log_tests {
-    use super::{lock_file, trim_at, trim_bytes, MARK};
+    use super::{lock_file, trim_at, trim_bytes, Sink, CAP_NOTE, LOG_HARD, MARK, REPEAT_WINDOW};
+    use std::time::Instant;
 
     /// 실행 세 회분을 만든다 — 각 회는 경계 한 줄 + 본문 몇 줄
     fn runs(n: usize, body: usize) -> String {
@@ -448,6 +737,96 @@ mod log_tests {
 
     /// ★한 실행이 천장을 넘으면 **그 실행이라도** 앞을 자른다 — 안 그러면 오류를 쏟아 낸
     ///   실행 하나로 파일이 한없이 커진다. 자른 자리는 줄 경계다.
+    /// ★★같은 줄이 되풀이되면 한 번만 적는다 — 파이썬이 같은 자취를 쉬지 않고 쏟아 로그가
+    ///   1.9GB 가 된 제보(2026-09-16)를 막는 자리다. 생략한 횟수는 그 줄을 다시 적을 때 함께 남긴다.
+    #[test]
+    fn 같은_줄이_되풀이되면_억제한다() {
+        let mut s = Sink::new(Vec::new(), 0);
+        let t0 = Instant::now();
+        for _ in 0..100 {
+            s.line("ERROR [api] POST /api/generate → KeyError: seed", t0);
+        }
+        s.line("다른 줄", t0);
+        let text = String::from_utf8_lossy(&s.out).to_string();
+        assert_eq!(text.matches("KeyError").count(), 1, "되풀이된 줄은 한 번만 적힌다: {text}");
+
+        // 창(10초)이 지나면 다시 적되, 그동안 생략한 99회를 함께 남긴다
+        s.line("ERROR [api] POST /api/generate → KeyError: seed", t0 + REPEAT_WINDOW);
+        let text = String::from_utf8_lossy(&s.out).to_string();
+        assert!(text.contains("같은 줄 99회 생략"), "{text}");
+    }
+
+    /// ★자식이 끝났는데 마지막 줄이 억제된 채면 그 횟수가 영영 사라진다 — EOF 에서 흘려보낸다
+    #[test]
+    fn 끝날_때_억제해_둔_횟수를_남긴다() {
+        let mut s = Sink::new(Vec::new(), 0);
+        let t0 = Instant::now();
+        for _ in 0..5 {
+            s.line("되풀이되는 줄", t0);
+        }
+        s.flush_repeats();
+        let text = String::from_utf8_lossy(&s.out).to_string();
+        assert!(text.contains("같은 줄 4회 생략"), "{text}");
+    }
+
+    /// ★★한 실행이 천장에 닿으면 **적는 자리에서** 멈춘다 — 앱이 켜져 있는 동안에도 파일
+    ///   크기에 천장이 있어야 한다 (켤 때 한 번 자르는 것만으로는 그 사이를 못 막는다).
+    #[test]
+    fn 천장에_닿으면_그만_적는다() {
+        let mut s = Sink::new(Vec::new(), LOG_HARD - 40);
+        let t0 = Instant::now();
+        for i in 0..1000 {
+            s.line(&format!("서로 다른 줄 {i}"), t0); // 억제에 안 걸리게 저마다 다른 줄로
+        }
+        let text = String::from_utf8_lossy(&s.out).to_string();
+        assert!(s.out.len() < 4096, "천장을 넘으면 더 적지 않아야 한다 ({}바이트)", s.out.len());
+        assert!(text.ends_with(CAP_NOTE), "멈춘 이유를 남겨야 한다: {text}");
+    }
+
+    /// ★★**배관을 실제 자식 프로세스로 한 번 태운다.** 위의 판정들은 `Sink` 만 본다 —
+    ///   파이프에서 읽어 파일에 닿기까지가 실제로 이어져 있는지는 프로세스를 띄워 봐야 안다.
+    ///   여기를 갈아엎었으므로(파일 핸들 상속 → 파이프 중계) 가장 큰 위험이 「로그가 통째로
+    ///   안 남는다」이고, 그것은 앱을 켜 보기 전에는 눈에 안 띈다.
+    #[cfg(windows)]
+    #[test]
+    fn 자식의_출력이_파일까지_온다() {
+        use std::process::{Command, Stdio};
+        use std::sync::{Arc, Mutex};
+
+        let path = std::env::temp_dir().join("peropix-relay-test.log");
+        let _ = std::fs::remove_file(&path);
+        let f = std::fs::OpenOptions::new().create(true).append(true).open(&path).unwrap();
+        let sink = Arc::new(Mutex::new(super::Sink::new(f, 0)));
+
+        let mut child = Command::new("cmd")
+            .args(["/c", "echo repeat&echo repeat&echo repeat&echo last"])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        // 차례 번호는 아무 백엔드의 것도 아닌 값이다 (`port_tests` 의 상태를 건드리지 않게)
+        let h = super::relay(child.stdout.take().unwrap(), Some(sink.clone()), u64::MAX);
+        let _ = child.wait();
+        h.join().unwrap();
+
+        let text = std::fs::read_to_string(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+        assert!(text.contains("last"), "자식이 찍은 줄이 파일까지 와야 한다: {text:?}");
+        assert_eq!(text.matches("repeat").count(), 2, "한 번 적히고 생략 횟수가 한 줄: {text:?}");
+        assert!(text.contains("같은 줄 2회 생략"), "{text:?}");
+    }
+
+    /// ★빈 줄은 억제하지 않는다 — 자취 사이의 빈 줄이 「N회 생략」으로 바뀌면 읽을 수가 없다
+    #[test]
+    fn 빈_줄은_억제하지_않는다() {
+        let mut s = Sink::new(Vec::new(), 0);
+        let t0 = Instant::now();
+        for _ in 0..3 {
+            s.line("", t0);
+        }
+        assert_eq!(String::from_utf8_lossy(&s.out), "\n\n\n");
+    }
+
     #[test]
     fn 한_실행이_너무_크면_줄_경계에서_자른다() {
         let text = runs(1, 2000);

@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { ValueBox } from "../components/ValueBox";
 import { useI18n } from "../i18n";
 import { useGen } from "../store/gen";
 import {
@@ -23,6 +24,9 @@ import { allScenes } from "../store/workspace";
 import { api } from "../lib/backend";
 import type { ImageMeta } from "../store/gallery";
 import { hasMeta, metaParams } from "../lib/metaApply";
+// ★★저장하지 않은 그림은 바이트로 강화한다 (사용자 지시 2026-09-30: *"공홈은 저장 안 해도 인핸스·업스케일·i2i
+//   전부 쓸 수 있다"* · 저장 버튼 말고는 어디서도 저장하지 않는다)
+import { previewOf } from "../store/previews";
 
 /** ★Magnitude → 강도·노이즈. v2 `magnitudePresets` 원문 그대로 (index.html:23953).
  *  숫자를 바꾸면 결과가 달라진다 — "적당히 비슷한 값"으로 손대지 말 것. */
@@ -58,15 +62,25 @@ const MAGNITUDE: Record<number, { strength: number; noise: number }> = {
 export function EnhanceDialog({
   files,
   onClose,
+  ws: wsFor,
+  route,
+  input,
 }: {
   /** 강화할 그림들. 여럿이면 **배치**다 — 큐로 보낸다 */
   files: string[];
   onClose: () => void;
+  /** 그림이 사는 워크스페이스 — 없으면 지금 워크스페이스 (만화 편집의 컷 그림은 뽑을 때의 워크스페이스에 산다) */
+  ws?: string;
+  /** 결과를 보낼 자리를 덮어쓴다 (탭·씬 그룹·칸) — 만화 편집의 컷 강화는 결과가 그 컷으로 돌아와야 한다 (`editor/cutGen`) */
+  route?: Record<string, unknown>;
+  /** 실을 참조 그림 조각. 없으면 생성 모드 것 (만화 편집의 컷 강화는 캔버스의 참조 그림이다: `editor/cutGen` 의 `refPayload`) */
+  input?: () => Record<string, unknown>;
 }) {
   const t = useI18n((s) => s.t);
   const { base, params } = useGen();
   const opus = (useCurrentSub()?.tier ?? 0) >= 3;
-  const ws = useWs((s) => s.current);
+  const wsNow = useWs((s) => s.current);
+  const ws = wsFor ?? wsNow;
   const records = useWs((s) => s.records);
   const setNow = useWs((s) => s.activeSceneGroup());
   // ★탭이 없으면 이 창이 뜰 수 없다 (부르는 두 자리가 다 탭 안이다). 옛 폴백은 `"싱글"`
@@ -107,7 +121,8 @@ export function EnhanceDialog({
             im.onload = () => res([f, [im.naturalWidth, im.naturalHeight]]);
             // 못 읽으면 화면 값으로 둔다 — 목표 크기는 어차피 서버가 원본에서 다시 잰다
             im.onerror = () => res([f, [params.width, params.height]]);
-            im.src = imgUrl(base, ws, f);
+            const pv = previewOf(f);
+            im.src = pv ? `data:image/${pv.preview.fmt};base64,${pv.preview.b64}` : imgUrl(base, ws, f);
           }),
       ),
     ).then((pairs) => {
@@ -133,6 +148,15 @@ export function EnhanceDialog({
     void Promise.all(
       targets.map(async (f) => {
         try {
+          const pv = previewOf(f);
+          if (pv) {
+            // ★미저장은 바이트를 보내 읽는다 (`Canvas` 의 `loadMeta` 와 같다)
+            const bin = Uint8Array.from(atob(pv.preview.b64), (c) => c.charCodeAt(0));
+            const fd = new FormData();
+            fd.append("file", new Blob([bin], { type: `image/${pv.preview.fmt}` }), "preview.png");
+            const r = await api<{ meta: ImageMeta | null }>("/api/tools/meta-upload", { method: "POST", body: fd });
+            return [f, r.meta] as const;
+          }
           const r = await api<{ meta: ImageMeta | null }>(
             `/api/gallery/${encodeURIComponent(ws)}/meta?file=${encodeURIComponent(f)}`,
           );
@@ -234,7 +258,7 @@ export function EnhanceDialog({
        *  전부 보내면 다른 줄의 그림을 강화한 결과가 엉뚱한 줄에 붙는다.
        *  칸을 못 찾으면 base 의 것(지금 보는 칸)이 그대로 쓰인다 (`store/queue` enqueue 주석). */
       const cellOf = (f: string) => {
-        const id = records.find((r) => r.file === f)?.cell_id;
+        const id = (previewOf(f) ?? records.find((r) => r.file === f))?.cell_id;
         const at = id ? scenes.find((x) => x.cell.id === id) : null;
         return at ? { cell: at.cell.name, cell_id: at.cell.id } : {};
       };
@@ -244,15 +268,22 @@ export function EnhanceDialog({
       //   ★★그리고 **그 그림의 메타데이터**를 얹는다 (머리 주석). 큐는 항목의 값만 base 위에
       //     덮으므로(`server._process_job`), 메타데이터가 안 준 자리는 저절로 아래 base 의
       //     화면 값이 된다 — v2 의 `normalized?.x || 사이드바` 와 같은 결과다.
-      const jobs = targets.map((f) => ({
-        enhance_from: f,
+      const jobs = targets.map((f) => {
+        const pv = previewOf(f);
+        return {
+        /* ★★미저장은 **바이트를 싣는다** — 파일이 없다. 구조(`env`)도 서버가 기록에서 못 찾으므로 들고 있던 것을
+           함께 보낸다 (저장된 그림은 서버가 원본 기록에서 물려받는다, `server._generate_one` 의 `shot_env`).
+           ★출처(`enhance_of`)는 미저장의 표식(`preview:3`)을 남기지 않는다 — 새로고침하면 사라지는 이름이다. */
+        ...(pv
+          ? { enhance_b64: pv.preview.b64, enhance_of: pv.enhance_of ?? null, env: pv.env ?? null }
+          : { enhance_from: f, enhance_of: records.find((r) => r.file === f)?.enhance_of || f }),
         enhance_scale: scaleOf(f),
-        enhance_of: records.find((r) => r.file === f)?.enhance_of || f,
         base_strength: useStrength,
         base_noise: useNoise,
         ...cellOf(f),
         ...metaJob(metas?.[f] ?? null),
-      }));
+        };
+      });
       // ★창을 **먼저** 닫는다 (사용자 지적 2026-08-14: 다 될 때까지 안 꺼졌다).
       //   큐는 보내기 전에 대기 칸을 미리 잡아 두므로, 닫자마자 그 자리가 보인다.
       onClose();
@@ -268,7 +299,7 @@ export function EnhanceDialog({
       await useQueue.getState().enqueue(
         {
           ...useGen.getState().params,
-          ...useImageInput.getState().payload(),
+          ...(input ? input() : useImageInput.getState().payload()),
           prompt, negative_prompt: uc, characters: chars,
           /* ★열쇠 짝은 낱말표 그대로다 (`shared/terms.json`): `tab`=탭 이름 ·
              `set`=세트 이름 · `scene_group_id`=그 세트의 id. 개명 뒤에도 여기가 옛 짝
@@ -277,6 +308,7 @@ export function EnhanceDialog({
           // ★이 워크스페이스의 계정으로 (점검 2026-09-02: 빠져 있어 강화가 첫 계정으로 나갔다)
           account: currentAccountId(),
           ...(found ? { cell: found.cell.name, cell_id: found.cell.id } : {}),
+          ...(route ?? {}),
         },
         jobs,
         1,
@@ -404,11 +436,14 @@ export function EnhanceDialog({
                 min={0}
                 max={1}
                 step={0.01}
-                value={strength}
+                // ★손잡이는 범위 안에 묶는다. 값이 1 을 넘어도 슬라이더는 끝에 선다 (v2 와 같다)
+                value={Math.min(1, strength)}
                 onChange={(e) => setStrength(Number(e.target.value))}
                 style={{ flex: 1 }}
               />
-              <span style={{ width: 34, textAlign: "right", fontVariantNumeric: "tabular-nums" }}>{strength}</span>
+              {/* ★★숫자를 눌러 **범위 밖의 값도** 넣는다 (v2 `.enhance-clickable-value`, 24857 —
+                  0 미만만 막고 1 초과는 허용). 부품은 정밀 레퍼런스가 쓰는 그것 하나다. */}
+              <ValueBox value={strength} step={0.01} onCommit={(v) => setStrength(Math.max(0, v))} />
             </Row>
             <Row label={t("imgIn.noise")}>
               <input
@@ -416,11 +451,11 @@ export function EnhanceDialog({
                 min={0}
                 max={1}
                 step={0.01}
-                value={noise}
+                value={Math.min(1, noise)}
                 onChange={(e) => setNoise(Number(e.target.value))}
                 style={{ flex: 1 }}
               />
-              <span style={{ width: 34, textAlign: "right", fontVariantNumeric: "tabular-nums" }}>{noise}</span>
+              <ValueBox value={noise} step={0.01} onCommit={(v) => setNoise(Math.max(0, v))} />
             </Row>
           </>
         )}

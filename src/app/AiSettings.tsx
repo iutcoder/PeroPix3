@@ -55,7 +55,7 @@ function AskForModel({ url }: { url: string }) {
  *  "지금까지의 지침을 종합해 봐" 같은 일이 안 됐다. 그래서 그냥 글이다.
  *  ★AI 와 사람이 **같은 문서**를 본다 (`backend/guide.py`). 엔진(API·CLI)과 무관하다 —
  *    그래서 CLI 의 개인 지침(`CLAUDE.md`)을 끌어들이지 않고도 취향이 이어진다.
- *  ★직전 내용은 `data/.guide-bak/` 에 남는다 — 통째로 덮어쓰는 자리라 되돌릴 길을 둔다. */
+ *  ★직전 내용은 `data/.guide-bak/` 에 남는다 — 통째로 덮어쓰는 자리라 되돌릴 방법을 둔다. */
 /** **자동 승인** — 조수의 작업을 어디까지 묻지 않고 넘길지 (사용자 결정 2026-08-24).
  *
  *  ★★칸이 **둘인** 까닭: 이 앱에는 되돌릴 수 있는 것과 없는 것이 섞여 있다. 일상 작업은
@@ -196,6 +196,8 @@ export function AiSettings() {
   const cliEffort = useCli((c) => c.effort);
   const setCliModel = useCli((c) => c.setModel);
   const setCliEffort = useCli((c) => c.setEffort);
+  const cliOpen = useCli((c) => c.open);
+  const setCliOpen = useCli((c) => c.setOpen);
   const [key, setKey] = useState("");
   const [model, setModel] = useState("");
   /** 로컬 서버 주소 칸 (공급자 `local` 만). 저장된 값에서 시작한다 */
@@ -372,6 +374,31 @@ export function AiSettings() {
               ))}
             </select>
           </Line>
+          {/* ★★앱 밖 도구(파일·셸·웹) 허용 — 기본 켬 (사용자 결정 2026-09-07, 자유도 우선).
+              끄면 예전 잠금이다: 우리 MCP 도구만 열고 나머지는 이름으로 닫는다 (`backend/cliagent.py`).
+              ★이미 떠 있는 세션에는 안 먹는다 — 다음 세션(새 대화·CLI 바꾸기)부터다. */}
+          <label
+            style={{
+              display: "inline-flex",
+              alignSelf: "flex-start",
+              alignItems: "center",
+              gap: "var(--sp-2)",
+              fontSize: "var(--text-2xs)",
+              color: "var(--ink-soft)",
+              cursor: "pointer",
+            }}
+          >
+            <input
+              type="checkbox"
+              data-cli-open
+              checked={cliOpen}
+              onChange={(e) => setCliOpen(e.target.checked)}
+            />
+            {t("settings.cliOpen")}
+          </label>
+          <span style={{ fontSize: "var(--text-2xs)", color: "var(--ink-faint)", lineHeight: 1.6 }}>
+            {t("settings.cliOpenHint")}
+          </span>
           <AskForModel url={cfg?.support ?? ""} />
           {/* ★CLI 안내 상자를 걷었다 (사용자 지시 2026-08-20) — 무엇이 열리고 어떻게
               인증하는지는 그 CLI 를 쓰는 사람이 이미 아는 것이라 자리만 먹었다. */}

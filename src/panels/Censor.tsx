@@ -1,6 +1,7 @@
 import { useEffect, useRef } from "react";
 import { useI18n } from "../i18n";
 import { BRUSH_MAX, dirOf, isAbsPath, savePathOf, useCensor, type Tab } from "../store/censor";
+import { bumpZoom } from "../store/censorView";
 import { useFiles, type FileNode } from "../store/files";
 import { useGen } from "../store/gen";
 import { fileMgrThumb } from "../lib/imgUrl";
@@ -18,7 +19,7 @@ import { ClearButton } from "../components/ClearButton";
 /** 자동 검열. **여러 장을 한 번에** 찾고 가린다 (v2 이식).
  *
  *  ★탭 셋이 곧 작업 순서다: 담아서 찾고(검열 전) · 손보고(검열 중) · 다시 손본다(검열 후).
- *  ★그림은 **두 길로** 들어온다: 아웃풋 폴더에서 고르거나(왼쪽 트리), 밖에서 떨구거나.
+ *  ★그림은 **두 경로로** 들어온다: 아웃풋 폴더에서 고르거나(왼쪽 트리), 밖에서 떨구거나.
  *    떨군 것은 경로만 서버로 가고 바이트는 안 실린다 (`lib/dropImages.ts` 머리 주석).
  *  ★결과는 **새 파일**이다. 원본은 그대로 남는다. 덮어쓰기 경로를 만들지 말 것.
  */
@@ -67,6 +68,14 @@ export function Censor() {
     if (!el) return;
     const onWheel = (e: WheelEvent) => {
       const s = useCensor.getState();
+      /* ★★**Ctrl+휠 = 확대·축소** — 생성 쪽 큰 그림과 **같은 조합**이다 (`panels/Canvas.tsx`).
+         ★`{ passive: false }` 로 달려 있어야 `preventDefault` 가 먹는다. 안 막으면 웹뷰 자체가
+           확대돼 앱 전체가 커진다 (생성 쪽이 같은 자리에 적어 둔 함정). */
+      if (e.ctrlKey || e.metaKey) {
+        e.preventDefault();
+        bumpZoom(e.deltaY > 0 ? -1 : 1);
+        return;
+      }
       /* ★★**Alt+휠 = 붓 크기** (사용자 지시 2026-09-05: *"조작키를 알트 + 휠로 변경"* — 칠하다 말고
          손을 옮기지 않아도 되게. 칩의 가중치와 같은 조합이다). Alt 단독 누름이 창의 메뉴 모드를 깨우지
          않게는 `App.tsx` 가 막아 둔다. */
@@ -97,6 +106,11 @@ export function Censor() {
       if (el && (el.tagName === "TEXTAREA" || el.tagName === "SELECT" || el.isContentEditable
         || (el.tagName === "INPUT" && !/^(range|checkbox|radio|button|color)$/.test((el as HTMLInputElement).type)))) return;
       const s = useCensor.getState();
+      // ★「선택」(3)은 검열 전 탭에서도 쓴다 — 거기서도 확대해서 박스를 볼 수 있어야 한다
+      if (e.key === "3") {
+        e.preventDefault();
+        return s.set({ tool: "pan" });
+      }
       if (s.tab !== "before" && (e.key === "1" || e.key === "2")) {
         e.preventDefault();
         return s.set({ tool: e.key === "1" ? "brush" : "erase" });
@@ -136,7 +150,7 @@ export function Censor() {
         data-folder={node.path}
         /* ★★**줄을 누르면 고르고 동시에 펼친다** (사용자 지시 2026-08-23) — 화살표를
            정확히 겨눠야만 펼쳐지던 자리다. 자식이 없으면 펼칠 것이 없으니 고르기만 한다.
-           ★화살표 단추는 그대로 둔다 — **고르지 않고 펼치기만** 하는 길이다 (딴 폴더를
+           ★화살표 단추는 그대로 둔다 — **고르지 않고 펼치기만** 하려면 이것뿐이다 (딴 폴더를
              보면서 트리만 넓히고 싶을 때). */
         onClick={() => {
           void go(node.path);
@@ -227,7 +241,10 @@ export function Censor() {
         />
       </div>
 
-      {/* ── 썸네일 띠: 지금 다루는 목록 ── */}
+      {/* ── 썸네일 띠: 지금 다루는 목록 ──
+          ★★장 수·비우기는 **스크롤 밖**이다 (사용자 지적 2026-10-02: 그림을 많이 넣으면 비우기 버튼이 밀려 안 보였다).
+            띠는 가로로 스크롤되는 칸과 오른쪽 끝에 붙은 칸 둘로 나뉜다. */}
+      <div style={{ ...card, flexShrink: 0, height: 68, display: "flex", alignItems: "center", gap: "var(--sp-2)", padding: "var(--sp-2)" }}>
       <div
         ref={stripRef}
         data-censor-strip
@@ -238,13 +255,12 @@ export function Censor() {
           e.currentTarget.scrollLeft += e.deltaY;
         }}
         style={{
-          ...card,
-          flexShrink: 0,
-          height: 68,
+          flex: 1,
+          minWidth: 0,
+          height: "100%",
           display: "flex",
           alignItems: "center",
           gap: "var(--sp-2)",
-          padding: "var(--sp-2)",
           overflowX: "auto",
           overflowY: "hidden",
         }}
@@ -323,7 +339,7 @@ export function Censor() {
             {t("censor.emptyList")}
           </span>
         )}
-        <span style={{ flex: 1 }} />
+      </div>
         {!!list.length && (
           <span style={{ flexShrink: 0, paddingRight: "var(--sp-2)", fontSize: "var(--text-2xs)", color: "var(--ink-faint)", fontVariantNumeric: "tabular-nums" }}>
             {at + 1} / {list.length}

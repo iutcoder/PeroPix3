@@ -8,7 +8,7 @@
 
       codex.exe -c features.code_mode_host=true app-server --analytics-default-enabled
 
-  CLI 도움말은 `[experimental]` 이라 적어 두지만, OpenAI 자기네 출시 제품이 쓰는 길이다.
+  CLI 도움말은 `[experimental]` 이라 적어 두지만, OpenAI 자기네 출시 제품이 쓰는 방식이다.
 
 우리가 쓰는 요청은 다섯뿐이다 (전부 실측으로 확인, v0.147.0):
 
@@ -40,20 +40,26 @@ from typing import Any, Callable
 
 import cliagent
 
+#: ★★CLI 출력 한 줄의 읽기 한도 — 파이썬 기본값(64KB)이면 그림이 든 도구 결과 한 줄에 읽기 스레드가 죽는다
+#  (2026-09-22 설치본: `read_image` 두 장이 약 10만 자 한 줄로 왔다). 그 뒤로는 중단도 다음 말도 오류였다.
+#  클로드 코드 세션(`agentsession`)도 이 값을 쓴다.
+LINE_LIMIT = 32 * 1024 * 1024
 
-def thread_config(backend: str) -> dict:
+
+def thread_config(backend: str, open: bool = True) -> dict:
     """`thread/start` 에 실어 보내는 설정 — **여기 하나뿐이다.**
 
     ★`default_tools_approval_mode="approve"` 가 없으면 **도구가 조용히 안 돈다.**
       물어볼 사람이 없어 코덱스가 스스로 취소한다 (`exec` 쪽에서 밟은 것과 같다).
-    ★셸은 끈다 (사용자 결정 2026-08-15). `features.shell_tool=false` 가 먹는 것을 실측했다 —
-      끄기 전에는 시키지도 않은 PowerShell 을 돌렸다.
-    ★모래상자는 읽기 전용. 셸이 없어도 다른 경로가 생길 수 있으니 울타리는 남긴다."""
+    ★★`open` — **앱 밖 도구를 허용한다** (사용자 결정 2026-09-07, 기본 켬). 켜면 셸을 열고
+      모래상자를 푼다 (`danger-full-access`). 클로드 코드의 `bypassPermissions` 와 같은 급이다.
+    ★끄면 예전 잠금이다 (사용자 결정 2026-08-15): 셸을 끄고(`features.shell_tool=false` 가
+      먹는 것을 실측했다 — 끄기 전에는 시키지도 않은 PowerShell 을 돌렸다) 모래상자는 읽기 전용."""
     spec = cliagent.mcp_spec(backend)
     return {
-        "sandbox_mode": "read-only",
+        "sandbox_mode": "danger-full-access" if open else "read-only",
         "approval_policy": "never",
-        "features": {"shell_tool": False},
+        "features": {"shell_tool": bool(open)},
         "mcp_servers": {
             "peropix": {
                 "command": spec["command"],
@@ -112,6 +118,7 @@ class Rpc:
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            limit=LINE_LIMIT,
         )
         self._ready.set()
         assert self.proc.stdout is not None

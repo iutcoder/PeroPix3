@@ -100,7 +100,7 @@ def _scenes(st: dict) -> list[dict]:
       `cells` 를 직접 들었고, 여기는 그 옛 자리만 읽고 있었다. 그래서 **지금 만든 워크스페이스는
       조수에게 씬이 하나도 없는 것으로 보였다** (2026-08-24 발견).
       ★옛 자리를 읽는 폴백은 두지 않는다 — 그 모양의 워크스페이스가 남아 있지 않다
-        (사용자 확인 2026-08-24). 없는 상황을 위한 길은 다음에 읽는 사람을 헷갈리게 한다.
+        (사용자 확인 2026-08-24). 없는 상황을 위한 갈래는 다음에 읽는 사람을 헷갈리게 한다.
     ★공통 접두(`prefix`)는 **카드마다** 있다 (그때 함께 내려갔다). 씬에 그 카드 이름과 접두를
       붙여 준다 — 조수가 「어느 카드의 씬인가」를 물어볼 필요가 없게."""
     out = []
@@ -114,19 +114,41 @@ def _scenes(st: dict) -> list[dict]:
     return out
 
 
-def _scene_group_prompt(spec: dict, st: dict) -> dict:
-    """그 씬 그룹에 걸리는 **프롬프트**.
+def _prompt_view(p: dict) -> dict:
+    """탭의 **프롬프트** — 조수가 읽는 모양 (스타일 카드 · base · baseUc · 캐릭터 · 순차 생성).
 
-    ★★씬 그룹(kind=="sceneGroup")의 프롬프트는 **탭에 산다** (`spec.tabs[].prompt` — `workspace.ts` 의
-      `promptOf`). 한 탭 아래 씬 그룹들은 같은 인물의 다른 포즈 묶음이라 프롬프트를 함께 쓴다.
-      여기는 씬 그룹에서만 찾고 있어서 **프롬프트가 통째로 안 보였다** (2026-08-24 발견).
-    ★씬 그룹에 든 것을 읽는 폴백은 두지 않는다 — 그 모양(옛 워크스페이스·싱글 탭)이 남아 있지
-      않다 (사용자 확인 2026-08-24)."""
-    cid = st.get("tabId") or spec.get("activeTab")
-    for c in spec.get("tabs") or []:
-        if c.get("id") == cid and c.get("prompt"):
-            return c["prompt"]
-    return {}
+    ★★프롬프트는 **탭에 산다** (`spec.tabs[].prompt` — `workspace.ts` 의 `promptOf`). 한 탭 아래 씬 그룹들은
+      같은 인물의 다른 포즈 묶음이라 프롬프트를 함께 쓴다. 그래서 `get_workspace` 는 이것을 **`tabs[].prompt` 에
+      한 번만** 싣는다 (2026-09-22). 예전에는 씬 그룹 행마다 실어서, 한 탭에 씬 그룹이 둘이면 같은 2,300 글자가
+      두 번 나갔다 (실측: 17탭 워크스페이스에서 48k 중 44k 가 프롬프트).
+    ★★**스타일 카드가 없으면 없다고 보인다** (2026-09-07). 새 탭은 `styleOn: false` 로 시작하는데
+      예전에는 `style` 이름·`base` 만 실어서 「카드가 없음」과 「카드가 비었음」이 같은 모양이었다 —
+      조수가 없는 카드의 `base` 에 쓰고 성공이라 답했다 (블록은 저장되지만 화면·생성에 안 나온다).
+      ★값이 없으면 켜진 것이다 (옛 워크스페이스, `store/prompt` 의 `styleOn`).
+    ★「캐릭터 프롬프트」다 — 덱의 **캐릭터 카드**와 다른 것이다 (낱말표).
+      ★★`id`·`on`·`center` 를 함께 준다 (선결 조건 3-6): 꺼진 캐릭터를 켜거나 자리를 옮기려면 조수가
+        그 값을 **먼저 볼 수 있어야** 한다. `center` 는 화면에서 설 자리(0~1)이고 **언제나 값이 있다**
+        (`store/prompt.ts` 의 `Char.center`) — 좌표를 안 쓰는 상태는 이 값을 비우는 것이 아니라
+        `use_coords` 를 끄는 것이다.
+      ★한때 `stack`(순차 생성 대기줄)을 함께 실었다. 2026-09-15 에 스택이 **모드**로 바뀌어 (`seqChars`)
+        그 값 자체가 없어졌다.
+    ★★**순차 생성 모드**(`seqChars`) — 켜면 켜 둔 캐릭터를 **한 명씩** 뽑아 장 수가 그만큼 곱해진다
+      (`src/lib/costNow.ts` 의 `seqTimesNow`). 쓰기(`set_seq_chars`)를 만들기 전에 읽기부터 채운다 —
+      못 읽는 값은 못 고친다. 값은 **탭의 것**이다 (`TabPrompt.seqChars`) — 없으면 꺼진 것이다."""
+    on = p.get("styleOn", True) is not False
+    st = p.get("style") or {}
+    return {
+        "styleCard": ({"name": st.get("name"), "ref": st.get("ref")} if on else None),
+        "base": _view(p.get("base")) if on else [],
+        "baseUc": _view(p.get("baseUc")) if on else [],
+        "characters": [
+            {"id": c.get("id"), "name": c.get("name"),
+             "on": c.get("on", True), "center": c.get("center"),
+             "prompt": _view(c.get("prompt")), "uc": _view(c.get("uc"))}
+            for c in (p.get("chars") or [])
+        ],
+        "seqChars": p.get("seqChars") is True,
+    }
 
 
 def _tab_model(spec: dict) -> str:
@@ -161,11 +183,11 @@ TOOL_RISK = {
     "write_guide": "ask",   # 지침 **전문**을 갈아 끼운다. 되살아난다
     "move_files": "ask",    # ★자동 되돌리기가 없다 (파일은 그대로지만 복구 경로가 없다)
     "delete_card": "ask",   # 되돌아오지만 **사용자가 넣어 둔 재료**가 사라진다
-    # ★★`create_card` 도 묻는다 (사용자 지시 2026-08-25): 조수가 요청도 없이 덱에 카드를
-    #   쌓아 두는 일이 잦았다 — 저장은 **사용자가 하는 것**이 기본이다 (지침에도 적었다).
-    "create_card": "ask",
     # ★만들거나 되살리는 쪽은 **잃는 것이 없다** → none
     #   create_card · create_folder · restore_files · 읽기 전부
+    # ★`create_card` 는 한때 물었다 (2026-08-25, 조수가 요청도 없이 덱에 카드를 쌓아서).
+    #   2026-09-07 에 도로 none 으로 — 자유도를 앞세우기로 했고(`CLAUDE.md`), 안 시킨 저장은
+    #   승인 카드가 아니라 지침(「덱은 사용자가 맡기는 것」)으로 막는다.
 }
 
 #: 앱 액션 목록 — **빌드할 때** 프론트에서 뽑아 둔 것 (`scripts/gen-actions.mjs`)
@@ -496,15 +518,11 @@ class Tools:
             return fail("blocked", "앞선 승인 요청이 아직 화면에 떠 있습니다. 그것을 먼저 처리해 주세요.")
         return fail("refused", "사용자가 승인하지 않았습니다.", retry="never")
 
-    #: **우리 대화를 건드리는** 도구 — 바깥 에이전트에게는 열지 않는다 (사용자 결정 2026-08-31).
-    #  ★묻는 것도 이름 붙이는 것도 **제 대화에서** 할 일이다. 여기서 열어 두면 사용자가 쓰던
-    #    대화에 남의 물음이 끼어들고, 대화 이름이 바깥에서 바뀐다.
-    CHAT_TOOLS = {"ask_user", "name_chat"}
+    #  ★`ask_user`·`name_chat` 을 바깥 에이전트에 막던 갈래(2026-08-31)는 걷었다 (사용자 결정
+    #    2026-09-07, 자유도 우선). 바깥이 물으면 앱 대화에 카드가 뜨고 그쪽 도구는 답을
+    #    기다린다 — 그것을 감수하는 것은 쓰는 쪽의 선택이다.
 
     async def call(self, name: str, args: dict, outside: bool = False) -> dict:
-        if outside and name in self.CHAT_TOOLS:
-            return fail("not_here", "이 도구는 PeroPix 앱 안의 조수만 씁니다. "
-                        "묻거나 이름 붙이는 것은 당신 쪽 대화에서 하세요.", retry="never")
         # ★★표에 없는 이름이라도 **액션 목록에 있으면 앱에 시킨다** (2026-08-24).
         #   ★기다리는 시간이 넉넉해야 한다: 되돌릴 수 없는 일 앞에서는 앱이 **승인 카드**를
         #     띄우고 사람이 누를 때까지 멈춘다 (`docs/agent-actions-design.md` 2-5).
@@ -558,9 +576,13 @@ class Tools:
             ),
             (
                 "get_workspace",
-                "작업 상태 전부 — 탭·포즈 슬롯·프롬프트 블록·캐릭터. **지금 사용자가 만지고 있는 것**이 "
-                "여기 들어 있다 (화면은 이 파일을 보여 줄 뿐이다). 이름을 비우면 가장 최근 것.",
-                obj({"name": s("워크스페이스 이름 (비우면 최근)"), "records": n("최근 생성물 몇 개까지 (기본 0)")}),
+                "작업 상태 — 탭 목록과 **한 탭**의 프롬프트(`tabs[].prompt`: 스타일 카드·base·UC·캐릭터)와 "
+                "씬 그룹·씬. **지금 사용자가 만지고 있는 것**이 여기 들어 있다 (화면은 이 파일을 보여 줄 뿐이다). "
+                "이름을 비우면 가장 최근 것. 탭을 비우면 활성 탭. 다른 탭은 `tab` 으로, 모든 탭은 `all: true` 로 (크다).",
+                obj({"name": s("워크스페이스 이름 (비우면 최근)"),
+                     "tab": s("탭 id 또는 이름 (비우면 활성 탭)"),
+                     "all": {"type": "boolean", "description": "모든 탭의 씬 그룹을 다 준다 (기본 false)"},
+                     "records": n("최근 생성물 몇 개까지 (기본 0)")}),
                 self._get_ws,
             ),
             (
@@ -626,7 +648,7 @@ class Tools:
             ),
             (
                 "list_files",
-                "그 워크스페이스 안의 폴더·파일. ★뿌리는 **워크스페이스 폴더**다 — 그림은 `output/멀티/<탭>/<씬 그룹>/` 아래에 있다 (옛것은 `output/싱글/…`·`싱글/…`·`work/…`).",
+                "그 워크스페이스 안의 폴더·파일. ★뿌리는 **워크스페이스 폴더**다 — 그림은 `output/<탭>/<씬 그룹>/` 아래에 있다 (옛것은 `output/싱글/…`·`싱글/…`·`work/…`).",
                 obj({"folder": s("상대경로 — 뿌리는 빈 문자열"), "page": n("쪽 (기본 1)"),
                      "workspace": s("어느 워크스페이스인지 — 비우면 앱이 열어 둔 것")}),
                 self._list_files,
@@ -808,8 +830,27 @@ class Tools:
             return fail("not_found", f"그런 워크스페이스가 없습니다: {name}",
                         what="workspace", given=name,
                         candidates=near_by(name, [x["name"] for x in self.store.list()]))
+        # ★★**기본은 지금 탭만** (2026-09-22). 예전에는 모든 탭의 씬 그룹·프롬프트를 통째로 줬는데,
+        #   탭이 여럿인 워크스페이스에서 한 번에 5만 글자가 나가 대화가 그것으로 찼다 (실측: 한 대화에서
+        #   두 번 불러 10만 글자). 조수는 `[screen]` 줄로 사용자가 보는 탭을 이미 알고, 다른 탭이
+        #   필요하면 `tab` 으로 집어 부른다. `all` 은 정말 전부가 필요할 때만.
+        want = str(a.get("tab") or "").strip()
+        every = a.get("all") is True
+        tabs = spec.get("tabs") or []
+        if want and not every:
+            hit = [c for c in tabs if c.get("id") == want] or [c for c in tabs if c.get("name") == want]
+            if not hit:
+                return fail("not_found", f"그런 탭이 없습니다: {want}", what="tab", given=want,
+                            candidates=near_by(want, [str(c.get("name") or "") for c in tabs]))
+            if len(hit) > 1:
+                return fail("ambiguous", f"같은 이름의 탭이 {len(hit)}개입니다: {want}", retry="never",
+                            what="tab", given=want, candidates=[f"{c.get('name')}#{c.get('id')}" for c in hit])
+            want = str(hit[0].get("id"))
+        only = None if every else (want or str(spec.get("activeTab") or ""))
         scene_groups = []
         for t in spec.get("sceneGroups", []):
+            if only and t.get("kind") == "sceneGroup" and str(t.get("tabId") or "") != only:
+                continue
             row = {"id": t.get("id"), "kind": t.get("kind"), "name": t.get("name")}
             if t.get("kind") == "sceneGroup":
                 # ★어느 탭에 달렸는지 — 조수가 「키키 탭의 씬 그룹」를 고르려면 있어야 한다
@@ -823,41 +864,24 @@ class Tools:
                      "locked": bool(k.get("locked")), "scenes": len(k.get("cells") or [])}
                     for k in (t.get("cards") or [])
                 ]
-            p = _scene_group_prompt(spec, t)
-            if p:
-                # ★★**스타일 카드가 없으면 없다고 보인다** (2026-09-07). 새 탭은 `styleOn: false` 로 시작하는데
-                #   예전에는 `style` 이름·`base` 만 실어서 「카드가 없음」과 「카드가 비었음」이 같은 모양이었다 —
-                #   조수가 없는 카드의 `base` 에 쓰고 성공이라 답했다 (블록은 저장되지만 화면·생성에 안 나온다).
-                #   ★값이 없으면 켜진 것이다 (옛 워크스페이스, `store/prompt` 의 `styleOn`).
-                on = p.get("styleOn", True) is not False
-                st = p.get("style") or {}
-                row["prompt"] = {
-                    "styleCard": ({"name": st.get("name"), "ref": st.get("ref")} if on else None),
-                    "base": _view(p.get("base")) if on else [],
-                    "baseUc": _view(p.get("baseUc")) if on else [],
-                    # ★「캐릭터 프롬프트」다 — 덱의 **캐릭터 카드**와 다른 것이다 (낱말표)
-                    #  ★★`id`·`on`·`center`·`stack` 을 함께 준다 (선결 조건 3-6): 꺼진 캐릭터를
-                    #    켜거나 자리를 옮기려면 조수가 그 값을 **먼저 볼 수 있어야** 한다.
-                    #  ★`center` 는 화면에서 설 자리(0~1)이고 **언제나 값이 있다**
-                    #    (`store/prompt.ts` 의 `Char.center`) — 좌표를 안 쓰는 상태는
-                    #    이 값을 비우는 것이 아니라 `use_coords` 를 끄는 것이다.
-                    #  ★`stack` 은 순차 생성 대기줄이라 **수만** 준다 (본문은 카드가 들고 있다).
-                    "characters": [
-                        {"id": c.get("id"), "name": c.get("name"),
-                         "on": c.get("on", True), "center": c.get("center"),
-                         "stack": len(c.get("stack") or []),
-                         "prompt": _view(c.get("prompt")), "uc": _view(c.get("uc"))}
-                        for c in (p.get("chars") or [])
-                    ],
-                }
             scene_groups.append(row)
+        # ★★**프롬프트는 보인 탭에만, 한 번만** (2026-09-22). 프롬프트는 탭의 것인데 씬 그룹 행마다 실었더니
+        #   한 탭에 씬 그룹이 둘이면 같은 글이 두 번 나갔다. 탭 목록은 언제나 전부지만 프롬프트는 보인 탭에만.
+        tab_rows: list[dict[str, Any]] = []
+        for c in tabs:
+            trow: dict[str, Any] = {"id": c.get("id"), "name": c.get("name")}
+            if (every or str(c.get("id")) == only) and c.get("prompt"):
+                trow["prompt"] = _prompt_view(c["prompt"])
+            tab_rows.append(trow)
         out: dict[str, Any] = {
             "name": name,
             # ★★이름은 **화면 낱말**이다 (`docs/terms-plan.md` 의 낱말표) — 탭·씬 그룹·씬.
             #   저장 열쇠와 우연히 같아진 것이지 묶인 것이 아니다. 저장 쪽 이름을 또 바꾸면
             #   여기서 **옮겨 담아** 계약을 지킨다.
-            "tabs": [{"id": c.get("id"), "name": c.get("name")} for c in (spec.get("tabs") or [])],
+            "tabs": tab_rows,
             "activeTab": spec.get("activeTab"),
+            # ★어느 탭의 씬 그룹인지 — 전부면 "*" (조수가 「빠진 탭이 있나」를 알 수 있어야 한다)
+            "shownTab": "*" if every else only,
             "sceneGroups": scene_groups,
             "activeSceneGroup": spec.get("activeSceneGroup"),
         }
@@ -1322,13 +1346,17 @@ The user makes art with NovelAI (NAI); a prompt is **Danbooru tags** joined by c
      (the default; "change X" means this). `edit_style_card` creates the style card when there
      is none; `edit_character` creates the card when the name is new.
   2. **Add an empty card on screen** - `add_style_card` / `add_character` / `create_scene`.
-  3. **Put a saved deck card on screen** - `apply_card`, `stack_character`.
+  3. **Put a saved deck card on screen** - `apply_card`.
   4. **Remove from screen** - `remove_style_card` / `remove_character` / `delete_scene`.
-  5. **Save to the deck** - `save_card` (what is on screen) - only when they say "save" or "deck".
-  6. **Make or overwrite a deck card from scratch** - `create_card` / `update_card` - last resort,
-     only when they ask for a deck card in words.
-  `get_workspace` shows `prompt.styleCard` - `null` means there is no style card on that tab
-  yet, and then `base` is empty because there is nowhere for it to live.
+  5. **Save to the deck** - `save_card` (what is on screen) when they want to keep it.
+  6. **Make or overwrite a deck card directly** - `create_card` / `update_card` - when they
+     want a deck card that is not on screen.
+  `get_workspace` puts the tab's prompt on `tabs[].prompt` (only for the tab it shows; scene
+  groups on one tab share it). `prompt.styleCard` `null` means there is no style card on that
+  tab yet, and then `base` is empty because there is nowhere for it to live.
+  `prompt.seqChars` is the tab's **one-by-one mode**: when true, each enabled character is
+  generated in its own image instead of all of them sharing one, so the number of images is
+  multiplied by the number of enabled characters. `set_seq_chars` turns it on and off.
 
 Principles:
 - When you need to know what the user is doing, call **get_workspace** first.
@@ -1432,7 +1460,7 @@ Principles:
   tell whether the work finished. (User rule 2026-08-30: "가끔 아무 말 없이 끝나서 중단된 것처럼
   보인다".)
 - **"Change X" defaults to (1)** - people usually mean what is on screen right now.
-- **When a name comes up, find where it lives first.** Look at the current scene group's `characters`
+- **When a name comes up, find where it lives first.** Look at the current tab's `prompt.characters`
   with get_workspace; if it is not there, look in the deck with list_cards. **If it is in
   both, ask which one.**
 - update_card overwrites an existing card - use it only when they clearly asked for that.
@@ -1456,11 +1484,11 @@ Principles:
   request, it must be one of the options - not only the items one by one. And when more
   than one answer can be true at once, pass `multi=true`; a single-pick list forces them
   to answer a question you did not ask.
-- ★★**Work on the screen first. Saving to the deck is the user's call.**
+- ★★**Work on the screen first; the deck is for what they want to keep.**
   A request about prompts means **what they are looking at** - use edit_style_card /
-  edit_character / edit_scene (or apply_card to put a saved card onto the screen). Do **not**
-  save or create a deck card unless they said so in words ("save it as a card", "put it in
-  the deck"). Cards are storage, and filling their deck uninvited is not helpful.
+  edit_character / edit_scene (or apply_card to put a saved card onto the screen). Save or
+  create a deck card when they ask for it or clearly want something kept for later; do not
+  fill their deck with cards nobody asked for.
 - ★When a request could land in more than one place **and the wording really is split**
   (screen / new card / an existing card), ask which. Not when (1) is the obvious reading -
   see the default above.

@@ -20,6 +20,7 @@ export function Shell({
   left,
   right,
   center,
+  centerKeep,
   titleLeft,
   titleRight,
   navRight,
@@ -47,6 +48,8 @@ export function Shell({
   left: ReactNode;
   right: ReactNode;
   center: ReactNode;
+  /** 가운데 칸에 **모드와 무관하게 늘 매달아 두는 것** — 모드를 오가도 떼지 않는 화면 (플러그인 캔버스). 숨김은 그쪽이 맡는다 */
+  centerKeep?: ReactNode;
   leftLabel: string;
   rightLabel: string;
   leftHeaderRight?: ReactNode;
@@ -169,10 +172,7 @@ export function Shell({
               />
               {/* ★푸터는 스크롤 **밖**이다 — 안에 있으면 프롬프트를 내릴 때 생성 버튼이
                   같이 밀려 올라간다 (페로픽스파이 `params-footer` 와 같은 자리) */}
-              {/* ★표식이 있어야 「설정 불러오기」가 **보던 자리를 고정**할 수 있다
-                  (`lib/keepScroll`) — 불러오면 접힌 묶음이 펴지고 내용이 늘어 화면이 움직인다 */}
               <div
-                data-left-scroll
                 style={{ flex: 1, minHeight: 0, overflowY: "auto", display: "flex", flexDirection: "column" }}
               >
                 {left}
@@ -196,6 +196,7 @@ export function Shell({
             바로 오른쪽에 붙는다 (사용자 지시 2026-08-29) */}
         <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", position: "relative" }}>
           {center}
+          {centerKeep}
         </div>
 
         {hideRight ? null : rightCollapsed ? (

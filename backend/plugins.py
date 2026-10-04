@@ -1,0 +1,669 @@
+"""플러그인 — `<앱 뿌리>/plugins/<id>/` 를 읽어 백엔드에 붙인다 (설계: `docs/plugin-design.md`).
+
+★ComfyUI 커스텀 노드와 같은 모양이다 (사용자 결정 2026-09-07 — 자유도 우선, 상한은 ComfyUI):
+  **같은 프로세스에 import** 하고, 라우터를 `/plug/<id>/` 에, `web/`·`ext/` 를 정적으로 붙인다.
+  격리하지 않는다 — 플러그인 코드는 앱 모듈(`workspace`·`cards`·`nai`)을 그대로 import 해 쓴다.
+★한 플러그인의 예외는 **그 플러그인만** 죽인다 (목록에 `error` 로 남는다). 백엔드는 계속 뜬다.
+★여기는 읽어서 붙이는 것뿐이다. 설치·삭제는 사용자가 누를 때만 돈다 (설계 문서 3단계).
+
+`plugin.json`:
+
+    {
+      "id": "tag-roll",            폴더 이름과 같아야 한다 (소문자·숫자·-·_)
+      "name": "Tag Roll",
+      "version": "1.0.0",
+      "server": "server.py",       (선택) `router: APIRouter` 를 내놓는다 → /plug/<id>/…
+                                   플러그인 안의 다른 모듈은 `from . import x` 로 (폴더가 패키지다)
+      "web": "web",                (선택) 캔버스 폴더 (index.html) → /plug/<id>/web/
+      "ext": "ext/main.js",        (선택) 앱 페이지 안에서 돌 JS (문자열 또는 목록) → /plug/<id>/ext/…
+      "contributes": { ... }       (선택) 기여 지점 — 화면이 읽는다 (2단계)
+    }
+"""
+from __future__ import annotations
+
+import hashlib
+import importlib.util
+import json
+import re
+import shutil
+import sys
+import traceback
+from dataclasses import dataclass, field
+from pathlib import Path
+
+from fastapi import APIRouter, FastAPI
+from fastapi.staticfiles import StaticFiles
+
+
+class _FreshStatic(StaticFiles):
+    """플러그인 정적 파일(캔버스 페이지·확장 JS)은 **캐시하지 않는다** (`Cache-Control: no-store`).
+
+    ★여기는 일반 브라우저 환경이 아니라 우리가 플러그인을 띄워 주는 환경이다 — 플러그인을 고치거나 업데이트했으면
+      앱을 새로고침하든 다시 켜든 **반드시 새 파일**이어야 한다 (사용자 지시 2026-09-08). WebView2 는 검증자 없는
+      정적 응답을 어림짐작으로 캐시해, 파일을 바꿔도 옛 페이지가 며칠씩 남았다 (실측: 카메라 페이지 색을 바꿔도 안 바뀜)."""
+
+    async def get_response(self, path, scope):
+        r = await super().get_response(path, scope)
+        r.headers["Cache-Control"] = "no-store"
+        return r
+
+ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
+
+
+@dataclass
+class Plugin:
+    id: str
+    dir: Path
+    #: 이름·설명은 **문자열 하나이거나 언어별 묶음**(`{"ko":…,"en":…}`)이다 — 고르는 것은 화면의 몫이다
+    #  (백엔드는 앱 설정의 언어를 모른다). `str | dict` 를 그대로 실어 보낸다.
+    name: str | dict = ""
+    version: str = ""
+    #: 캔버스 주소 (`/plug/<id>/web/`) — 비면 캔버스가 없다 (버튼만 두는 플러그인)
+    web: str = ""
+    #: 앱 페이지 안에서 돌 JS 주소들 (`/plug/<id>/ext/<파일>`)
+    ext: list[str] = field(default_factory=list)
+    contributes: dict = field(default_factory=dict)
+    #: 못 읽었으면 까닭. 비면 정상
+    error: str = ""
+    description: str | dict = ""
+    #: 꺼진 플러그인 — 폴더는 그대로 두고 **붙이지 않는다** (설정 `plugins_disabled`). 켜고 끄는 것은 다음에 켤 때 적용
+    enabled: bool = True
+    #: 어디서 왔나 (`_origin.json`: `{source: repo|zip, repo?, zip?, official?}`). 폴더에 직접 넣은 것은 None —
+    #  화면이 GitHub 링크·출처 표시·「공식」 딱지에 쓴다
+    origin: dict | None = None
+    #: 매니페스트의 `homepage` (선택) — 있으면 링크는 이것이 우선
+    homepage: str = ""
+    #: 캔버스 프레임 규격 (`canvas_spec`) — 처음 크기·최소 크기·맞춤 방식
+    canvas: dict = field(default_factory=lambda: canvas_spec({}))
+
+    def info(self) -> dict:
+        return {
+            "id": self.id, "name": self.name or self.id, "version": self.version,
+            "web": self.web, "ext": self.ext, "contributes": self.contributes,
+            "error": self.error, "dir": str(self.dir), "enabled": self.enabled,
+            "origin": self.origin, "homepage": self.homepage, "description": self.description,
+            "canvas": self.canvas,
+        }
+
+
+#: 캔버스 프레임 규격의 기본값 — 처음 창 크기와, 그 아래로는 못 줄이는 바닥.
+#  ★★프레임은 **진짜 브라우저 창**이다 (사용자 지시 2026-09-09·10). 페이지는 창 크기에 맞춰 다시 흐르고, 앱은 확대·축소 같은
+#    브라우저에 없는 손질을 하지 않는다. 한때 있던 `fit: "scale"`(CSS 변환 확대)은 글자 렌더가 깨져 걷었다.
+#  ★바닥은 **작게** 둔다 — 실제 브라우저 창도 아주 작게 줄여지고, 그때 어떻게 보일지는 페이지가 정한다. 제작자가
+#    `minWidth`·`minHeight` 를 적으면 그것을 따른다 (처음 크기가 곧 최소가 되지는 않는다).
+CANVAS_DEFAULT = {"width": 720, "height": 480}
+CANVAS_FLOOR = {"width": 320, "height": 200}
+
+
+def canvas_spec(m: dict) -> dict:
+    """`plugin.json` 의 `canvas` 를 정리한다 — `{width, height, minWidth, minHeight, resize}` (전부 선택).
+    `width`·`height` 는 **처음 꺼낼 때의 창 크기**, `minWidth`·`minHeight` 는 그 아래로 못 줄이는 크기다.
+    ★`resize: false` 면 **설계 크기 창**이다 — 크기 손잡이가 없고 언제나 `width`×`height` 로 뜬다 (사용자 결정 2026-09-10:
+      반응형 앱 창과 설계 크기 창을 둘 다 둔다). 그림판·게임판처럼 배치가 한 크기로 짜인 플러그인이 고른다."""
+    c = m.get("canvas") if isinstance(m.get("canvas"), dict) else {}
+
+    def num(k: str, default: float) -> int:
+        v = c.get(k)
+        return int(v) if isinstance(v, (int, float)) and v > 0 else int(default)
+
+    w, h = num("width", CANVAS_DEFAULT["width"]), num("height", CANVAS_DEFAULT["height"])
+    return {
+        "width": w, "height": h,
+        "minWidth": min(num("minWidth", CANVAS_FLOOR["width"]), w),
+        "minHeight": min(num("minHeight", CANVAS_FLOOR["height"]), h),
+        "resize": c.get("resize") is not False,
+    }
+
+
+def _read_manifest(d: Path) -> dict:
+    m = json.loads((d / "plugin.json").read_text(encoding="utf-8"))
+    if not isinstance(m, dict):
+        raise ValueError("plugin.json 은 객체여야 합니다")
+    pid = str(m.get("id") or "")
+    if pid != d.name:
+        raise ValueError(f"id 「{pid}」 가 폴더 이름 「{d.name}」 과 다릅니다")
+    if not ID_RE.match(pid):
+        raise ValueError(f"id 「{pid}」 — 소문자·숫자·-·_ 만 됩니다")
+    return m
+
+
+def _inside(d: Path, rel: str) -> Path:
+    """플러그인 폴더 **안**의 자리만 받는다 — 밖을 가리키면 오류"""
+    p = (d / rel).resolve()
+    if d.resolve() not in p.parents and p != d.resolve():
+        raise ValueError(f"「{rel}」 은 플러그인 폴더 밖입니다")
+    return p
+
+
+def _load_one(app: FastAPI, d: Path) -> Plugin:
+    p = Plugin(id=d.name, dir=d, origin=_installed_origin(d))
+    try:
+        m = _read_manifest(d)
+        p.name = m.get("name") or d.name
+        p.version = str(m.get("version") or "")
+        p.description = m.get("description") or ""
+        p.homepage = str(m.get("homepage") or "")
+        p.canvas = canvas_spec(m)
+        p.contributes = m.get("contributes") if isinstance(m.get("contributes"), dict) else {}
+
+        # ★★플러그인 폴더 자체는 `sys.path` 에 넣지 않는다 (실측 2026-09-07, 게스트 QA): 앞에 넣었더니 플러그인의
+        #   `server.py` 가 백엔드의 `server` 모듈을 가려, 리로드 워커가 `server:app` 을 그쪽에서 찾다 죽었다
+        #   (`Attribute "app" not found in module "server"`). 플러그인 안의 모듈은 **패키지 상대 import**
+        #   (`from . import x`) 로 쓴다 — 아래 `submodule_search_locations` 가 플러그인 폴더를 패키지 자리로 준다.
+        # ★`_lib`(설치 때 pip 으로 격리 설치한 의존성)은 **뒤에** 붙인다 — 앱이 이미 가진 패키지(fastapi 등)를
+        #   플러그인 것이 덮으면 백엔드 전체가 흔들린다. 앱에 없는 것만 거기서 온다.
+        lib = d / "_lib"
+        if lib.is_dir() and str(lib) not in sys.path:
+            sys.path.append(str(lib))
+
+        if m.get("server"):
+            src = _inside(d, str(m["server"]))
+            if not src.is_file():
+                raise ValueError(f"server 「{m['server']}」 가 없습니다")
+            name = "peropix_plugin_" + d.name.replace("-", "_")
+            spec = importlib.util.spec_from_file_location(name, src, submodule_search_locations=[str(d)])
+            if spec is None or spec.loader is None:
+                raise ValueError(f"「{src.name}」 을 모듈로 못 읽습니다")
+            mod = importlib.util.module_from_spec(spec)
+            sys.modules[name] = mod
+            spec.loader.exec_module(mod)
+            router = getattr(mod, "router", None)
+            if router is not None:
+                if not isinstance(router, APIRouter):
+                    raise ValueError("`router` 는 fastapi.APIRouter 여야 합니다")
+                app.include_router(router, prefix=f"/plug/{d.name}")
+
+        if m.get("web"):
+            web = _inside(d, str(m["web"]))
+            if not web.is_dir():
+                raise ValueError(f"web 「{m['web']}」 폴더가 없습니다")
+            app.mount(f"/plug/{d.name}/web", _FreshStatic(directory=str(web), html=True), name=f"plug-{d.name}-web")
+            p.web = f"/plug/{d.name}/web/"
+
+        ext = m.get("ext")
+        if ext:
+            files = [ext] if isinstance(ext, str) else list(ext)
+            dirs: dict[Path, None] = {}
+            for f in files:
+                fp = _inside(d, str(f))
+                if not fp.is_file():
+                    raise ValueError(f"ext 「{f}」 가 없습니다")
+                dirs[fp.parent] = None
+                p.ext.append(f"/plug/{d.name}/ext/{fp.name}")
+            if len(dirs) != 1:
+                raise ValueError("ext 파일은 한 폴더에 모여 있어야 합니다")
+            (ext_dir,) = dirs
+            app.mount(f"/plug/{d.name}/ext", _FreshStatic(directory=str(ext_dir)), name=f"plug-{d.name}-ext")
+    except Exception as e:  # noqa: BLE001 — 플러그인 하나가 백엔드를 못 죽인다
+        p.error = f"{type(e).__name__}: {e}"
+        print(f"[plugins] {d.name}: {p.error}", flush=True)
+        traceback.print_exc()
+    return p
+
+
+def _skipped(d: Path) -> Plugin:
+    """꺼진 플러그인 — 이름·판만 읽고 아무것도 붙이지 않는다. 목록에는 남아야 다시 켤 수 있다."""
+    p = Plugin(id=d.name, dir=d, enabled=False, origin=_installed_origin(d))
+    m = _manifest_of(d)
+    if m:
+        p.name, p.version = m.get("name") or d.name, str(m.get("version") or "")
+        p.description, p.homepage = m.get("description") or "", str(m.get("homepage") or "")
+        p.canvas = canvas_spec(m)
+    return p
+
+
+def mount_shared(app: FastAPI, shared: Path) -> None:
+    """플러그인이 함께 쓰는 자산을 `/plug/_app/` 에 붙인다 (`base.css`·`peropix.js`).
+    ★플러그인 페이지와 같은 오리진이라 `<link href="/plug/_app/base.css">` 한 줄로 쓴다."""
+    if not shared.is_dir():
+        print(f"[plugins] 공통 자산 폴더가 없습니다: {shared}", flush=True)
+        return
+    app.mount("/plug/_app", _FreshStatic(directory=str(shared)), name="plug-shared")
+
+
+def load_all(app: FastAPI, root: Path, disabled: set[str] | None = None) -> list[Plugin]:
+    """`root` 아래 폴더를 이름 차례로 읽어 붙인다. 폴더가 없으면 만든다 (사용자가 열어 넣는 자리다).
+    `disabled` 에 든 id 는 붙이지 않고 꺼진 것으로만 목록에 둔다."""
+    try:
+        root.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        return []
+    out: list[Plugin] = []
+    for d in sorted(root.iterdir()):
+        if d.is_dir() and d.name.startswith("_old-"):
+            # ★★갈아 끼울 때 못 지운 잔재를 여기서 치운다 (2026-09-12 실측: 색인 npy 를 mmap 으로 열고 있으면
+            #   그 파일만 지워지지 않아 폴더가 남는다). 업데이트 뒤에는 앱을 다시 켜야 하므로, 그때는 잠금이 풀려 있다.
+            shutil.rmtree(d, ignore_errors=True)
+            continue
+        if not d.is_dir() or d.name.startswith((".", "_")):
+            continue
+        if not (d / "plugin.json").is_file():
+            continue
+        out.append(_skipped(d) if disabled and d.name in disabled else _load_one(app, d))
+    if out:
+        ok = [p.id for p in out if not p.error]
+        bad = [p.id for p in out if p.error]
+        print(f"[plugins] loaded {ok}" + (f" · failed {bad}" if bad else ""), flush=True)
+    return out
+
+
+# ── 플러그인 파이썬이 앱에 닿는 창구 ──────────────────────────────────
+class _Host:
+    """`from plugins import host` — 플러그인 `server.py` 가 앱 액션을 시킬 때 쓴다.
+
+    ★★승인 카드를 지나지 않는다 (`outside=True`, 사용자 결정 2026-09-07: 플러그인은 앱의 규칙 밖에서
+      돌고 결과는 플러그인 몫이다). 앱 액션 목록은 `GET /api/agent/tools` 와 같다.
+    ★`server.py` 가 켜질 때 `tools`·`app_dir` 를 채운다 — 플러그인이 import 될 때는 이미 차 있다."""
+
+    tools = None
+    app_dir: Path | None = None
+
+    async def action(self, name: str, args: dict | None = None) -> dict:
+        if self.tools is None:
+            raise RuntimeError("앱이 아직 준비되지 않았습니다")
+        return await self.tools.call(name, args or {}, outside=True)
+
+
+host = _Host()
+
+
+# ── 관리: 목록·설치·삭제 (설계 문서 3단계) ──────────────────────────────
+#  ★★**플러그인은 앱에 담기지 않는다. 전부 받아서 깐다** (사용자 결정 2026-09-10: *"공식 플러그인이 기본으로 포함되면
+#    안됨. 모든 플러그인은 직접 다운로드로만 설치되어야함"*). 공식도 예외가 아니다 — 공식 플러그인이 늘 때마다 앱이
+#    그만큼 무거워지고, tag roll 처럼 모델을 지닌 것이 붙으면 수십 MB 씩 는다. 앱에 남는 것은 공통 자산(`plug-app/`)뿐이다.
+#  ★코드는 제작자 저장소에 있고, 목록 저장소 `peropix-plugins/index.json` 에 `{id, repo, tag}` 만 오른다
+#    (`remote_items`, ComfyUI 레지스트리와 같은 꼴, 사용자 결정 2026-09-08). zip 주소 직접 넣기도 된다.
+#  ★「공식」은 **목록이 말한다** (`official: true`). 목록 저장소가 우리 것이라 그 표식을 믿는다 — 남이 PR 로 넣는 것은
+#    그쪽 CI 가 막는다. 앱은 플러그인 코드를 안 갖고 있으니 「번들이면 공식」이던 옛 기준은 쓸 수 없다.
+#  ★설치·삭제는 **사용자가 누를 때만** 돈다. 자동 갱신은 없다 (`CLAUDE.md` 「상한은 ComfyUI」).
+#  ★★**플러그인 폴더는 그냥 지운다** (사용자 지시 2026-09-12: *"휴지통은 생성 이미지용이지 플러그인은 그냥 날려도 됨.
+#    플러그인은 우리 정규 시스템에 편입하지 말고 격리할 수록 좋음"*). 코드는 언제든 다시 받을 수 있고, 받아 둔 색인도
+#    다시 받으면 된다 — 앱의 안전망(휴지통·백업)에 플러그인을 끼워 넣지 않는다.
+#    갈아 끼우는 동안만 `_old-<id>-<시각>` 으로 물러났다가, 받아 둔 자료를 새 폴더로 옮긴 뒤 지운다.
+#    `_` 접두 폴더는 `load_all` 이 건너뛴다.
+
+def _sha(p: Path) -> str:
+    h = hashlib.sha256()
+    with open(p, "rb") as f:
+        for b in iter(lambda: f.read(1 << 20), b""):
+            h.update(b)
+    return h.hexdigest()
+
+
+def _tree(root: Path) -> dict[str, str]:
+    """폴더 안 모든 파일 → {상대경로: sha256}"""
+    return {p.relative_to(root).as_posix(): _sha(p) for p in root.rglob("*") if p.is_file()}
+
+
+def _installed_files(d: Path) -> dict[str, str]:
+    """우리가 깔아 준 파일 목록 — 없으면 빈 표 (목록이 없던 판에서 올라온 경우)"""
+    try:
+        return dict(json.loads((d / FILES_LIST).read_text(encoding="utf-8")).get("files") or {})
+    except Exception:
+        return {}
+
+
+def _sync_tree(target: Path, new: Path, known: dict[str, str]) -> dict:
+    """`target` 을 `new` 에 맞춘다 — 우리가 깔아 준 것(`known`)만 손댄다.
+
+    두 번 돌려도 결과가 같다 (실측 2026-09-12). 그래서 중간에 막혀도 다시 부르면 이어서 맞춘다."""
+    want = _tree(new)
+    wrote: list[str] = []
+    removed: list[str] = []
+    failed: list[dict] = []
+
+    for rel, h in sorted(want.items()):
+        dst = target / rel
+        if dst.is_file() and known.get(rel) == h and _sha(dst) == h:
+            continue                                  # 안 바뀐 것은 건드리지 않는다 (잠긴 파일을 건드릴 일도 준다)
+        try:
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(new / rel, dst)
+            wrote.append(rel)
+        except OSError as e:
+            failed.append({"path": rel, "why": f"{type(e).__name__}: {e}"})
+
+    for rel in sorted(known):
+        if rel in want or rel in (FILES_LIST, ORIGIN_FILE):
+            continue
+        dst = target / rel
+        if not dst.exists():
+            continue
+        try:
+            dst.unlink()
+            removed.append(rel)
+        except OSError as e:
+            failed.append({"path": rel, "why": f"{type(e).__name__}: {e}"})
+
+    # 비어 버린 폴더는 치운다 (깊은 것부터)
+    for p in sorted((q for q in target.rglob("*") if q.is_dir()), key=lambda q: -len(q.parts)):
+        if p.name in ("_lib",):
+            continue
+        try:
+            next(p.iterdir())
+        except StopIteration:
+            try:
+                p.rmdir()
+            except OSError:
+                pass
+
+    # 목록은 **지금 자리에 있는 실제 해시**로 적는다 — 일부가 막혀도 다음 시도가 정확해진다
+    now = {rel: _sha(target / rel) for rel in sorted(set(want) | set(known)) if (target / rel).is_file()}
+    (target / FILES_LIST).write_text(json.dumps({"files": now}, ensure_ascii=False), encoding="utf-8")
+    return {"wrote": wrote, "removed": removed, "failed": failed}
+
+
+def _manifest_of(d: Path) -> dict | None:
+    try:
+        m = json.loads((d / "plugin.json").read_text(encoding="utf-8"))
+        return m if isinstance(m, dict) and m.get("id") else None
+    except Exception:
+        return None
+
+
+#: 버전별 한 줄의 길이 상한 — 한 언어당. 목록 화면 한 줄에 담기는 만큼이다 (릴리즈 노트를 옮겨 적는 자리가 아니다)
+NOTE_MAX = 120
+#: 한 플러그인이 담을 수 있는 판 수 — 목록 파일이 끝없이 불어나지 않게
+CHANGES_MAX = 30
+
+
+def _changes(v) -> list[dict]:
+    """목록이 적어 준 버전별 한 줄 — `[{tag, date?, note}]`.
+
+    ★★**제작자가 PR 로 함께 적는다** (사용자 결정 2026-09-13). 판을 올릴 때 `tag` 를 바꾸는 김에 줄 하나를
+      더하는 것이라 부담이 적고, 앱은 이미 받아 온 목록에서 읽으므로 GitHub 을 다시 부르지 않는다.
+    ★`note` 는 문자열 하나이거나 **언어별 묶음**이다 (`name`·`description` 과 같다). 안 적은 언어는
+      화면이 적힌 다른 언어로 보여 준다 (`pickText`).
+    ★긴 것은 자른다 — 막는 대신 담기는 만큼만 쓴다. 형식 오류로 목록이 통째로 안 읽히면 더 나쁘다."""
+    out: list[dict] = []
+    for x in (v if isinstance(v, list) else [])[:CHANGES_MAX]:
+        if not isinstance(x, dict):
+            continue
+        tag = str(x.get("tag") or "")
+        if not tag or not TAG_RE.match(tag):
+            continue
+        note = x.get("note") or ""
+        if isinstance(note, dict):
+            note = {str(k): str(val)[:NOTE_MAX] for k, val in note.items() if val}
+        else:
+            note = str(note)[:NOTE_MAX]
+        out.append({"tag": tag, "date": str(x.get("date") or "")[:10], "note": note})
+    return out
+
+
+def _entry(m: dict, pid: str, source: str, **extra) -> dict:
+    return {
+        "id": pid, "name": m.get("name") or pid, "version": str(m.get("version") or ""),
+        "description": m.get("description") or "", "homepage": str(m.get("homepage") or ""), "source": source,
+        "changes": _changes(m.get("changes")), **extra,
+    }
+
+
+REPO_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
+TAG_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
+
+
+def remote_items(data) -> list[dict]:
+    """목록 파일의 항목을 받을 수 있는 꼴로. 항목은 둘 중 하나다:
+    - `{id, repo: "owner/name", tag}` — 제작자 저장소의 태그 (ComfyUI 처럼 코드는 제작자 것, 목록은 주소만.
+      사용자 결정 2026-09-08). zip 은 GitHub 의 태그 압축 주소로 만든다 — 폴더 한 겹은 `install` 이 벗긴다.
+    - `{id, zip, sha256?}` — 아무 zip 주소.
+    `version` 을 안 적으면 태그에서 앞의 `v` 를 뗀 것이다. 둘 다 없는 항목은 버린다.
+    ★`official: true` 는 **목록 저장소만 붙일 수 있는 표식**이다 (사용자 결정 2026-09-10). 남이 보내는 PR 에는
+      그 칸이 못 들어가게 목록 저장소의 CI 가 막고, 우리가 main 에 직접 올릴 때만 붙는다."""
+    items = data.get("items") if isinstance(data, dict) else data
+    out: list[dict] = []
+    for it in items or []:
+        if not (isinstance(it, dict) and it.get("id") and ID_RE.match(str(it["id"]))):
+            continue
+        pid = str(it["id"])
+        repo, tag = str(it.get("repo") or ""), str(it.get("tag") or "")
+        if repo and tag and REPO_RE.match(repo) and TAG_RE.match(tag):
+            it = {**it, "version": it.get("version") or re.sub(r"^v", "", tag)}
+            out.append(_entry(it, pid, "repo", zip=f"https://github.com/{repo}/archive/refs/tags/{tag}.zip",
+                              sha256=str(it.get("sha256") or ""), repo=repo, tag=tag, official=it.get("official") is True))
+        elif it.get("zip"):
+            out.append(_entry(it, pid, "zip", zip=str(it["zip"]), sha256=str(it.get("sha256") or ""),
+                              official=it.get("official") is True))
+    return out
+
+
+async def remote_list(url: str) -> list[dict]:
+    """원격 목록 — `{"items": [...]}` (`remote_items` 참고)."""
+    if not url:
+        return []
+    import httpx
+
+    import time
+
+    # ★캐시를 비껴간다 — raw.githubusercontent.com 은 몇 분 동안 옛 파일을 주는데(실측 2026-09-08, 게스트가 push 직후의
+    #   목록을 못 봤다), 쿼리가 다르면 새로 받는다. 다른 서버는 모르는 쿼리를 무시한다.
+    async with httpx.AsyncClient(timeout=10.0, follow_redirects=True) as c:
+        r = await c.get(url, params={"_": int(time.time())})
+        r.raise_for_status()
+        data = r.json()
+    return remote_items(data)
+
+
+def installed_versions(root: Path) -> dict[str, str]:
+    out: dict[str, str] = {}
+    if root.is_dir():
+        for d in root.iterdir():
+            if d.is_dir() and not d.name.startswith((".", "_")):
+                m = _manifest_of(d)
+                if m:
+                    out[d.name] = str(m.get("version") or "")
+    return out
+
+
+def _vt(v: str) -> tuple[int, ...]:
+    return tuple(int(x) for x in re.findall(r"\d+", v or "")) or (0,)
+
+
+# ── 출처 — 「같은 플러그인」의 기준은 id 가 아니라 id + 출처다 (사용자 지적 2026-09-08) ──
+#  id 만 같으면 새 판으로 보던 규칙은, 폴더에 직접 넣은 것·다른 저장소의 것과 id 가 겹치면 그것을 「업데이트」로
+#  덮어쓰게 했다. 그래서 설치할 때 출처를 `_origin.json` 에 남기고, 업데이트는 **출처가 같을 때만** 제안한다.
+#  폴더에 직접 넣은 것은 출처가 없으니 업데이트 제안이 없다. 목록 안의 id 중복은 목록 저장소의 CI 가 거른다.
+#  ★`_origin.json` 에는 대조용 열쇠(`source`·`repo`·`zip`) 말고 `official` 표식도 함께 적는다 — 인터넷이 없어도
+#    「공식」 딱지가 남게. 대조는 `_origin_key()` 로 열쇠 부분만 본다.
+ORIGIN_FILE = "_origin.json"
+#: ★★**우리가 깔아 준 파일 목록** — 업데이트는 이 목록만 기준으로 돈다 (사용자 결정 2026-09-12).
+#  `{"files": {상대경로: sha256}}` 꼴이다. 새 판과 견주어 **바뀐 것만 덮고**, 옛 목록에 있었는데 새 판에
+#  없는 것은 지운다. **목록에 없는 파일은 건드리지 않는다** — 플러그인이 받아 둔 색인·모델·캐시가 그것이다.
+#  ★그래서 「받아 둘 것은 여기 두라」는 폴더 규격이 필요 없다. 이름이 무엇이든 우리가 안 깔았으면 안 건드린다
+#    (옛 `_data` 규격을 이것으로 갈음했다. ComfyUI 가 `.gitignore` 로 하는 일과 같은 자리다).
+#  ★`_lib`(pip 이 깐 의존성)만 예외다 — 그건 우리가 깐 것이라 우리가 갈아 끼운다 (`requirements.txt` 가 바뀔 때만).
+FILES_LIST = "_files.json"
+
+
+def _origin_of(entry: dict) -> dict:
+    """목록 항목의 출처 — 이것이 같아야 같은 플러그인이다"""
+    if entry["source"] == "repo":
+        return {"source": "repo", "repo": entry["repo"]}
+    return {"source": "zip", "zip": entry["zip"]}
+
+
+def _origin_key(o: dict | None) -> dict | None:
+    """대조에 쓰는 부분만 — `official` 같은 곁 표식은 뺀다"""
+    return None if o is None else {k: v for k, v in o.items() if k in ("source", "repo", "zip")}
+
+
+def _installed_origin(d: Path) -> dict | None:
+    try:
+        o = json.loads((d / ORIGIN_FILE).read_text(encoding="utf-8"))
+        return o if isinstance(o, dict) and o.get("source") else None
+    except Exception:
+        return None
+
+
+async def _catalog(url: str) -> tuple[list[dict], str]:
+    """받을 수 있는 것 — 목록 하나뿐이다 (앱은 플러그인 코드를 갖고 있지 않다). 같은 id 가 두 번 오면 앞의 것만 쓴다."""
+    remote_error = ""
+    try:
+        remote = await remote_list(url)
+    except Exception as e:  # noqa: BLE001 — 못 받아도 앱은 뜬다. 화면이 `remoteError` 를 보여 준다
+        remote, remote_error = [], f"{type(e).__name__}: {e}"
+    kept: list[dict] = []
+    seen: set[str] = set()
+    for it in remote:
+        if it["id"] in seen:
+            print(f"[plugins] 목록에 「{it['id']}」 가 두 번 있어 뒤의 것은 무시합니다", flush=True)
+        else:
+            seen.add(it["id"])
+            kept.append(it)
+    return kept, remote_error
+
+
+async def registry(root: Path, url: str) -> dict:
+    """받을 수 있는 것 전부 (목록). `installed` 는 지금 깔린 판, `update` 는 같은 출처의 더 높은 판이 있는가."""
+    items, remote_error = await _catalog(url)
+    have = installed_versions(root)
+    for it in items:
+        it["installed"] = have.get(it["id"])
+        origin = _origin_key(_installed_origin(root / it["id"])) if it["installed"] else None
+        #: 깔린 것보다 높은 판이 **같은 출처**에 있다 — 화면은 「설치된 플러그인」 줄의 업데이트 단추로 보여 준다
+        it["update"] = bool(it["installed"]) and origin == _origin_of(it) and _vt(it["version"]) > _vt(it["installed"] or "")
+    return {"items": sorted(items, key=lambda x: x["id"]), "remoteError": remote_error}
+
+
+async def install(root: Path, python: str, *, id: str = "", zip: str = "",
+                  sha256: str = "", url: str = "") -> dict:
+    """zip 을 받아 `plugins/<id>/` 에 놓고, `requirements.txt` 가 있으면 `_lib/` 에 pip 으로 넣는다.
+    붙는 것은 다음에 켤 때다 (라우터는 켤 때 mount 한다)."""
+    import asyncio
+    import shutil
+    import subprocess
+    import time
+    import zipfile
+
+    root.mkdir(parents=True, exist_ok=True)
+    zip_url, want = zip, sha256
+    origin: dict = {"source": "zip", "zip": zip_url}
+    if id and not zip_url:
+        # ★`registry` 와 같은 목록(`_catalog`)에서 고른다
+        items, remote_error = await _catalog(url)
+        hit = next((r for r in items if r["id"] == id), None)
+        if hit is None:
+            return {"ok": False, "error": f"원격 목록을 못 받았습니다: {remote_error}" if remote_error else f"「{id}」 를 목록에서 못 찾았습니다"}
+        origin = _origin_of(hit)
+        if hit.get("official"):
+            origin = {**origin, "official": True}   # 인터넷이 없어도 딱지가 남게 (대조는 `_origin_key`)
+        zip_url, want = hit["zip"], hit.get("sha256", "")
+        # ★출처가 다른 같은 id 가 이미 깔려 있으면 덮지 않는다 — 폴더에 직접 넣은 것·다른 저장소의 것은 별개 플러그인이다
+        have = _origin_key(_installed_origin(root / id)) if (root / id).is_dir() and _manifest_of(root / id) else None
+        if (root / id).is_dir() and _manifest_of(root / id) and have != _origin_key(origin):
+            return {"ok": False, "error": f"「{id}」 는 다른 출처로 이미 설치되어 있습니다 ({(have or {}).get('source') or '폴더에 직접 넣음'}). 지우고 다시 설치하십시오"}
+    if not zip_url:
+        return {"ok": False, "error": "무엇을 설치할지 없습니다 (id 또는 zip 주소)"}
+
+    stage = root / f"_stage-{int(time.time() * 1000)}"
+    shutil.rmtree(stage, ignore_errors=True)
+    stage.mkdir(parents=True)
+    try:
+        import httpx
+
+        zpath = stage / "plugin.zip"
+        async with httpx.AsyncClient(timeout=None, follow_redirects=True) as c:
+            r = await c.get(zip_url)
+            r.raise_for_status()
+            zpath.write_bytes(r.content)
+        if want and hashlib.sha256(zpath.read_bytes()).hexdigest().lower() != want.lower():
+            return {"ok": False, "error": "받은 파일의 sha256 이 목록과 다릅니다"}
+        un = stage / "unzip"
+        un.mkdir()
+        with zipfile.ZipFile(zpath) as z:
+            # ★zip 밖으로 나가는 경로를 막는다 (`..`·절대경로) — 남이 만든 zip 이다
+            for name in z.namelist():
+                p = (un / name).resolve()
+                if un.resolve() not in p.parents and p != un.resolve():
+                    return {"ok": False, "error": f"수상한 경로가 들어 있습니다: {name}"}
+            z.extractall(un)
+        kids = list(un.iterdir())
+        # ★GitHub 태그 압축본은 바깥에 폴더 한 겹이 있다 — 벗긴다
+        new = kids[0] if len(kids) == 1 and kids[0].is_dir() and (kids[0] / "plugin.json").is_file() else un
+        m = _manifest_of(new)
+        if not m:
+            return {"ok": False, "error": "plugin.json 이 없거나 id 가 없습니다"}
+        pid = str(m["id"])
+        if not ID_RE.match(pid):
+            return {"ok": False, "error": f"id 「{pid}」 — 소문자·숫자·-·_ 만 됩니다"}
+        if id and pid != id:
+            return {"ok": False, "error": f"꾸러미의 id 「{pid}」 가 「{id}」 와 다릅니다"}
+        target = root / pid
+        # ★★**폴더를 갈아 끼우지 않고 파일만 맞춘다** (사용자 결정 2026-09-12). 전에는 옛 폴더를 통째로 밀어내고
+        #   새 것을 놓았는데, 그러면 플러그인이 받아 둔 색인까지 딸려 나가 되옮겨야 했고 — 그 색인은 mmap 으로
+        #   열려 있어 옮기다 걸렸다. 이제 **우리가 깔아 준 파일만** 손대므로 받아 둔 것은 제자리에 그대로 있다.
+        known = _installed_files(target) if target.exists() else {}
+        prev_req = known.get("requirements.txt")
+        if not target.exists():
+            shutil.move(str(new), str(target))
+            (target / FILES_LIST).write_text(json.dumps({"files": _tree(target)}, ensure_ascii=False), encoding="utf-8")
+        else:
+            r0 = _sync_tree(target, new, known)
+            if r0["failed"]:
+                # ★두 번 돌려도 같은 결과라(실측) 다시 부르면 이어서 맞춘다 — 그래서 「다시 켜고 한 번 더」가 답이 된다
+                return {"ok": False, "id": pid, "error": "일부 파일을 바꾸지 못했습니다 (앱을 다시 켜고 한 번 더 해 보세요)",
+                        "files": r0["failed"][:20]}
+            print(f"[plugins] {pid}: 바꾼 파일 {len(r0['wrote'])} · 지운 파일 {len(r0['removed'])}", flush=True)
+        # ★출처를 남긴다 — 업데이트는 같은 출처에서만 온다 (`registry` 의 `update`)
+        (target / ORIGIN_FILE).write_text(json.dumps(origin, ensure_ascii=False, indent=2), encoding="utf-8")
+
+        pip_log = ""
+        req = target / "requirements.txt"
+        lib = target / "_lib"
+        # ★★`_lib` 는 **바뀔 때만** 갈아 끼운다. 쓰는 중인 확장 모듈(.pyd)은 덮지도 지우지도 못하지만
+        #   **폴더 이름 바꾸기는 된다** (2026-09-12 실측) — 그래서 옆으로 밀고 새로 깐다. 민 것은 다음에 앱을
+        #   켤 때 `load_all` 이 치운다.
+        if req.is_file() and (prev_req != _sha(req) or not lib.is_dir()):
+            if lib.is_dir():
+                try:
+                    lib.rename(root / f"_old-{pid}-lib-{time.strftime('%Y%m%d-%H%M%S')}")
+                except OSError as e:
+                    print(f"[plugins] {pid}: _lib 를 밀지 못해 그 자리에 덮습니다 ({e})", flush=True)
+            # ★★pip 은 **스레드에서** 띄운다 (`to_thread` + `subprocess.run`). 예전에는 `create_subprocess_exec` 였는데,
+            #   uvicorn 은 윈도우에서 **리로드가 켜지면** SelectorEventLoop 를 쓰고(`uvicorn/loops/asyncio.py` 의
+            #   `use_subprocess`) 그 루프에는 자식 프로세스 지원이 없어 `NotImplementedError` 로 떨어졌다 —
+            #   개발·QA 백엔드에서 의존성 있는 플러그인이 설치되지 않았다 (실측 2026-09-10, tag-roll 이 첫 사례).
+            #   배포판은 리로드가 없어 ProactorEventLoop 이라 옛 방식도 돌았지만, 루프 종류에 기대지 않는 것이 맞다.
+            r = await asyncio.to_thread(
+                subprocess.run,
+                [python, "-m", "pip", "install", "--no-warn-script-location", "--disable-pip-version-check",
+                 "--target", str(target / "_lib"), "-r", str(req)],
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+            pip_log = (r.stdout or b"").decode("utf-8", "replace")[-2000:]
+            if r.returncode != 0:
+                return {"ok": False, "error": "의존성 설치에 실패했습니다 (플러그인 파일은 놓아 두었습니다)",
+                        "pip": pip_log, "id": pid}
+        return {"ok": True, "id": pid, "version": str(m.get("version") or ""), "restart": True, "pip": pip_log}
+    except Exception as e:  # noqa: BLE001 — 못 받음·못 풂·못 옮김 전부 **답**으로 돌려준다 (창구가 500 을 내지 않게)
+        return {"ok": False, "error": f"{type(e).__name__}: {e}"}
+    finally:
+        shutil.rmtree(stage, ignore_errors=True)
+
+
+def remove(root: Path, pid: str) -> dict:
+    """플러그인 폴더를 **통째로** 지운다 — 받아 둔 색인도 함께다 (사용자 결정 2026-09-12: 남는 것 없게).
+    이미 붙은 라우터는 다음에 켤 때 사라진다."""
+    import time
+
+    if not ID_RE.match(pid):
+        return {"ok": False, "error": f"id 「{pid}」 가 이상합니다"}
+    target = root / pid
+    if not target.is_dir():
+        return {"ok": False, "error": f"「{pid}」 가 없습니다"}
+    try:
+        shutil.rmtree(target)
+    except OSError as first:
+        # ★★쓰는 중인 파일이 있으면 지워지지 않는다 (색인은 mmap 으로, 의존성은 .pyd 로 열려 있다).
+        #   그래도 **폴더 이름 바꾸기는 된다** (2026-09-12 실측) — 옆으로 밀어 두면 다음에 앱을 켤 때
+        #   `load_all` 이 치운다. 사용자에게는 지운 것으로 보이고, 실제로도 남지 않는다.
+        try:
+            target.rename(root / f"_old-{pid}-{time.strftime('%Y%m%d-%H%M%S')}")
+        except OSError as e:
+            # ★★예외를 던지면 안 된다 (실측 2026-09-08): 던진 500 은 CORS 머리가 없어 화면에 「Failed to fetch」 로만
+            #   보였다. 폴더가 탐색기 등에 열려 있으면 이름 바꾸기도 거부된다 — 까닭을 답으로 돌려준다.
+            return {"ok": False, "error": "폴더가 다른 프로그램(탐색기 등)에 열려 있어 지우지 못했습니다. 닫고 다시 시도하세요.",
+                    "detail": f"{first} / {e}"}
+    return {"ok": True, "id": pid, "restart": True}

@@ -1,11 +1,10 @@
 import { useI18n } from "../i18n";
-import { useState } from "react";
+import { useLayoutEffect, useRef, useState } from "react";
 import { compileBlocks, makeBlock } from "../lib/blocks";
 import { usePrompt } from "../store/prompt";
 import { canEnableChar } from "../store/gen";
 import { StyleSection, CharSection, JoinZone, type SectionProps } from "./PromptSections";
 import { BlockLibButton } from "../blocks/BlockDrawer";
-import { TagSearchButton } from "../blocks/TagDrawer";
 import { WildcardButton } from "./WildcardModal";
 import { TranslateButton } from "./TranslateButton";
 import { OptionsPanel } from "./OptionsPanel";
@@ -13,6 +12,15 @@ import { Category } from "./Category";
 import { CharPositionToggle, CharStackedWarning } from "./CharPositioner";
 import { useDrag } from "../cards/dragStore";
 import { QueueLanes } from "./QueueLanes";
+import { Icon } from "../components/Icon";
+
+/** ★★스크롤 자리는 **모듈이 들고 있는다** (사용자 지적 2026-09-28: 모드를 옮겼다 오면
+ *  좌측 패널이 맨 위로 돌아가 있다). 다른 모드로 가면 이 패널이 통째로 언마운트되므로
+ *  (`Shell` 은 모드마다 좌측 내용을 갈아 끼우고, 검열·보조 도구에서는 패널을 빼 버린다)
+ *  컴포넌트 안에 두면 돌아올 때 0 에서 다시 시작한다.
+ *  ★되돌리기는 곧바로 한 번, 그린 뒤 두 번 더 한다 — 내용이 한 박자 늦게 자라면 첫 번에는
+ *    그 높이까지 못 내려간다 (`lib/keepScroll` 과 같은 이유). */
+let keptTop = 0;
 
 /** 좌측 패널 — 카드형 섹션 안에 블록 시퀀스.
  *  스타일 섹션(= NAI 의 공통 prompt/uc) 하나 + 캐릭터 섹션 여럿(= characterPrompts[]). */
@@ -20,17 +28,42 @@ export function PromptPanel({ onThumb }: SectionProps) {
   const { base, baseUc, chars, addChar } = usePrompt();
   /** ★★끌고 있는 동안 **그 묶음 전체**가 어둠 위로 올라온다 (사용자 지적 2026-08-20).
    *  카드마다 올리면 카드 사이 여백이 어두운 채라 「영역」으로 안 읽힌다.
-   *  ★그림 끌기(`image`)는 두 묶음 다 받는다 — 카드 배너에 꽂는 그림이라 어느 쪽이든 될 수 있다. */
+   *  ★그림 끌기(`image`)는 두 묶음 다 받는다 — 카드 배너에 꽂는 그림이라 어느 쪽이든 될 수 있다.
+   *    미저장 그림(`imageInput`)은 카드 그림이 못 되므로 안 올린다 (이미지 입력 묶음만 받는다) */
   const dragKind = useDrag((s) => (s.drag?.dir === "apply" ? s.drag.kind : null));
-  const dragImg = useDrag((s) => s.drag?.dir === "image");
+  const dragImg = useDrag((s) => s.drag?.kind === "image");
   const t = useI18n((s) => s.t);
   const [preview, setPreview] = useState(false);
+  const scroller = useRef<HTMLDivElement>(null);
+  useLayoutEffect(() => {
+    const el = scroller.current;
+    if (!el || !keptTop) return;
+    const top = keptTop;
+    const put = () => {
+      if (el.scrollTop !== top) el.scrollTop = top;
+    };
+    put();
+    let r2 = 0;
+    const r1 = requestAnimationFrame(() => {
+      put();
+      r2 = requestAnimationFrame(put);
+    });
+    return () => {
+      cancelAnimationFrame(r1);
+      cancelAnimationFrame(r2);
+    };
+  }, []);
 
   return (
     // ★`height: 100%` 가 아니라 `flex: 1` 이다 — 아래에 생성 푸터가 형제로 붙으므로,
     //   100% 를 잡으면 푸터가 화면 밖으로 밀려난다 (실측 2026-08-04)
     <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}>
-      <div style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: "var(--sp-4) var(--sp-4) 0" }}>
+      <div
+        ref={scroller}
+        data-prompt-scroll
+        onScroll={(e) => (keptTop = e.currentTarget.scrollTop)}
+        style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: "var(--sp-4) var(--sp-4) 0" }}
+      >
         {/* ★그릇 이름은 **payload 의 어느 칸인가**, 카드 이름은 **무엇을 저장하는가**
             (사용자 지시 2026-08-11). 그래서 베이스만 쓰는 사람은 카드를 안 꽂고 그 칸에 바로
             적으면 되고, 스타일을 저장해 두는 사람은 「스타일 카드」로 알아본다.
@@ -50,7 +83,6 @@ export function PromptPanel({ onThumb }: SectionProps) {
               <TranslateButton />
               <WildcardButton />
               <BlockLibButton />
-              <TagSearchButton />
             </span>
           }
         >
@@ -63,40 +95,45 @@ export function PromptPanel({ onThumb }: SectionProps) {
           flashKey="prompt"
           spot={dragKind === "characters" || dragImg}
           /* ★좌표 2택은 **여기** 선다 (사용자 지시 2026-08-21) — 공홈도 캐릭터 프롬프트
-             패널에 둔다 (`dg()`). 판 자체는 큰 그림 위에 겹친다 (`Canvas` 의 `ScenePreview`). */
+             패널에 둔다 (`dg()`). 판 자체는 큰 그림 위에 겹친다 (`Canvas` 의 `ScenePreview`).
+             ★★여기에 **더 얹지 않는다** (사용자 지적 2026-09-15: *"캐릭터 프롬프트 텍스트
+               표시될 자리가 너무 좁은데"*). 좌표 2택만으로 162px 를 쓰는데 이름 줄 안쪽이
+               341px 라(실측), 순차 생성 단추 62px 를 더하니 이름에 남는 자리가 85px 가 되어
+               「캐릭터 프롬프트」 94px 가 두 줄로 갈렸다. 순차 생성은 아래 `SeqCharsFrame` 이 맡는다. */
           right={<CharPositionToggle />}
         >
-          <CharStackedWarning />
-          {/* ★★인물의 **차례**가 곧 `characterPrompts[]`·`char_captions[]` 의 차례이고
-              NAI 가 `use_order: true` 로 그 차례를 쓴다 (`backend/nai.py`) — 그림에 남는 값이다.
-              바꾸는 것은 배너의 **위아래 단추**다 (`CharSection`). */}
-          {chars.map((ch, i) => (
-            <CharSection key={ch.id} ch={ch} index={i} last={i === chars.length - 1} onThumb={onThumb} />
-          ))}
+          <SeqCharsFrame>
+            <CharStackedWarning />
+            {/* ★★인물의 **차례**가 곧 `characterPrompts[]`·`char_captions[]` 의 차례이고
+                NAI 가 `use_order: true` 로 그 차례를 쓴다 (`backend/nai.py`) — 그림에 남는 값이다.
+                바꾸는 것은 배너의 **위아래 단추**다 (`CharSection`). */}
+            {chars.map((ch, i) => (
+              <CharSection key={ch.id} ch={ch} index={i} last={i === chars.length - 1} onThumb={onThumb} />
+            ))}
 
-          <JoinZone />
+            <JoinZone />
 
-          <button
-            /* ★자리가 없으면 **꺼진 채로** 만든다 — 칸을 만드는 것은 막지 않고,
-               나가는 수만 모델 상한에 맞춘다 (`store/gen.ts` 의 `canEnableChar`) */
-            /* ★★**빈 블록 하나를 깔아 준다** (사용자 지시 2026-09-04). 예전에는 칸만 서고
-               블록이 0개라, 인물을 더한 사람이 「블록 추가」를 한 번 더 눌러야 적을 수 있었다.
-               ★블록 추가 단추가 만드는 것과 **같은 모양**이다 (`BlockList` 의 `data-block-add`) —
-                 이름도 「새 블록」이고 펼친 채로 선다. 둘이 다르면 어느 쪽이 진짜인지 헷갈린다. */
-            onClick={() => addChar({ on: canEnableChar(), prompt: [makeBlock(t("block.newBlock"), [], { open: true })] })}
-            style={{
-              width: "100%",
-              marginBottom: "var(--sp-5)",
-              padding: "var(--sp-3)",
-              border: "1px dashed var(--line)",
-              borderRadius: "var(--r-3)",
-              fontSize: "var(--text-2xs)",
-              color: "var(--ink-faint)",
-              background: "transparent",
-            }}
-          >
-            {t("cards.addChar")}
-          </button>
+            <button
+              /* ★자리가 없으면 **꺼진 채로** 만든다 — 칸을 만드는 것은 막지 않고,
+                 나가는 수만 모델 상한에 맞춘다 (`store/gen.ts` 의 `canEnableChar`) */
+              /* ★★**빈 블록 하나를 깔아 준다** (사용자 지시 2026-09-04). 예전에는 칸만 서고
+                 블록이 0개라, 인물을 더한 사람이 「블록 추가」를 한 번 더 눌러야 적을 수 있었다.
+                 ★블록 추가 단추가 만드는 것과 **같은 모양**이다 (`BlockList` 의 `data-block-add`) —
+                   이름도 「새 블록」이고 펼친 채로 선다. 둘이 다르면 어느 쪽이 진짜인지 헷갈린다. */
+              onClick={() => addChar({ on: canEnableChar(), prompt: [makeBlock(t("block.newBlock"), [], { open: true })] })}
+              style={{
+                width: "100%",
+                padding: "var(--sp-3)",
+                border: "1px dashed var(--line)",
+                borderRadius: "var(--r-3)",
+                fontSize: "var(--text-2xs)",
+                color: "var(--ink-faint)",
+                background: "transparent",
+              }}
+            >
+              {t("cards.addChar")}
+            </button>
+          </SeqCharsFrame>
         </Category>
 
         {/* ★생성 옵션이 **프롬프트 바로 아래**에 산다 (사용자 지시 2026-08-16).
@@ -172,6 +209,83 @@ function Pre({ label, text, accent }: { label: string; text: string; accent?: st
       >
         {text || t("prompt.empty")}
       </pre>
+    </div>
+  );
+}
+
+/** ★★**순차 생성 모드** (사용자 결정 2026-09-15: *"순차생성 모드를 켜면 … 첫 캐릭터부터
+ *  순차적으로 생성"*). 켜면 켜 둔 인물을 한 장에 모으지 않고 **한 명씩** 차례로 뽑는다 —
+ *  규칙은 「슬롯을 하나씩만 켠 것처럼」 하나이고, 펴는 자리는 `store/gen` 의 `parties` 다.
+ *  ★★값은 **탭의 것**이다 (사용자 지시: 탭 안에서 프롬프트를 공유한다) — 프롬프트와 함께
+ *    `TabPrompt` 로 오간다 (`usePrompt.seqChars`).
+ *
+ *  ★★**켜는 자리가 곧 감싸는 자리다** (사용자 지시 2026-09-15: *"순차생성을 켜면 일반적인
+ *    상태가 아니니까 캐릭터 프롬프트 전체를 감싸서 표시해줘"*). 켜면 이 띠가 테두리의 머리가
+ *    되어 인물 카드와 「캐릭터 추가」까지 한 덩어리로 두른다 — 평소와 다른 상태라는 것이
+ *    카드 하나가 아니라 **묶음 전체**에 걸리기 때문이다.
+ *  ★감싸기는 **강조색 테두리 + 옅은 강조색 배경**이다 (사용자 선택) — 갤러리에서 고른 그림을
+ *    표시하는 방식과 같다. 앱 안에서 「고른 것·켠 것」의 표현을 하나로 둔다.
+ *  ★★꺼진 상태는 **빈 네모**다 (사용자 지적 2026-09-15: *"x를 넣으니까 닫는 버튼같음"*).
+ *    프롬프트 옵션 띠의 칩은 꺼지면 `✕` 를 넣지만(`PromptOpts` 의 `Toggle`), 그쪽은 글 칸 옆에
+ *    여러 칩이 늘어서는 자리라 사정이 다르다. 여기는 **한 줄에 하나뿐인 네모**라 `✕` 가
+ *    「이 줄을 닫는 단추」로 읽힌다. 켬은 체크, 끔은 빈 칸 — 체크박스와 같다. */
+function SeqCharsFrame({ children }: { children: React.ReactNode }) {
+  const t = useI18n((s) => s.t);
+  const on = usePrompt((s) => s.seqChars);
+  const setSeqChars = usePrompt((s) => s.setSeqChars);
+  return (
+    <div
+      data-seq-frame={on ? "on" : "off"}
+      style={{
+        /* ★「캐릭터 추가」 아래 여백을 **여기로 올렸다** — 켜면 그 단추가 테두리 안에 들어가서,
+           단추에 붙어 있던 여백이 테두리 안쪽에 갇혀 버린다 */
+        marginBottom: "var(--sp-5)",
+        borderRadius: "var(--r-3)",
+        ...(on
+          ? {
+              border: "1px solid var(--accent)",
+              background: "color-mix(in srgb, var(--accent) 10%, transparent)",
+            }
+          : null),
+      }}
+    >
+      <button
+        data-seq-chars={on ? "on" : "off"}
+        onClick={() => setSeqChars(!on)}
+        data-tip={t("prompt.seqCharsTip")}
+        style={{
+          width: "100%",
+          display: "flex",
+          alignItems: "center",
+          gap: "var(--sp-2)",
+          padding: on ? "var(--sp-2) var(--sp-3)" : "0 var(--sp-1) var(--sp-2)",
+          borderBottom: on ? "1px solid var(--accent-line)" : undefined,
+          fontSize: "var(--text-2xs)",
+          fontWeight: on ? "var(--w-semi)" : "var(--w-normal)",
+          color: on ? "var(--accent-ink)" : "var(--ink-faint)",
+          background: "transparent",
+        }}
+      >
+        {/* ★★체크 칸은 **이름 왼쪽**이다 (사용자 지적 2026-09-15: *"순차생성이랑 텍스트랑
+            버튼이 너무 먼데"*). 줄 양끝으로 갈라 두니 둘이 한 짝으로 안 읽혔다 — 체크박스처럼
+            붙여 둔다. 누르는 자리는 그대로 줄 전체다. */}
+        <span
+          style={{
+            display: "grid",
+            placeItems: "center",
+            width: 16,
+            height: 16,
+            flexShrink: 0,
+            borderRadius: "var(--r-1)",
+            border: `1px solid ${on ? "var(--accent)" : "var(--line)"}`,
+            color: on ? "var(--accent-ink)" : "var(--ink-faint)",
+          }}
+        >
+          {on ? Icon.check : null}
+        </span>
+        {t("prompt.seqChars")}
+      </button>
+      <div style={on ? { padding: "var(--sp-3)" } : undefined}>{children}</div>
     </div>
   );
 }

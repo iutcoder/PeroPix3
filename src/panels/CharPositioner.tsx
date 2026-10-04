@@ -113,7 +113,10 @@ export function CharStackedWarning() {
           return p.x === q.x && p.y === q.y;
         }),
       );
-  if (!canPosition || !useCoords || positioning || !stacked) return null;
+  /* ★★**순차 생성 모드에서는 안 낸다** (2026-09-15). 그 모드는 한 장에 한 명만 실으므로
+     (`store/gen` 의 `parties`) 자리가 겹쳐도 겹칠 사람이 없다. */
+  const seq = usePrompt((s) => s.seqChars);
+  if (!canPosition || !useCoords || positioning || !stacked || seq) return null;
   return (
     <div
       data-stacked-warning
@@ -157,10 +160,14 @@ export function CharPositioner() {
   const baseImage = useImageInput((s) => s.baseImage);
   const [picked, setPicked] = useState(0);
   const { canPosition, setPositioning } = usePositioning();
+  const t = useI18n((s) => s.t);
 
   const freeform = modelCaps(params.model).freeform_position;
-  /** 화면에 서는 인물만 — 꺼 둔 인물은 나가지 않으므로 자리도 없다 */
-  const live = chars.filter((c) => c.on);
+  /** 화면에 서는 인물만 — 꺼 둔 인물은 나가지 않으므로 자리도 없다.
+   *  ★이름이 비었으면 카드 배너와 같은 이름을 붙인다 (`PromptSections` 의 `cards.charN`) */
+  const live = chars
+    .map((c, i) => ({ ...c, name: c.name || t("cards.charN", { n: i + 1 }) }))
+    .filter((c) => c.on);
 
   useEffect(() => {
     if (picked > live.length - 1) setPicked(Math.max(0, live.length - 1));
@@ -254,16 +261,26 @@ type Live = { id: string; name: string; center: Center }[];
 type Surface = { chars: Live; picked: number; place: (i: number, at: Center) => void };
 
 /** 자유 배치 — 끌어서 옮긴다 (공홈 `sV`).
- *  ★빈 곳을 누르면 **지금 고른 인물**이 거기로 간다. 마커 **18px 안**을 누르면 그것을 집는다. */
+ *  ★빈 곳을 누르면 **지금 고른 인물**이 거기로 간다. 마커(번호 원 **과 이름표**)를 누르면 그것을 집는다.
+ *  ★★이름표도 손잡이다 (사용자 지적 2026-10-02: 이름표가 생겼는데 원만 집혀 불편하다).
+ *    잡은 자리와 원의 거리를 들고 끈다 — 이름표 끝을 잡아도 원이 커서로 튀지 않는다. */
 function FreeSurface(p: Surface & { setPicked: (i: number) => void }) {
   const surface = useRef<HTMLDivElement>(null);
-  const dragging = useRef<number | null>(null);
+  const dragging = useRef<{ i: number; dx: number; dy: number } | null>(null);
   const warn = useMemo(() => crowded(p.chars.map((c) => c.center)), [p.chars]);
 
-  /** 누른 자리에서 가장 가까운 마커 — 18px 밖이면 없는 것으로 본다 */
+  /** 누른 자리의 마커 — 그려진 사각형(원 + 이름표) 안이거나 원의 18px 안.
+   *  ★겹치면 위에 그려진 것이다: 고른 인물(`zIndex` 2) → 뒤에 그려진 것 */
   const grab = (px: number, py: number) => {
     const r = surface.current?.getBoundingClientRect();
     if (!r) return undefined;
+    const boxes = [...(surface.current?.querySelectorAll<HTMLElement>("[data-char-marker]") ?? [])];
+    const inside = (i: number) => {
+      const b = boxes[i]?.getBoundingClientRect();
+      return !!b && px >= b.left && px <= b.right && py >= b.top && py <= b.bottom;
+    };
+    if (inside(p.picked)) return p.picked;
+    for (let i = p.chars.length - 1; i >= 0; i--) if (inside(i)) return i;
     let best = 18;
     let hit: number | undefined;
     p.chars.forEach((c, i) => {
@@ -279,24 +296,33 @@ function FreeSurface(p: Surface & { setPicked: (i: number) => void }) {
   return (
     <div
       ref={surface}
-      style={{ width: "100%", height: "100%", position: "relative", cursor: "crosshair", touchAction: "none" }}
+      /* ★★`userSelect: none` — 없으면 번호·이름 글자에서 글자 선택이 시작되어 끌기가 `pointercancel` 로
+         끊긴다 (실측 2026-10-02: 생성을 누른 직후에 끌면 첫 한 칸만 옮겨지고 멈췄다. `useReorder` 의 같은 주) */
+      style={{ width: "100%", height: "100%", position: "relative", cursor: "crosshair", touchAction: "none", userSelect: "none" }}
       onPointerDown={(e) => {
         e.currentTarget.setPointerCapture(e.pointerId);
         const hit = grab(e.clientX, e.clientY);
         const r = surface.current?.getBoundingClientRect();
         if (hit === undefined) {
-          dragging.current = p.picked;
+          dragging.current = { i: p.picked, dx: 0, dy: 0 };
           if (r) p.place(p.picked, toCenter(e.clientX, e.clientY, r));
         } else {
-          dragging.current = hit;
+          const c = p.chars[hit].center;
+          dragging.current = r
+            ? { i: hit, dx: r.left + c.x * r.width - e.clientX, dy: r.top + c.y * r.height - e.clientY }
+            : { i: hit, dx: 0, dy: 0 };
           p.setPicked(hit);
         }
       }}
       onPointerMove={(e) => {
-        if (!e.currentTarget.hasPointerCapture(e.pointerId)) return;
-        const i = dragging.current;
+        if (!e.currentTarget.hasPointerCapture(e.pointerId)) {
+          // 마커 위에서는 집을 수 있다는 것을 커서로 알린다
+          e.currentTarget.style.cursor = grab(e.clientX, e.clientY) === undefined ? "crosshair" : "grab";
+          return;
+        }
+        const g = dragging.current;
         const r = surface.current?.getBoundingClientRect();
-        if (i !== null && r) p.place(i, toCenter(e.clientX, e.clientY, r));
+        if (g && r) p.place(g.i, toCenter(e.clientX + g.dx, e.clientY + g.dy, r));
       }}
       onPointerUp={() => {
         dragging.current = null;
@@ -309,11 +335,15 @@ function FreeSurface(p: Surface & { setPicked: (i: number) => void }) {
           name={c.name}
           selected={i === p.picked}
           warning={warn.has(i)}
+          size={24}
+          /* ★판 오른쪽 절반에 서면 이름표가 왼쪽으로 간다 — 판 밖으로 나가 잘리지 않게 */
+          flip={c.center.x > 0.5}
           style={{
             position: "absolute",
             left: `${100 * c.center.x}%`,
             top: `${100 * c.center.y}%`,
-            transform: "translate(-50%, -50%)",
+            // ★원의 가운데가 인물의 자리다 (이름표 폭은 빼고 원 반지름만큼 민다)
+            transform: c.center.x > 0.5 ? "translate(calc(-100% + 12px), -50%)" : "translate(-12px, -50%)",
             zIndex: i === p.picked ? 2 : 1,
             pointerEvents: "none",
           }}
@@ -400,13 +430,15 @@ function GridSurface(p: Surface & { setPicked: (i: number) => void }) {
                     // 같은 칸에 여럿이면 누를 때마다 다음 사람으로 (겹쳐 있어도 전부 고를 수 있다)
                     p.setPicked(on[(mine + 1) % on.length].i);
                   }}
-                  style={{ display: "grid", cursor: "pointer" }}
+                  style={{ display: "flex", minWidth: 0, maxWidth: "calc(100% - 6px)", cursor: "pointer" }}
                 >
+                  {/* ★칸이 좁으면 이름이 말줄임으로 줄어든다. 번호 원은 줄지 않는다 */}
                   <Marker
                     n={show.i + 1}
                     name={p.chars[show.i].name}
                     selected={sel}
                     warning={on.length > 1}
+                    size={20}
                   />
                 </span>
               )}
@@ -418,34 +450,95 @@ function GridSurface(p: Surface & { setPicked: (i: number) => void }) {
   );
 }
 
-/** 인물 번호 마커 — 28px 원 (공홈 `sU`·`sW`) */
+/** 인물 번호 원 — 배치 판의 마커와 캐릭터 카드 배너가 **같은 부품**을 쓴다 (사용자 결정 2026-09-28:
+ *  목업 `docs/comic-editor-mockup-v2.html` ⑥ 의 시안 D). 어두운 바탕 + 테 + 흰 번호.
+ *  ★★테 색은 **인물마다 다르지 않고 무채색**이다 (사용자 지시 2026-09-28: 생성 쪽은 번호 색을
+ *    동일하게, 동일하면 무채색으로). 누구인지는 번호와 이름표가 말한다. 만화 편집은 `color` 로 인물 색 테를 준다 (설계 8-3).
+ *  ★★바탕은 **거의 불투명**하다 (사용자 지적 2026-09-28: 배너 위에서 숫자가 잘 안 보였다).
+ *    배너 단추(`BannerBtn`)의 0.42 를 따랐더니 썸네일이 비쳐 흰 숫자가 묻혔다.
+ *  ★★숫자는 **대문자 높이로 잘라** 가운데에 둔다(`text-box`). 글꼴 상자 가운데에 두면 아래로
+ *    내려 쓰는 글자 몫이 남아 숫자가 위로 뜬다 (사용자 지적 2026-09-28). */
+export function CharNo(p: { n: number; size: number; ring: number; state?: "selected" | "warning"; /** 테 색 — 만화 편집은 인물 색 (설계 8-3). 없으면 무채색 */ color?: string }) {
+  const ring = p.state === "selected" ? "#fff" : p.state === "warning" ? "var(--warn)" : (p.color ?? "rgba(255,255,255,0.55)");
+  return (
+    <span
+      style={{
+        position: "relative",
+        zIndex: 1,
+        flexShrink: 0,
+        width: p.size,
+        height: p.size,
+        display: "grid",
+        placeItems: "center",
+        borderRadius: "50%",
+        background: p.state === "selected" ? "var(--accent)" : "rgba(12,12,16,0.88)",
+        boxShadow: `inset 0 0 0 ${p.ring}px ${ring}`,
+        color: p.state === "warning" ? "var(--warn)" : "#fff",
+        fontSize: p.size >= 24 ? 12 : 11,
+        fontWeight: "var(--w-semi)",
+        fontVariantNumeric: "tabular-nums",
+        lineHeight: 1,
+        textShadow: "none",
+      }}
+    >
+      <span style={{ display: "block", textBox: "trim-both cap alphabetic" }}>{p.n}</span>
+    </span>
+  );
+}
+
+/** 인물 번호 마커 (공홈 `sU`·`sW`) — 번호 원 뒤에 **이름표**가 반쯤 깔린다.
+ *  ★★번호만 있으면 몇 번이 누구인지 카드 차례를 세어 봐야 알았다 (사용자 지적 2026-09-28).
+ *  ★원이 인물의 자리다. 이름표는 `flip` 이면 왼쪽으로 가서 판 밖으로 안 나간다. */
 function Marker(p: {
   n: number;
   name: string;
   selected: boolean;
   warning: boolean;
+  size: number;
+  flip?: boolean;
   style?: React.CSSProperties;
 }) {
+  const r = p.size / 2;
   return (
     <div
       data-char-marker={p.n}
-      title={p.name}
       style={{
-        width: 28,
-        height: 28,
-        display: "flex",
+        display: "inline-flex",
+        flexDirection: p.flip ? "row-reverse" : "row",
         alignItems: "center",
-        justifyContent: "center",
-        borderRadius: "50%",
-        fontSize: "var(--text-sm)",
-        fontWeight: "var(--w-semi)",
-        background: p.warning ? "var(--warn)" : p.selected ? "var(--accent)" : "var(--panel)",
-        color: p.warning || p.selected ? "var(--accent-on)" : "var(--ink)",
-        border: `1px solid ${p.selected ? "var(--accent-line)" : "var(--line-strong)"}`,
+        minWidth: 0,
+        maxWidth: "100%",
+        whiteSpace: "nowrap",
         ...p.style,
       }}
     >
-      {p.n}
+      <CharNo
+        n={p.n}
+        size={p.size}
+        ring={2}
+        state={p.warning ? "warning" : p.selected ? "selected" : undefined}
+      />
+      <span
+        style={{
+          [p.flip ? "marginRight" : "marginLeft"]: 1 - r,
+          [p.flip ? "paddingRight" : "paddingLeft"]: r + 4,
+          [p.flip ? "paddingLeft" : "paddingRight"]: 9,
+          minWidth: 0,
+          height: p.size - 4,
+          display: "flex",
+          alignItems: "center",
+          borderRadius: p.flip ? "var(--r-2) 0 0 var(--r-2)" : "0 var(--r-2) var(--r-2) 0",
+          background: "color-mix(in srgb, var(--panel) 94%, transparent)",
+          border: `1px solid ${p.warning ? "var(--warn)" : p.selected ? "var(--accent)" : "var(--line)"}`,
+          [p.flip ? "borderRight" : "borderLeft"]: 0,
+          boxShadow: "0 1px 3px rgba(0,0,0,0.25)",
+          fontSize: "var(--text-2xs)",
+          fontWeight: "var(--w-semi)",
+          color: "var(--ink)",
+        }}
+      >
+        <span style={{ overflow: "hidden", textOverflow: "ellipsis" }}>{p.name}</span>
+      </span>
     </div>
   );
 }

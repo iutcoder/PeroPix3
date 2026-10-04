@@ -33,6 +33,21 @@ import codexapp
 Emit = Callable[[dict], Awaitable[None]]
 
 
+def drop_images(v: Any) -> Any:
+    """그림 데이터를 뗀 사본 — 화면으로 넘기기 전에 거친다 (`server._session_for` 의 `emit`).
+
+    ★CLI 는 도구 결과를 **그림째** 한 줄로 되돌려 보낸다 (`read_image` 두 장이면 약 10만 자). 화면
+      (`llm.ts` 의 `cliEvent`)은 그 결과에서 글만 뽑으므로, 그림은 웹소켓과 되받기 버퍼만 채우고 버려진다.
+    ★모양을 가리지 않는다 — 앤트로픽 모양(`source.data`)도 MCP 모양(`data`)도 `type: "image"` 인 칸 안에 있다."""
+    if isinstance(v, dict):
+        if v.get("type") == "image":
+            return {"type": "image"}
+        return {k: drop_images(x) for k, x in v.items()}
+    if isinstance(v, list):
+        return [drop_images(x) for x in v]
+    return v
+
+
 class Session:
     """CLI 한 명. ★한 번에 하나만 산다 (화면이 하나라 둘이 앱을 만지면 뒤엉킨다)."""
 
@@ -50,6 +65,9 @@ class Session:
         #: 저쪽이 들고 있는 대화 번호 — 화면이 대화 파일에 함께 저장한다
         self.session_id = ""
         self.busy = False
+        #: ★★앱 밖 도구(파일·셸·웹)를 허용하나 — 설정에서 오고 `_ensure` 가 깃발로 옮긴다
+        #  (사용자 결정 2026-09-07, 기본 켬). 세션이 이미 떠 있으면 다음 세션부터 먹는다.
+        self.open = True
         #: ★우리가 일부러 닫는 중인가 — 그때의 죽음은 **사고가 아니다**.
         #  안 가리면 CLI 를 바꾸거나 다른 대화로 옮길 때 화면에 까닭 없는 오류가 번쩍인다
         #  (실측 2026-08-15: 코덱스 → 클로드로 바꾸는 순간 `exit` 이 화면으로 갔다).
@@ -122,7 +140,7 @@ class CodexSession(Session):
         await self.rpc.start()
         await self.rpc.call("initialize", {"clientInfo": {
             "name": "peropix", "title": "PeroPix", "version": "3.0"}})
-        cfg = codexapp.thread_config(self.backend)
+        cfg = codexapp.thread_config(self.backend, open=self.open)
         params: dict[str, Any] = {"cwd": str(self.cwd), "config": cfg}
         if system:
             params["developerInstructions"] = system
@@ -257,7 +275,7 @@ class ClaudeSession(Session):
             self.exe, *args, cwd=str(self.cwd),
             env={**os.environ, "MCP_TIMEOUT": "1800000"},
             stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE)
+            stderr=asyncio.subprocess.PIPE, limit=codexapp.LINE_LIMIT)
         self._main.call_soon_threadsafe(self._up.set)
         assert self.proc.stdout is not None
 
@@ -287,7 +305,7 @@ class ClaudeSession(Session):
         cfg = cliagent.mcp_config(self.cwd.parent, self.backend)
         # ★깃발은 `cliagent.argv` 가 정본이다 (도구 잠금이 거기 있다). 여기서는 **입력 방식만**
         #   덧붙인다 — 그래야 잠금 규칙이 한 곳에 남는다.
-        args = cliagent.Runner().argv(cfg, system, self.session_id, self.model, self.effort)
+        args = cliagent.Runner().argv(cfg, system, self.session_id, self.model, self.effort, open=self.open)
         args += ["--input-format", "stream-json"]
         self._up = asyncio.Event()
         import threading

@@ -630,7 +630,7 @@ export function SceneLane() {
    *    정할 수가 없다. 그때는 누른 것 하나만 넣는다.
    *  ★차례는 **화면에 보이는 그대로**여야 한다 (`visibleTakes`) — 저장 차례로 세면
    *    눈에 보이는 사이의 것과 실제로 들어가는 것이 갈린다.
-   *  ★미저장(파일 없는 그림)은 뺀다 — 고른 것에 걸리는 일이 전부 파일 경로를 보낸다. */
+   *  ★미저장(파일 없는 그림)도 든다 — 고른 것에 걸리는 일이 미저장을 먼저 저장하거나 메모리에서 뺀다 (`tap` 의 ★★주). */
   const pick = (file: string, cellId: string, range: boolean) => {
     const f = useSceneFocus.getState();
     const next = new Set(f.picked);
@@ -641,7 +641,7 @@ export function SceneLane() {
     if (!next.size && f.file) next.add(f.file);
     if (!range) next.has(file) ? next.delete(file) : next.add(file);
     else {
-      const list = visibleTakes(cellId).filter((r) => !r.preview).map((r) => r.file);
+      const list = visibleTakes(cellId).map((r) => r.file);
       const to = list.indexOf(file);
       const from = f.cell === cellId && f.file ? list.indexOf(f.file) : -1;
       if (to < 0) return;
@@ -967,6 +967,7 @@ export function SceneLane() {
                 takes={takesOfCell}
                 stepOf={(id) => steps[stepKey(ws, id)] ?? ""}
                 isStarred={isStarred}
+                /* ★미저장은 별을 못 단다 — 별표는 파일 경로로 저장된다 (별의 ★★주) */
                 onStar={toggleStar}
                 queuedOf={(cellId) => queued.filter((p) => p.cellId === cellId)}
                 /* ★★**서버가 말하는 씬**의 대기 칸에 「생성 중」을 붙인다 (2026-08-25).
@@ -1297,6 +1298,8 @@ type GroupProps = {
 
 /** 씬 세트 머리의 높이 — ★절반으로 줄였다 (사용자 지적 2026-08-16: 56 은 너무 두꺼웠다) */
 const HEAD_H = 28;
+/** 재기 전에도 썸네일을 부르는 줄 수 — 맨 위가 한 박자 비어 보이지 않게 (`SceneRow` 의 ★★주) */
+const EAGER_ROWS = 4;
 /** ★자르지 않고 **끝만 부드럽게 뺀다** — 잘라 두면 줄 가운데서 뚝 끊긴 것처럼 보인다 */
 const HEAD_FADE = "linear-gradient(90deg, #000 0 72%, transparent 100%)";
 
@@ -1680,9 +1683,32 @@ function SceneRow(
   const patchCell = (patch: Partial<Slot>) =>
     p.onPatch({ cells: p.card.cells.map((x) => (x.id === c.id ? { ...x, ...patch } : x)) });
 
+  /* ★★**안 보이는 줄은 썸네일을 안 부른다** (사용자 지적 2026-09-21: *"한 워크스페이스에서
+       이미지가 엄청 많아지니까 … 일부 탭을 누르면 씬에 있는 썸네일들이 즉시 로드가 안 되고
+       씬에 마우스 호버하거나 씬을 클릭해야 로드됨"*).
+     칸은 **가로로만** 잘라 그렸고(`from`·`to`) 줄은 전부 그렸다. 탭 하나에 씬이 스물이면 눈에
+     보이는 서너 줄 말고도 열몇 줄이 제 몫의 썸네일을 한꺼번에 불렀고, 브라우저는 한 곳에 여섯
+     줄만 열어 두므로 나머지는 줄을 선다 — 보이는 줄의 그림이 그만큼 늦게 왔다. 그림이 적을
+     때는 웹뷰 캐시가 다 받아 두고 있어서 안 드러났다.
+     ★★`loading="lazy"` 로 되돌리지 말 것 — 그쪽은 브라우저가 검사 자체를 미뤄 커서를 올려야
+       받아 오는 결함이 있었다 (아래 `<img>` 의 ★★주). 여기서는 관찰자를 우리가 걸어 **첫 판정을
+       우리 손으로** 받는다.
+     ★앞의 몇 줄은 재기 전에도 그린다 — 판정이 한 박자 늦어도 맨 위가 비어 보이지 않게. */
+  const rowBox = useRef<HTMLDivElement>(null);
+  const [near, setNear] = useState(p.offset + p.index < EAGER_ROWS);
+  useEffect(() => {
+    const el = rowBox.current;
+    if (!el) return;
+    const io = new IntersectionObserver(([e]) => setNear(e.isIntersecting), { rootMargin: "300px" });
+    io.observe(el);
+    return () => io.disconnect();
+  }, []);
+
   return (
     <div
+      ref={rowBox}
       data-scene={c.id}
+      data-near={near ? "" : undefined}
       onClick={() => p.onFocus({ cell: c.id, file: p.focus.cell === c.id ? p.focus.file : null })}
       style={{
         display: "flex",
@@ -2029,7 +2055,8 @@ function SceneRow(
               //   드래그가 통째로 죽어 있었다 (사용자 지적 2026-08-18).
               // ★클릭(선택)은 `onClick` 이 아니라 **`onTap`** 으로 받는다 — pointerdown 의
               //   `preventDefault` 가 브라우저의 호환 click 을 삼킨다 (CLAUDE.md 「잊기 쉬운 것」).
-              // ★미저장은 **못 끈다.** 파일이 없어서 커버로 쓸 수 없다 (받는 쪽이 경로를 쓴다).
+              // ★미저장은 **이미지 입력 칸으로만** 끈다 (`kind: "imageInput"`). 파일이 없어서 커버로
+              //   쓸 수 없고(받는 쪽이 경로를 쓴다), 베이스·Inference 는 바이트를 그대로 받는다.
               onPointerDown={(e) => {
                 // ★★별표는 **여기서 비켜 간다** (사용자 지적 2026-08-19). 끌기가 pointerdown 에서
                 //   기본 동작을 막아 **호환 click 을 삼키는** 바람에 별표의 onClick 이 통째로
@@ -2037,11 +2064,12 @@ function SceneRow(
                 //   같은 이유로 한 번 죽었던 것과 같은 함정이다.
                 if ((e.target as HTMLElement).closest("[data-take-star]")) return;
                 const tap = () => {
-                  // ★미저장은 **여러 장 고르기에서 뺀다.** 고른 것에 걸리는 일(휴지통·강화)이
-                  //   전부 파일 경로를 서버로 보내는 것이라, 섞이면 조용히 실패한다.
-                  //   버리는 것도 저장하는 것도 큰 그림 아래 줄에서 한다 (`SceneActions`)
-                  if (!un && (e.ctrlKey || e.metaKey)) p.onPick(r.file, c.id, false);
-                  else if (!un && e.shiftKey) p.onPick(r.file, c.id, true);
+                  // ★★미저장도 **여러 장 고르기에 든다** (사용자 지시 2026-09-30: *"자동저장을 하든
+                  //   안 하든 최대한 UI 동일하게"*). 고른 것에 걸리는 일은 미저장을 먼저 저장하거나
+                  //   (강화·업스케일 — 바이트로 돈다) 파일이 있어야 하면 꺼 두거나(보관·보내기 — `Canvas` 의 `unsaved`)
+                  //   메모리에서 뺀다 (삭제 — `removeTakes`).
+                  if (e.ctrlKey || e.metaKey) p.onPick(r.file, c.id, false);
+                  else if (e.shiftKey) p.onPick(r.file, c.id, true);
                   else {
                     /* ★★**그냥 누르면 여러 장 고르기가 풀린다** (사용자 지시 2026-08-22).
                        ★푸는 것은 **여기서** 한다 — 수식키가 없다는 것을 아는 자리가 여기뿐이다.
@@ -2051,11 +2079,10 @@ function SceneRow(
                     p.onFocus({ cell: c.id, file: r.file });
                   }
                 };
-                if (un) return tap();
                 e.stopPropagation();
                 startTakeDrag(
                   e,
-                  { dir: "image", kind: "image", img: { ws: p.ws, file: r.file, url: takeSrc(r, p.base, p.ws, true) } },
+                  { dir: "image", kind: un ? "imageInput" : "image", img: { ws: p.ws, file: r.file, url: takeSrc(r, p.base, p.ws, true), v: r.ts } },
                   undefined,
                   tap,
                 );
@@ -2069,19 +2096,24 @@ function SceneRow(
                 /* ★★고른 장이 **한눈에** 보여야 한다 (사용자 지적 2026-08-19: 2px 테두리로는
                    어느 것을 보고 있는지 안 보였다). 테두리를 굵히고, 바깥에 어두운 링을
                    둘러 밝은 그림에서도 테두리가 묻히지 않게 한다. 자리는 안 밀린다
-                   (`box-shadow` 는 레이아웃을 안 건드린다). */
-                border: `2px solid ${sel ? "var(--warn)" : cur ? "var(--accent)" : "transparent"}`,
-                boxShadow: cur
-                  ? "0 0 0 2px var(--accent), 0 0 0 4px rgba(0,0,0,0.55)"
-                  : sel
-                    ? "0 0 0 2px var(--warn), 0 0 0 4px rgba(0,0,0,0.55)"
-                    : undefined,
+                   (`box-shadow` 는 레이아웃을 안 건드린다).
+                   ★★**고른 장은 갤러리와 같은 차림이다** (사용자 지시 2026-09-10: *"씬쪽도 동일하게"*):
+                     강조색 테두리에 **칸 전체를 덮는 옅은 강조색**(아래 덮개). 노란 테두리와 흐린
+                     그림을 걷은 자리다 — 어떤 테두리 색을 써도 그 색이 그림 안에 있으면 묻히고,
+                     흐리게 하면 고른 것이 오히려 안 보인다.
+                   ★**「지금 보는 장」(`cur`)은 그대로 링이다** — 덮개와 링이 서로 다른 것을 말한다
+                     (무엇을 골랐나 · 어느 것이 큰 그림에 떠 있나). */
+                border: `2px solid ${sel || cur ? "var(--accent)" : "transparent"}`,
+                boxShadow: cur ? "0 0 0 2px var(--accent), 0 0 0 4px rgba(0,0,0,0.55)" : undefined,
                 overflow: "hidden",
                 background: "var(--surface2)",
                 padding: 0,
                 lineHeight: 0,
               }}
             >
+              {/* ★안 보이는 줄에서는 안 그린다 (위 ★★주). 미저장 그림은 주소가 `data:` 라
+                  받아 올 것이 없으므로 그대로 둔다 — 빈 칸으로 보이면 그게 더 헷갈린다. */}
+              {(near || !!r.preview) && (
               <img
                 src={takeSrc(r, p.base, p.ws, true)}
                 alt=""
@@ -2096,11 +2128,29 @@ function SceneRow(
                    지나가 검사가 다시 돌 때에야 받아 왔다. 서버는 멀쩡했다 (실측: 그 세션의
                    썸네일 요청 17건이 전부 200 — **요청 자체가 늦게 나갔다**).
                    ★격자로 수백 장을 펴 놓는 화면(갤러리·파일 관리·자동검열)은 구간을 안 나누므로
-                     거기서는 `lazy` 가 그대로 필요하다. */
-                decoding="async"
-                style={{ width: "100%", height: "100%", objectFit: "cover", display: "block", opacity: sel ? 0.6 : 1 }}
+                     거기서는 `lazy` 가 그대로 필요하다.
+                   ★★**`decoding="async"` 도 안 쓴다** (사용자 지적 2026-09-28: 설치본 · 세로 모드 ·
+                     그림이 아주 많은 워크스페이스에서 탭을 누른 직후, 씬의 앞 5장쯤만 보이고 뒤는
+                     투명한 채 호버해야 보였다). Chromium 은 async 그림을 **빈 자리로 먼저 그리고**
+                     디코드가 끝나면 다시 그리는데, 그 다시 그리기가 빠지면 커서가 지나가 그 칸을
+                     새로 칠할 때까지 빈 채로 남는다. 여기도 보이는 구간만 그리므로 미룰 것이 없다.
+                     게스트(소프트웨어 GPU)에서는 재현되지 않는다. 실측은 사용자 앱(3.5.1)에서 했다
+                     (2026-09-29): 다른 탭 → 「페로로로」 탭에서 그림은 9장 다 디코드됐는데 창에는 4/8만
+                     그려졌고, 이 속성만 막으니 다섯 번 모두 8/8 이었다. */
+                style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }}
               />
-              {un ? (
+              )}
+              {/* ★★고른 장을 덮는 **옅은 강조색** (위 ★★주). 갤러리 칸과 같은 차림이다
+                  (`Gallery` 의 `data-cell-veil`) — `opacity` 로 태워 테마를 그대로 따르고,
+                  `pointer-events: none` 이라 커서를 가로채지 않는다. */}
+              {sel && (
+                <span
+                  data-take-veil
+                  style={{ position: "absolute", inset: 0, background: "var(--accent)", opacity: 0.28,
+                           pointerEvents: "none" }}
+                />
+              )}
+              {un && (
                 /* ★「미저장」이 칸에서 바로 보여야 한다 (v2 는 파일명 자리에 `미저장` 을 넣었다 —
                     `index.html:12156`). 우리 칸에는 파일명 줄이 없으므로 아래에 작은 표로 얹는다. */
                 <span
@@ -2120,13 +2170,15 @@ function SceneRow(
                 >
                   {t("scenes.unsaved")}
                 </span>
-              ) : (
+              )}
+              {
                 /* ★★**썸네일 위의 별** (2026-08-22 에 걷었다가 되살렸다 2026-08-25).
                    ★평소에는 **안 보이고**(`opacity: 0`), 커서를 올리거나 별이 달려 있을 때만
                      보인다 — 늘 떠 있으면 수십 장이 별 밭이 된다 (`.thumb-star` 규칙).
                    ★12px 은 썸네일 위에서 작았다 → 18px (사용자 지시 2026-08-18).
-                   ★미저장 그림에는 안 붙는다 — 별표는 **파일 경로**로 저장되므로 아직
-                     파일이 아닌 것에는 달 자리가 없다 (위 갈래가 그것을 가른다). */
+                   ★★미저장 그림에도 **같은 자리에 선다**(사용자 지시 2026-09-30: *"자동저장을 하든 안 하든 최대한
+                     UI 동일하게"*). 미저장의 별표는 메모리의 그 그림에 붙고, 저장하면 새 경로로 옮겨 적힌다
+                     (`workspace.setStars` · `sceneTakes.saveTake`). */
                 <span
                   data-take-star={r.file}
                   onClick={(e) => {
@@ -2155,7 +2207,7 @@ function SceneRow(
                 >
                   {p.isStarred(r.file) ? Icon.star18On : Icon.star18}
                 </span>
-              )}
+              }
             </button>
           );
         })}

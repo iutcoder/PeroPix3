@@ -2,7 +2,7 @@ import { useI18n } from "../i18n";
 import { useRename } from "../components/useRename";
 import { ask } from "../store/ask";
 import { toast } from "../store/toast";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useGen } from "../store/gen";
 import { useWs } from "../store/workspace";
 import { useGallery } from "../store/gallery";
@@ -19,33 +19,78 @@ import { nextAfter } from "../lib/pickNext";
 import type { ImageMeta } from "../store/gallery";
 import { Icon } from "../components/Icon";
 import { onNearBottom } from "../lib/nearBottom";
+import { COLOR_HEX } from "../lib/blocks";
+import { normTag } from "../lib/tagSearch";
+import { sendToEditor } from "../editor/sendTo";
 
 /** 옮길 곳 드롭다운에서 **최상위**를 가리키는 값. 서버가 쓰는 값은 빈 문자열인데,
  *  그것은 이 드롭다운에서 「고르지 않음」자리표시자가 이미 쓰고 있다. 보낼 때 되돌린다. */
 const ROOT_DEST = "/";
+
+/** 한 번에 그리는 칸 수 — 서버 쪽 나눔과 같은 값이다 (`backend/server.PAGE`) */
+const PAGE = 60;
 
 /** 갤러리 — 워크스페이스에 쌓인 그림을 훑어 본다 (feature-inventory G절).
  *
  *  ★칸에는 **썸네일**을 쓴다 (`lib/imgUrl`). 여기는 수백 장이 한 번에 뜨는 화면이라,
  *    원본 PNG 를 걸면 그것만으로 무너진다. 크게 볼 때만 원본을 받는다.
  *
- *  조작: 클릭 = 크게 보기 · Ctrl(⌘)+클릭 = 선택. 두 가지가 한 칸에 겹치므로
- *  섞이지 않게 **선택은 수식키를 요구한다** (v2 의 일괄 삭제·이동이 이 선택을 먹는다). */
+ *  ★★조작은 **파일 탐색기와 같다** (사용자 지시 2026-09-10: *"뭔가 비 직관적이라 되는지도
+ *    몰랐음. 클릭하면 선택, 더블클릭하면 크게보기로 변경"*):
+ *
+ *      클릭         이 한 장만 고른다        Ctrl+클릭   그 장만 켜고 끈다
+ *      Shift+클릭   먼저 누른 장부터 여기까지  더블클릭    크게 보기
+ *      Esc          크게 보기를 닫고, 닫혀 있으면 선택을 푼다
+ *
+ *    예전에는 **클릭이 곧 크게 보기**여서 선택에 수식키가 필요했고, 칸 위의 별표를 누르려 해도
+ *    창이 먼저 열렸다. 고른 장의 생성 정보는 크게 보지 않아도 오른쪽 패널에 뜬다 (`focus`). */
 export function Gallery() {
   const t = useI18n((s) => s.t);
   const base = useGen((s) => s.base);
   const ws = useWs((s) => s.current);
   /** ★별표는 **보관함이 든다** — 워크스페이스가 아니다 (store/gallery.ts `starred` 주석) */
-  const { items, folders, picked, focus, meta, loading, total, hasMore, load, more, setFocus,
-          togglePick, pickAll, clearPick, remove, moveTo, isStarred, toggleStar, rename, vibeMode } =
-    useGallery();
-  // ★바닥에 닿기 전에 다음 쪽을 당긴다 (v2 방식, lib/nearBottom)
-  const onScroll = onNearBottom(() => void more(ws));
+  const { items, folders, picked, focus, big, meta, loading, total, hasMore, load, more, setFocus, setBig,
+          togglePick, setPicked, pickAll, clearPick, remove, moveTo, isStarred, toggleStar, rename, vibeMode,
+          artists, artistScope, folder, artistItems, artistTags, artistBusy, rescanArtists,
+          artistsByFile } = useGallery();
+  /** ★작가를 안 골랐어도 칸마다 작가를 적나 (사용자 지시 2026-09-21) */
+  const artistAlways = useUi((s) => s.artistAlways);
+  /** ★작가 칸을 펼쳐 두었나 — 펼친 채로 앱을 켜면 색인을 여기서 당긴다 */
+  const artistOpen = useUi((s) => s.artistOpen);
   const [dest, setDest] = useState("");
   /** ★별표는 **거르는 장치**다 — 큰 그림에 별표 버튼을 두지 않는다 (사용자 지시 2026-08-05) */
   const [starOnly, setStarOnly] = useState(false);
+  /* ★★**작가를 고르면 목록을 서버에 다시 묻지 않는다** (사용자 지시 2026-09-21). 곁파일이 파일마다
+     시각·크기를 들고 있어 그것만으로 칸을 지을 수 있고, 거르는 판정(태그 쪼개기·작가 판별)은
+     어차피 화면 몫이다 (`store/gallery.artistItems`). 그래서 쪽도 여기서 센다 — 서버 쪽 나눔은
+     폴더 목록용이라 걸러진 결과와 맞지 않는다. */
+  const filtered = artistItems();
+  const [artistShown, setArtistShown] = useState(PAGE);
+  useEffect(() => setArtistShown(PAGE), [artists, artistScope, folder, starOnly]);
 
-  const shown = starOnly ? items.filter((i) => isStarred(i.file)) : items;
+  /* ★★「항상 전체 작가 보이기」를 켜면 **고르지 않은 작가까지** 칸에 적는다 (사용자 지시 2026-09-21).
+     `artistItems` 가 실어 주는 것은 **고른 작가**뿐이라, 파일마다 제 작가를 모아 둔 표를 쓴다.
+     ★그 표는 **저장소가 하나만 짓는다** (`artistsByFile`) — 작가 칸의 「고른 그림의 작가」도
+       같은 것을 본다. 화면마다 따로 지으면 같은 그림에 다른 작가가 뜬다. */
+  const byFile = artistAlways ? artistsByFile() : null;
+  /** 골라 둔 작가 — 칸에서 이것만 진하게 보인다 */
+  const onSet = useMemo(() => new Set(artists), [artists]);
+
+  /* ★★**켜 둔 채로 앱을 켜면 색인이 비어 있다** — 색인은 파일에 안 남고 앱이 켜질 때 비어 있어서,
+     「항상 보이기」나 펼쳐 둔 작가 칸이 살아 돌아와도 보여 줄 것이 없다. 그래서 여기서 한 번 당긴다.
+     ★중앙이라서 여기 둔다 — 좌우 패널은 접으면 언마운트된다 (`CLAUDE.md` 의 그 함정).
+     ★비어 있을 때만이다. 펼칠 때마다 훑는 것은 그 단추가 한다 (`panels/GalleryFolders`). */
+  useEffect(() => {
+    if ((artistAlways || artistOpen) && !artistTags.size && !artistBusy) void rescanArtists();
+  }, [artistAlways, artistOpen, artistTags, artistBusy, rescanArtists]);
+
+  const source = filtered ?? items;
+  const all = starOnly ? source.filter((i) => isStarred(i.file)) : source;
+  const shown = filtered ? all.slice(0, artistShown) : all;
+  /** 더 받을 것이 남았나 — 걸러진 목록은 화면이, 아니면 서버가 센다 */
+  const left = filtered ? all.length - shown.length : hasMore ? total - items.length : 0;
+  // ★바닥에 닿기 전에 다음 쪽을 당긴다 (v2 방식, lib/nearBottom)
+  const onScroll = onNearBottom(() => (filtered ? setArtistShown((v) => v + PAGE) : void more(ws)));
   const idx = focus ? shown.findIndex((i) => i.file === focus) : -1;
 
   // ★목록은 **여기서** 불러온다. 좌우 패널은 접으면 언마운트되지만 중앙은 항상 떠 있다.
@@ -53,14 +98,20 @@ export function Gallery() {
     void load(ws);
   }, [ws, load]);
 
-  // ★크게 보기가 열려 있을 때만 키를 먹는다 — 그리드에서 S 를 눌러도 아무 일이 없어야
-  //   "무엇에 대한 별표인지" 가 모호해지지 않는다.
+  /** ★★**Esc 는 열려 있는 것부터 닫는다** (사용자 지시 2026-09-10: *"esc 누르면 선택 해제되게"*) —
+   *  크게 보기가 떠 있으면 그것을 닫고, 닫혀 있으면 선택을 푼다. 한 키가 두 겹을 차례로 벗긴다.
+   *  ★나머지 키(←·→·S)는 **크게 보기 안에서만** 먹는다: 그리드에서 S 가 먹으면 어느 그림에 대한
+   *    별표인지가 모호해진다 (칸 위의 별표 단추가 그 일을 한다). */
   useEffect(() => {
-    if (!focus) return;
     const onKey = (e: KeyboardEvent) => {
       const el = e.target as HTMLElement;
       if (el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.tagName === "SELECT") return;
-      if (e.key === "Escape") return void setFocus(ws, null);
+      if (e.key === "Escape") {
+        if (big) return setBig(false);
+        if (picked.size) return clearPick();
+        return;
+      }
+      if (!big || !focus) return;
       if (e.key === "ArrowLeft" && idx > 0) return void setFocus(ws, shown[idx - 1].file);
       if (e.key === "ArrowRight" && idx >= 0 && idx < shown.length - 1)
         return void setFocus(ws, shown[idx + 1].file);
@@ -68,9 +119,41 @@ export function Gallery() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [focus, idx, shown, ws, setFocus, toggleStar]);
+  }, [focus, big, picked, idx, shown, ws, setFocus, setBig, clearPick, toggleStar]);
 
+  /** 마지막에 **수식키 없이** 누른 장 — Shift+클릭이 여기서부터 범위를 잡는다 */
+  const anchor = useRef<string | null>(null);
+  /** ★★칸 누르기 한 자리 (머리 주석의 조작 표). 어느 갈래든 **정보 패널은 방금 누른 장**을 본다 */
+  const onPick = (file: string, mod: { ctrl: boolean; shift: boolean }) => {
+    const order = shown.map((i) => i.file);
+    /* ★앵커가 아직 없으면 **보고 있던 한 장**에서 잰다 (전체 선택 뒤 첫 Shift+클릭이 그렇다) —
+       씬 줄의 "빈 상태에서 Ctrl+클릭하면 보던 장까지 함께" 와 같은 배려다. */
+    const seed = anchor.current ?? focus;
+    const from = seed ? order.indexOf(seed) : -1;
+    if (mod.shift && from >= 0) {
+      // ★범위를 잡아도 **앵커는 그대로 둔다** — 탐색기처럼 Shift 로 범위를 늘였다 줄일 수 있다
+      const to = order.indexOf(file);
+      const [a, b] = from < to ? [from, to] : [to, from];
+      setPicked(order.slice(a, b + 1));
+    } else if (mod.ctrl) {
+      togglePick(file);
+      anchor.current = file;
+    } else {
+      setPicked([file]);
+      anchor.current = file;
+    }
+    void setFocus(ws, file);
+  };
+  /** 크게 보기를 연다 (더블클릭·툴바 단추) */
+  const openBig = (file: string) => {
+    void setFocus(ws, file);
+    setBig(true);
+  };
+
+  /** 고른 것을 지운다 — 묻고, 휴지통을 거친다. ★고른 것 전부가 대상이라 `only` 를 안 넘긴다
+   *  (안 넘겨야 선택도 함께 풀린다, `store/gallery.remove`) */
   const onRemove = async () => {
+    if (!picked.size) return;
     if (
       !(await ask({
         title: t("gallery.removeConfirm", { n: picked.size }),
@@ -98,7 +181,7 @@ export function Gallery() {
       <>
       <Toolbar
         picked={picked.size}
-        total={total || items.length}
+        total={filtered ? all.length : total || items.length}
         starOnly={starOnly}
         onStarOnly={() => setStarOnly((v) => !v)}
         folders={folders.map((f) => f.path)}
@@ -106,11 +189,15 @@ export function Gallery() {
         setDest={setDest}
         onAll={pickAll}
         onClear={clearPick}
-        onRemove={onRemove}
+        /* ★고른 것 중 **마지막에 누른 장**을 띄운다 (없으면 고른 것의 첫 장) */
+        onBig={() => {
+          const one = focus && picked.has(focus) ? focus : [...picked][0];
+          if (one) openBig(one);
+        }}
         onMove={() => dest && void moveTo(ws, dest === ROOT_DEST ? "" : dest)}
       />
 
-      {items.length === 0 ? (
+      {source.length === 0 ? (
         <Empty loading={loading} />
       ) : (
         <div
@@ -140,28 +227,40 @@ export function Gallery() {
               name={it.name}
               starred={isStarred(it.file)}
               picked={picked.has(it.file)}
+              /* 칸에 적을 작가 — 「항상 보이기」를 켜 두었으면 **그 그림의 작가 전부**,
+                 아니면 작가 필터가 걸어 준 **고른 작가들**이다 */
+              artists={byFile ? byFile.get(it.file) : it.artists}
+              artistOn={onSet}
               onStar={() => void toggleStar(it.file)}
-              onOpen={(withMod) => (withMod ? togglePick(it.file) : void setFocus(ws, it.file))}
+              onPick={(mod) => onPick(it.file, mod)}
+              onOpen={() => openBig(it.file)}
               /* 고른 것이 있으면 **고른 것 전부**, 아니면 이 한 장 */
               onDragFiles={() => (picked.has(it.file) ? [...picked] : [it.file])}
             />
           ))}
-          {hasMore && (
+          {left > 0 && (
             <span
               data-gallery-more
               style={{ gridColumn: "1/-1", padding: "var(--sp-3)", textAlign: "center",
                        fontSize: "var(--text-2xs)", color: "var(--ink-faint)" }}
             >
-              {t("gallery.more", { n: total - items.length })}
+              {t("gallery.more", { n: left })}
             </span>
           )}
         </div>
       )}
 
+      {/* ★★고르기만 해도 **아래에 빠른 줄**이 붙는다 (사용자 지시 2026-09-21). 크게 보지 않고도
+          바로 보낼 수 있어야 한다 — 위 툴바의 삭제는 이 줄과 겹쳐서 걷었다.
+          ★크게 보기가 떠 있으면 그쪽에 같은 줄이 있으므로 여기서는 안 그린다. */}
+      {!big && picked.size > 0 && (focus || [...picked][0]) && (
+        <QuickBar files={[...picked]} focus={focus && picked.has(focus) ? focus : [...picked][0]} onDelete={() => void onRemove()} />
+      )}
       </>
       )}
 
-      {focus && (
+      {/* ★크게 보기는 **더블클릭·툴바 단추로만** 연다 (`big`) — 고르기만 한 것으로는 안 열린다 */}
+      {focus && big && (
         <Big
           url={keepUrl(base, focus)}
           name={shown[idx]?.name ?? ""}
@@ -171,7 +270,8 @@ export function Gallery() {
           file={focus}
           seed={meta?.seed}
           onRename={(name) => rename(ws, focus, name)}
-          onClose={() => void setFocus(ws, null)}
+          /* ★닫아도 `focus` 는 그대로 둔다 — 오른쪽 그림 정보는 계속 그 장을 보여 준다 */
+          onClose={() => setBig(false)}
           onPrev={idx > 0 ? () => void setFocus(ws, shown[idx - 1].file) : undefined}
           onNext={idx >= 0 && idx < shown.length - 1 ? () => void setFocus(ws, shown[idx + 1].file) : undefined}
           /* ★★**지우면 옆 그림으로 넘어간다** (사용자 지시 2026-08-25). 지울 때마다 창이
@@ -195,7 +295,7 @@ function Toolbar({
   setDest,
   onAll,
   onClear,
-  onRemove,
+  onBig,
   onMove,
 }: {
   picked: number;
@@ -207,7 +307,9 @@ function Toolbar({
   setDest: (s: string) => void;
   onAll: () => void;
   onClear: () => void;
-  onRemove: () => void;
+  /** 고른 것을 크게 본다 — ★클릭이 선택이 되면서 **크게 보는 창구가 더블클릭 하나**가 되었다.
+   *  단추로도 열 수 있어야 한다 (사용자 지시 2026-09-10) */
+  onBig: () => void;
   onMove: () => void;
 }) {
   const t = useI18n((s) => s.t);
@@ -250,6 +352,11 @@ function Toolbar({
       )}
       {picked > 0 && (
         <>
+          {/* ★표식이 크게 보기 판(`data-gallery-big`)과 겹치면 안 된다 — 점검이 단추를 보고
+              「열려 있다」로 읽는다 (2026-09-21 실측으로 밟았다) */}
+          <button data-gallery-bigview onClick={onBig} style={linkBtn}>
+            {t("gallery.bigView")}
+          </button>
           <button onClick={onClear} style={linkBtn}>
             {t("gallery.clear")}
           </button>
@@ -278,9 +385,6 @@ function Toolbar({
           </select>
           <button onClick={onMove} disabled={!dest} style={{ ...linkBtn, opacity: dest ? 1 : 0.4 }}>
             →
-          </button>
-          <button onClick={onRemove} style={{ ...linkBtn, color: "var(--err-ink)" }}>
-            {t("gallery.remove")}
           </button>
         </>
       )}
@@ -322,7 +426,10 @@ function Cell({
   name,
   starred,
   picked,
+  artists,
+  artistOn,
   onStar,
+  onPick,
   onOpen,
   onDragFiles,
 }: {
@@ -330,12 +437,26 @@ function Cell({
   name: string;
   starred: boolean;
   picked: boolean;
+  /** 칸에 적을 작가들 — 없으면 안 그린다 */
+  artists?: string[];
+  /** 골라 둔 작가 (`normTag` 를 지난 열쇠) — 이 안에 든 것만 진하게 보인다 */
+  artistOn?: Set<string>;
   onStar: () => void;
-  onOpen: (withMod: boolean) => void;
+  /** 한 번 눌렀다 — 고르기 (수식키를 함께 넘긴다) */
+  onPick: (mod: { ctrl: boolean; shift: boolean }) => void;
+  /** 두 번 눌렀다 — 크게 보기 */
+  onOpen: () => void;
   /** 끌기 시작 — 폴더 목록이 받는다 (`GalleryFolders`) */
   onDragFiles: () => string[];
 }) {
   const startDrag = useDragSource();
+  /** 작가마다 칠해 둔 색 — 작가 목록의 줄과 같은 표를 본다 (`store/ui.artistColor`) */
+  const hues = useUi((s) => s.artistColor);
+  /** ★★**더블클릭을 여기서 직접 센다** (`onDoubleClick` 을 안 쓴다). 이 칸은 끌기 출발점이라
+   *  pointerdown 에서 기본 동작을 막는데(`pointerGesture`), 그러면 브라우저의 호환 click 도
+   *  더블클릭도 오지 않는다 — 블록 줄에서 같은 이유로 이름 더블클릭이 오래 죽어 있었다
+   *  (`blocks/BlockRow.tsx`). 간격은 창 제목줄과 같은 **윈도우 기본값 500ms** 다. */
+  const lastTap = useRef(0);
   return (
     // ★★**단추가 아니라 `div` 다** (사용자 지적 2026-08-19: 갤러리 그림이 안 끌렸다).
     //   크로미움은 `<button>` 에 `draggable` 을 줘도 끌기를 시작하지 않는다 — 폼 컨트롤의
@@ -345,9 +466,12 @@ function Cell({
       role="button"
       tabIndex={0}
       onKeyDown={(e) => {
-        if (e.key === "Enter" || e.key === " ") {
+        if (e.key === "Enter") {
           e.preventDefault();
-          onOpen(e.ctrlKey || e.metaKey);
+          onOpen();                                    // 키보드로는 Enter 가 크게 보기
+        } else if (e.key === " ") {
+          e.preventDefault();
+          onPick({ ctrl: e.ctrlKey || e.metaKey, shift: e.shiftKey });
         }
       }}
       data-tip={name}
@@ -355,14 +479,22 @@ function Cell({
          ★HTML5 `draggable` 은 이 앱에서 안 된다 — Tauri 가 `dragDropEnabled` 로 드래그를
            가로채기 때문이다 (`cards/dragStore` 머리 주석). 그래서 **앱의 포인터 끌기**를 쓴다.
          ★누르기는 `onTap` 으로 받는다 — pointerdown 의 기본 동작 막기가 호환 click 을 삼킨다. */
-      onPointerDown={(e) =>
+      onPointerDown={(e) => {
+        const mod = { ctrl: e.ctrlKey || e.metaKey, shift: e.shiftKey };
         startDrag(
           e,
           { dir: "apply", kind: "keep", files: onDragFiles(), img: { ws: "", file: name, url: src } },
           undefined,
-          () => onOpen(e.ctrlKey || e.metaKey),
-        )
-      }
+          () => {
+            const now = Date.now();
+            const dbl = now - lastTap.current < 500;
+            // ★두 번째로 친 뒤에는 **셈을 지운다** — 세 번 치면 「크게 보기 → 고르기」가 되어야 한다
+            lastTap.current = dbl ? 0 : now;
+            if (dbl) onOpen();
+            else onPick(mod);
+          },
+        );
+      }}
       style={{
         // ★끌기 출발점의 공통 차림 — 네이티브 이미지 끌기·글자 선택을 원천에서 막는다.
         //   여기만 빠져 있었다 (다른 출발점은 전부 쓴다).
@@ -373,6 +505,12 @@ function Cell({
         overflow: "hidden",
         cursor: "pointer",
         background: "var(--surface2)",
+        /* ★★고른 칸은 **테두리 + 칸 전체를 덮는 옅은 강조색**이다 (사용자 지시 2026-09-10:
+           *"그냥 보라색으로 두고 선택된 이미지를 아주 얇은 보라색 오버레이를 씌워주면 어때.
+           탐색기에서 파일 선택하면 전체를 칠하듯이"*). 테두리 색만으로는 그 색이 그림에 들어
+           있을 때 묻힌다 — 면을 덮으면 **칸 전체의 색이 옮겨 가므로** 무엇을 골랐는지 멀리서도
+           읽힌다. 덮개는 아래 `pick-veil` 이다.
+           ★그림을 흐리게 하지는 않는다 (같은 날 결정) — 견주며 고르는 화면이다 (씬 줄은 흐리게 한다). */
         border: `2px solid ${picked ? "var(--accent)" : "transparent"}`,
       }}
     >
@@ -383,10 +521,75 @@ function Cell({
         decoding="async"
         style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }}
       />
+      {/* ★★고른 칸을 덮는 **옅은 강조색** (위 ★★주). `opacity` 로 태워 **테마를 그대로 따른다** —
+          밝은 테마의 강조색은 파랑이라 색을 박아 넣으면 거기서 엉뚱한 색이 뜬다.
+          ★`pointer-events: none` 이 **반드시** 있어야 한다 — 덧그림이 커서를 가로채면 그 위의
+            누름이 칸에 안 닿는다 (CLAUDE.md 「덧그림」의 그 함정). */}
+      {picked && (
+        <span
+          data-cell-veil
+          style={{ position: "absolute", inset: 0, background: "var(--accent)", opacity: 0.28,
+                   pointerEvents: "none" }}
+        />
+      )}
+      {/* ★★**작가 필터로 볼 때는 어느 작가인지 칸에 적는다** (사용자 지시 2026-09-21).
+          여럿을 켜 두면 격자가 작가별로 모여 서는데, 어느 무리를 보고 있는지 칸에 없으면
+          경계가 안 보인다.
+          ★★**한 명도 생략하지 않는다 — 한 줄에 한 명씩 세로로 쌓는다** (사용자 지시 2026-09-21).
+            한 줄에 이어 붙이면 둘째 작가부터 잘려 나가, 그 그림이 누구누구의 것인지 못 읽는다.
+            줄이는 것은 **이름 하나가 칸보다 길 때** 그 줄 안에서뿐이다.
+          ★`pointer-events: none` 이 필수다 — 덧그림이 커서를 가로채면 그 위의 누름이 칸에 안 닿는다. */}
+      {artists && artists.length > 0 && (
+        <span
+          data-cell-artists={artists.join(", ")}
+          style={{
+            position: "absolute",
+            left: 0,
+            right: 0,
+            bottom: 0,
+            display: "grid",
+            padding: "8px 4px 2px",
+            background: "linear-gradient(transparent, rgba(8,10,14,0.82) 60%)",
+            color: "rgba(255,255,255,0.92)",
+            fontSize: "var(--text-2xs)",
+            lineHeight: 1.35,
+            pointerEvents: "none",
+          }}
+        >
+          {artists.map((a) => {
+            const k = normTag(a);
+            /* ★★칠해 둔 색이 **글자 색**이다 (사용자 지시 2026-09-21) — 목록의 줄과 같은 색이라,
+               어느 작가인지 이름을 읽기 전에 색으로 먼저 알아본다 (`store/ui.artistColor`). */
+            const hue = hues[k] ? COLOR_HEX[hues[k]!] : null;
+            /* ★골라 둔 작가만 진하게 (사용자 지시 2026-09-21). 아무도 안 골랐으면 다 같은 무게다 —
+               그때는 무엇과 견줄 것이 없어서, 흐리게 해 봐야 읽기만 어렵다. */
+            const on = !artistOn?.size || artistOn.has(k);
+            return (
+              <span
+                key={a}
+                style={{
+                  overflow: "hidden",
+                  textOverflow: "ellipsis",
+                  whiteSpace: "nowrap",
+                  color: hue ?? undefined,
+                  opacity: on ? 1 : 0.5,
+                  fontWeight: on && artistOn?.size ? "var(--w-bold)" : undefined,
+                }}
+              >
+                {a}
+              </span>
+            );
+          })}
+        </span>
+      )}
       {/* ★여기서 **켜고 끈다** (페로픽스파이 `.thumb-star`). 큰 그림에는 별표를 두지 않는다 —
           견주며 고르는 일은 격자에서 일어난다. */}
       <span
         data-cell-star={name}
+        /* ★★**여기서 끌기를 시작하지 않는다** (사용자 지적 2026-09-10: *"지금 클릭하면 바로 커져서
+           별표 못누름"*). 칸의 pointerdown 이 기본 동작을 막아 이 단추의 click 을 삼키고 있었다 —
+           별표를 누르면 칸의 「누름」이 대신 먹었다. 여기서 전파를 끊으면 click 이 정상으로 온다. */
+        onPointerDown={(e) => e.stopPropagation()}
         onClick={(e) => {
           e.stopPropagation();
           onStar();
@@ -569,31 +772,11 @@ function Big({
             }
             /* ★★「보내기」에 **일괄 변환**도 둔다 (사용자 지시 2026-09-07: *"갤러리쪽 보내기도 복제, 일괄변환
                  선택하는거 띄워"*). 갈 곳이 하나(복제)뿐이면 메뉴가 안 열려 고를 수가 없었다.
-               ★보관함은 아웃풋 루트 밖이라 `rel` 로 못 싣는다 — 서버에 절대 경로를 물어 `path` 로 싣는다
-                 (`/api/keep/path`). 캔버스의 같은 단추와 같은 규칙: 목록에 더하고, 같은 파일은 안 겹친다. */
-            onConvert={async () => {
-              const r = await api<{ path: string }>("/api/keep/path", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ path: file }),
-              });
-              const had = new Set(useConvertQueue.getState().items.map((i) => i.rel ?? i.path ?? i.name));
-              if (!had.has(r.path)) useConvertQueue.getState().add([{ name: file.split("/").pop() ?? file, path: r.path }]);
-              useUi.getState().setMode("utility");
-              useUi.getState().setView("tab", "tools", "convert" as never);
-            }}
-            /* ★자동검열로 보내기 (사용자 지시 2026-09-07) — 보관함은 아웃풋 루트 밖이라 절대 경로(`path`)로 담는다 */
-            onCensor={async () => {
-              const r = await api<{ path: string }>("/api/keep/path", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ path: file }),
-              });
-              const { useCensor } = await import("../store/censor");
-              await useCensor.getState().addImages([{ name: file.split("/").pop() ?? file, path: r.path }]);
-              useCensor.getState().setTab("before");
-              useUi.getState().setMode("censor");
-            }}
+               ★몸통은 아래 빠른 줄과 **같은 함수**다 (`toConvert`·`toCensor`) — 자리마다 따로 쓰면
+                 한쪽만 고쳐진다. */
+            onConvert={() => toConvert([file])}
+            onCensor={() => toCensor([file])}
+            onEdit={() => toEdit([file])}
             /* ★★**지우는 단추가 여기 있어야 한다** (사용자 지시 2026-08-25: *"갤러리 이미지
                  보는 곳에 삭제 버튼이 없음"*). 그리드에서는 골라서 지우지만, 크게 보다가
                  「이건 아니다」 하는 자리가 바로 여기다 — 닫고 다시 골라야 했다.
@@ -690,3 +873,121 @@ const overlayBtn: React.CSSProperties = {
   color: "rgba(255,255,255,0.8)",
   fontSize: "var(--text-2xs)",
 };
+
+/** 보관함 파일들의 **절대 경로** — 보조 도구는 아웃풋 루트 기준 `rel` 을 받는데 보관함은 그
+ *  루트 밖이라 `path` 로 싣는다 (`/api/keep/path`). 크게 보기와 아래 빠른 줄이 같은 것을 쓴다. */
+async function keepPaths(files: string[]) {
+  const out: { name: string; path: string }[] = [];
+  for (const f of files) {
+    const r = await api<{ path: string }>("/api/keep/path", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ path: f }),
+    });
+    out.push({ name: f.split("/").pop() ?? f, path: r.path });
+  }
+  return out;
+}
+
+/** 「일괄 변환으로 보내기」 — 목록에 더하고 그 화면으로. 같은 파일은 안 겹친다 */
+async function toConvert(files: string[]) {
+  const items = await keepPaths(files);
+  const had = new Set(useConvertQueue.getState().items.map((i) => i.rel ?? i.path ?? i.name));
+  const fresh = items.filter((i) => !had.has(i.path));
+  if (fresh.length) useConvertQueue.getState().add(fresh);
+  useUi.getState().setMode("utility");
+  useUi.getState().setView("tab", "tools", "convert" as never);
+}
+
+/** 「자동검열로 보내기」 (사용자 지시 2026-09-07) */
+async function toCensor(files: string[]) {
+  const items = await keepPaths(files);
+  const { useCensor } = await import("../store/censor");
+  await useCensor.getState().addImages(items);
+  useCensor.getState().setTab("before");
+  useUi.getState().setMode("censor");
+}
+
+/** 「이미지 편집으로 보내기」 — 보관함 그림은 절대 경로로 넘긴다 (검열과 같다). 여러 장이면 한 문서에 전부 (사용자 지시 2026-09-22) */
+async function toEdit(files: string[]) {
+  const items = await keepPaths(files);
+  await sendToEditor(items);
+}
+
+/** 고른 그림 아래 붙는 **빠른 줄** (사용자 지시 2026-09-21: *"갤러리에서 이미지 그냥 클릭했을 때도
+ *  하단에 빠른 메뉴 뜨게"*).
+ *
+ *  ★크게 본 그림 아래 줄과 **같은 부품**이다 (`ImageActions`) — 자리마다 따로 만들면 어디서는
+ *    되고 어디서는 안 되는 상태가 생긴다.
+ *  ★여러 장을 골랐으면 `multi` 가 그 수를 받아 **여러 장에 뜻이 있는 것만** 남긴다. 한 장 전용
+ *    (프롬프트 보기·복제·i2i·인페인트·시드·폴더 열기)은 어느 장의 것인지 애매해서 스스로 빠진다.
+ *  ★크게 보기가 떠 있는 동안에는 안 그린다 — 그쪽에 이미 같은 줄이 있다. */
+function QuickBar({
+  files,
+  focus,
+  onDelete,
+}: {
+  /** 지금 고른 것 전부 */
+  files: string[];
+  /** 그중 **마지막에 누른 한 장** — 한 장 전용 단추가 이것을 본다 */
+  focus: string;
+  onDelete: () => void;
+}) {
+  const t = useI18n((s) => s.t);
+  const base = useGen((s) => s.base);
+  const meta = useGallery((s) => s.meta);
+  const metaFor = useGallery((s) => s.metaFor);
+  const loadMeta = async () =>
+    (await api<{ meta: ImageMeta | null }>(`/api/keep/meta?file=${encodeURIComponent(focus)}`)).meta;
+  /** ★설정이 없는 그림에는 복제를 안 낸다 — 눌러야 실패하는 단추를 띄우지 않는다.
+   *  스토어가 **고른 한 장의** 메타데이터를 이미 읽어 두었다 (`setFocus`). */
+  const seen = metaFor === focus ? meta : null;
+  return (
+    <div
+      data-gallery-quickbar
+      style={{
+        flexShrink: 0,
+        display: "flex",
+        alignItems: "center",
+        gap: "var(--sp-2)",
+        padding: "var(--sp-2) var(--sp-4)",
+        borderTop: "1px solid var(--line-soft)",
+        background: "var(--bg)",
+      }}
+    >
+      <ImageActions
+        url={keepUrl(base, focus)}
+        name={focus.split("/").pop() ?? focus}
+        seed={seen?.seed}
+        dims={seen?.width && seen?.height ? { w: seen.width, h: seen.height } : null}
+        loadMeta={loadMeta}
+        multi={files.length}
+        /* ★보관함 그림에는 워크스페이스 파일이 없다 — 되돌리는 창구는 「새 탭으로 복제」 하나다 */
+        hideSettings
+        onClone={
+          hasMeta(seen)
+            ? async () => {
+                const m = await loadMeta();
+                if (m) await cloneMetaToNewTab(m, focus);
+              }
+            : undefined
+        }
+        onConvert={() => toConvert(files)}
+        onCensor={() => toCensor(files)}
+        onEdit={() => toEdit(files)}
+        extra={
+          <button
+            data-gallery-quick-del
+            onClick={onDelete}
+            data-tip={t("gallery.remove")}
+            style={{ ...iconBtn, color: "var(--err-ink)" }}
+          >
+            {Icon.trash}
+          </button>
+        }
+        revealPath={focus}
+        revealApi="/api/keep/reveal"
+      />
+    </div>
+  );
+}

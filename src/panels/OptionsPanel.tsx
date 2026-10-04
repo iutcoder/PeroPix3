@@ -1,27 +1,60 @@
 import { useI18n } from "../i18n";
 import { Category } from "./Category";
-import { useEffect, useState } from "react";
-import { DEFAULT_MODEL, MODELS, NAI_MAX, SIZE_PRESETS, alignTo64, modelCaps, useGen, type GenParams } from "../store/gen";
+import { useEffect, useRef, useState } from "react";
+import { DEFAULT_MODEL, MODELS, NAI_MAX, SIZE_PRESETS, alignTo64, modelCaps, useGen, type GenParams, type ParamsHost } from "../store/gen";
 import { pushUndo } from "../lib/undo";
 import { Icon } from "../components/Icon";
 import { Ratio } from "../components/Ratio";
 import { Help } from "../components/Tip";
-import { ImageInputPanel } from "./ImageInputPanel";
+import { ImageInputPanel, INPUT_ZONE } from "./ImageInputPanel";
+import { useImageInput, type ImageInputStore } from "../store/imageInput";
+import { fitPlan, planFor } from "../lib/inference";
 import { flashStyle, useFlash, useUi } from "../store/ui";
+import { useDrag } from "../cards/dragStore";
 
 const SAMPLERS = ["k_euler_ancestral", "k_euler", "k_dpmpp_2m", "k_dpmpp_2m_sde", "k_dpmpp_2s_ancestral", "k_dpmpp_sde"];
 const SCHEDULERS = ["karras", "native", "exponential", "polyexponential"];
 /* ★프리셋 이름표(`QP_LABEL`)와 UC 프리셋 목록은 **`panels/PromptOpts`** 로 옮겼다 —
    그 컨트롤이 프롬프트 칸 하단으로 갔기 때문이다 (2026-08-23). */
 
+/** 그림을 끌기 시작하면 **접힌 이미지 입력 묶음을 잠깐 편다** (카드덱의 `cards/deckPeek` 와 같은 방식).
+ *  ★거기 놓았으면 편 채로 두고, 다른 데 놓거나 취소하면 도로 접는다. 그만둔 사람의 화면은 건드리지 않은 것과 같아야 한다.
+ *  ★묶음 안(`ImageInputPanel`)이 아니라 여기서 한다. 접힌 동안에는 안이 통째로 언마운트된다 (`Category`). */
+function useInputPeek(dragging: boolean) {
+  const peeked = useRef(false);
+  useEffect(() => {
+    const ui = useUi.getState();
+    if (dragging) {
+      // ★접힘의 처음 값은 이 묶음의 `defaultFolded` 다
+      if (ui.view.cat["opt-img"] ?? true) {
+        peeked.current = true;
+        ui.setView("cat", "opt-img", false);
+      }
+      return;
+    }
+    if (!peeked.current) return;
+    peeked.current = false;
+    if (!useDrag.getState().droppedOn?.startsWith(INPUT_ZONE)) ui.setView("cat", "opt-img", true);
+  }, [dragging]);
+}
+
 /** 우측 패널 — 생성 파라미터. */
 /** 생성 옵션 — ★**왼쪽 프롬프트 아래**에 산다 (사용자 지시 2026-08-16).
  *  오른쪽 기둥은 카드덱이 쓴다. 여기 있는 것들은 프롬프트와 함께 보면서 만지는 값이다.
  *  ★묶음마다 접힌다 — 한 기둥에 프롬프트까지 들어오므로 다 펴 두면 훑을 수가 없다.
  *    접기 단추는 따로 두지 않는다. **묶음 이름을 누르면** 접힌다. */
-export function OptionsPanel() {
-  const p = useGen((s) => s.params);
-  const set = useGen((s) => s.set);
+export function OptionsPanel({ only, host, refs }: {
+  /** 이 묶음만 — 만화 캔버스의 「공통」은 생성 옵션 하나 (해상도는 컷 모양이 정하고 저장 옵션은 생성 모드 것이다) */
+  only?: "gen";
+  /** 읽고 쓸 값. 없으면 생성 모드 것 (만화 캔버스는 자기 값을 준다) */
+  host?: ParamsHost;
+  /** `only` 일 때 「베이스 이미지」 묶음을 Vibe · Precise Reference 만으로 이 한 벌에 (만화 캔버스의 참조 그림) */
+  refs?: ImageInputStore;
+} = {}) {
+  const live = useGen((s) => s.params);
+  const setLive = useGen((s) => s.set);
+  const p = host?.params ?? live;
+  const set = host?.set ?? setLive;
   const t = useI18n((s) => s.t);
   /** 값 하나를 **되돌릴 수 있게** 바꾼다 (사용자 지시 2026-08-22:
    *  *"생성옵션 패널에 있는 숫자, 텍스트 입력은 전부 undo 리스트에 들어가야함"*).
@@ -32,6 +65,11 @@ export function OptionsPanel() {
    *  ★**이름을 함께 담는다** — 되돌린 것이 무엇인지 토스트가 말한다 (`lib/undo` 의 ★주).
    *  ★안 바뀌었으면 안 담는다. 칸만 열고 닫아도 쌓이면 `Ctrl+Z` 가 몇 번씩 헛돈다. */
   const setUndo = <K extends keyof GenParams>(k: K, v: GenParams[K], label: string) => {
+    // ★다른 값을 받았으면 여기 로그에 안 담는다. 만화 캔버스의 `Ctrl+Z` 는 캔버스 이력으로 가서 이 로그가 닿지 않는다
+    if (host) {
+      if (host.params[k] !== v) host.set(k, v);
+      return;
+    }
     const before = useGen.getState().params[k];
     if (before === v) return;
     pushUndo(label, () => useGen.getState().set(k, before));
@@ -42,6 +80,11 @@ export function OptionsPanel() {
    *  V5 는 스케줄러·Variety+ 가 아예 없다 — 서버가 무시하는 컨트롤을 남겨 두면 사용자는
    *  켰다고 믿고 결과만 다르게 나온다. 능력표는 `lib/naiModels.ts` 하나다. */
   const cap = modelCaps(p.model);
+  /** 인퍼런스가 실리면 그 참조의 크기. 해상도 목록이 결과 크기로 바뀐다 (설계 문서 3번 「해상도」) */
+  const inferSize = useImageInput((s) => s.riding().infer?.size ?? null);
+  /** 씬·큰 그림을 끌고 있다. 이미지 입력의 베이스·Inference 칸이 받는다 (`ImageInputPanel` 의 `DropSlot`) */
+  const dragImg = useDrag((s) => s.drag?.dir === "image") && !only;
+  useInputPeek(dragImg);
 
   return (
     /* ★★좌우 여백을 주지 않는다 (사용자 지적 2026-08-19) — 이 패널은 프롬프트와 **같은
@@ -119,8 +162,18 @@ export function OptionsPanel() {
         </div>
       </Category>
 
+      {/* ★만화 캔버스의 참조 그림. 그 모델이 둘 다 못 쓰면 묶음째 안 낸다 (이름표만 선 빈 칸이 된다) */}
+      {only && refs && (cap.vibe || cap.char_ref) && (
+        <Category id="opt-img" label={t("options.catImage")} defaultFolded>
+          <ImageInputPanel store={refs} model={p.model} refsOnly />
+        </Category>
+      )}
+
+      {!only && (<>
       {/* v2 의 `Vibe / Character Ref` + `Base Image` 절 */}
-      <Category id="opt-img" label={t("options.catImage")} defaultFolded flashKey="base" flashQuiet>
+      {/* ★걸린 그림을 알리는 딱지는 **생성 버튼 곁**이다 (`ImageInputBadge` → `GenerateFooter`) —
+          이 묶음은 접히면 안이 통째로 언마운트돼서, 안에 두면 접힌 동안 아무 말도 못 한다 */}
+      <Category id="opt-img" label={t("options.catImage")} defaultFolded flashKey="base" flashQuiet spot={dragImg}>
         <ImageInputPanel />
       </Category>
 
@@ -132,14 +185,17 @@ export function OptionsPanel() {
             훑을 수가 없어서 **가로·세로·정방 탭**으로 가르고, 줄마다 그 비율의 사각형을
             함께 그린다 — 숫자보다 모양이 먼저 읽힌다. */}
         <div style={{ display: "flex", flexDirection: "column", gap: "var(--sp-2)" }}>
-          <SizePicker w={p.width} h={p.height} onPick={(w, h) => { set("width", w); set("height", h); }} />
+          <SizePicker w={p.width} h={p.height} infer={inferSize} onPick={(w, h) => { set("width", w); set("height", h); }} />
           {/* ★직접 입력 — NAI 는 64 배수만 받는다. 입력을 떠날 때 올려 맞추고 그 값을 보여 준다
-              (서버도 같은 정렬을 하지만, 무엇이 갈지 지금 보여야 한다) */}
+              (서버도 같은 정렬을 하지만, 무엇이 갈지 지금 보여야 한다)
+              ★인퍼런스일 때는 없다. 결과 크기는 목록에서 고른다 (사용자 결정 2026-09-29) */}
+          {!inferSize && (
           <div style={{ display: "flex", alignItems: "center", gap: "var(--sp-2)" }}>
             <NumBox data-size="w" value={p.width} onCommit={(v) => setUndo("width", alignTo64(v), t("options.resolution"))} />
             <span style={{ color: "var(--ink-faint)", fontSize: "var(--text-2xs)" }}>×</span>
             <NumBox data-size="h" value={p.height} onCommit={(v) => setUndo("height", alignTo64(v), t("options.resolution"))} />
           </div>
+          )}
         </div>
       </Category>
 
@@ -179,7 +235,7 @@ export function OptionsPanel() {
               </Group>
         </div>
       </Category>
-
+      </>)}
     </div>
   );
 }
@@ -196,12 +252,23 @@ export function OptionsPanel() {
  *    한눈에 안 들어온다. 목록의 사각형과 **같은 방식**으로 그린다 (긴 변을 맞춘다).
  *  ★묶음(Small·Large·Wallpaper)은 지우지 않고 **줄 오른쪽에 이름으로** 남긴다 — 가르는
  *    축은 방향 하나뿐이어야 훑을 수 있다. */
-function SizePicker({ w, h, onPick }: { w: number; h: number; onPick: (w: number, h: number) => void }) {
+function SizePicker({ w, h, infer, onPick }: {
+  w: number;
+  h: number;
+  /** ★★인퍼런스 참조의 크기. 있으면 줄마다 **그 프리셋으로 나오는 결과 크기**를 보인다 (사용자 결정 2026-09-29:
+   *  넣은 참조로 제대로 뽑히는 크기를 보여 주고 그중 고르게). 고르는 값은 그대로 프리셋이다 (`lib/inference` 의 `planFor`).
+   *  ★그 참조로 못 쓰는 줄(참조가 너무 작아지는 것)은 안 보인다. 켜진 줄과 탭은 **실제로 쓰는 배치**(`fitPlan`)를 따른다 */
+  infer?: { w: number; h: number } | null;
+  onPick: (w: number, h: number) => void;
+}) {
   const t = useI18n((s) => s.t);
   const sizeLast = useUi((u) => u.sizeLast);
   const setSizeLast = useUi((u) => u.setSizeLast);
   const dirOf = (a: number, b: number): SizeDir => (a > b ? "landscape" : a === b ? "square" : "portrait");
-  const tab = dirOf(w, h);
+  const presets = SIZE_PRESETS.flatMap((g) => g.items.map(([pw, ph]) => [pw, ph] as [number, number]));
+  /** 인퍼런스가 실제로 쓰는 배치. 해상도 칸 값으로 못 쓰면 대신 고른 프리셋의 것이다 */
+  const cur = infer ? fitPlan(infer.w, infer.h, w, h, presets) : null;
+  const tab = cur ? dirOf(cur.pick[0], cur.pick[1]) : dirOf(w, h);
 
   /** 고르면 그 방향의 마지막 값으로 적어 둔다 — 탭을 오갈 때 이것이 돌아온다 */
   const pick = (pw: number, ph: number) => {
@@ -209,8 +276,23 @@ function SizePicker({ w, h, onPick }: { w: number; h: number; onPick: (w: number
     onPick(pw, ph);
   };
 
+  const seen = new Set<string>();
   const shown = SIZE_PRESETS.flatMap((g) => g.items.map((it) => ({ group: g.group, item: it })))
-    .filter((x) => dirOf(x.item[0], x.item[1]) === tab);
+    .filter((x) => dirOf(x.item[0], x.item[1]) === tab)
+    .map((x) => {
+      const plan = infer ? planFor(infer.w, infer.h, x.item[0], x.item[1]) : null;
+      return { ...x, out: plan ? ([plan.crop.w, plan.crop.h] as const) : null };
+    })
+    // ★인퍼런스면 그 참조로 못 쓰는 줄은 뺀다 (사용자 결정 2026-09-29: 참조가 640 미만이 되는 줄)
+    // ★결과 크기가 같은 줄은 한 번만 보인다. 1MP 아래 프리셋은 예산이 같아 같은 비율이면 같은 결과가 나온다
+    .filter((x) => {
+      if (!infer) return true;
+      if (!x.out) return false;
+      const key = x.out.join("x");
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: "var(--sp-2)" }}>
@@ -218,12 +300,14 @@ function SizePicker({ w, h, onPick }: { w: number; h: number; onPick: (w: number
         {(["landscape", "portrait", "square"] as const).map((d) => {
           const on = tab === d;
           const [lw, lh] = sizeLast[d] ?? DIR_FALLBACK[d];
+          // ★인퍼런스면 그 값으로 못 쓸 때 비율이 가장 가까운 쓸 수 있는 줄을 건다 (목록에 없는 값이 걸리지 않게)
+          const [tw, th] = (infer && fitPlan(infer.w, infer.h, lw, lh, presets)?.pick) || [lw, lh];
           return (
             <button
               key={d}
               data-size-tab={d}
               // ★누르는 순간 그 방향이 걸린다 — 목록은 그 결과로 따라 바뀐다
-              onClick={() => pick(lw, lh)}
+              onClick={() => pick(tw, th)}
               style={{
                 flex: 1,
                 display: "flex",
@@ -245,13 +329,22 @@ function SizePicker({ w, h, onPick }: { w: number; h: number; onPick: (w: number
           );
         })}
       </div>
+      {infer && (
+        <span data-infer-sizes style={{ fontSize: "var(--text-2xs)", color: "var(--ink-dim)" }}>
+          {t("options.inferSizes")}
+        </span>
+      )}
       <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
-        {shown.map(({ group, item: [pw, ph, star] }) => {
-          const on = w === pw && h === ph;
+        {shown.map(({ group, item: [pw, ph, star], out }) => {
+          // ★인퍼런스면 **결과 크기가 같은 줄**이 켜진다. 같은 결과로 한 줄에 합친 프리셋을 골라 두었어도 표시가 선다
+          const on = out && cur ? out[0] === cur.crop.w && out[1] === cur.crop.h : w === pw && h === ph;
+          // 보이는 크기 (인퍼런스면 결과 크기, 아니면 프리셋 그대로)
+          const [sw, sh] = out ?? [pw, ph];
           return (
             <button
               key={`${pw}x${ph}`}
               data-size-preset={`${pw}x${ph}`}
+              data-size-out={out ? `${sw}x${sh}` : undefined}
               onClick={() => pick(pw, ph)}
               style={{
                 display: "flex",
@@ -267,12 +360,13 @@ function SizePicker({ w, h, onPick }: { w: number; h: number; onPick: (w: number
               }}
             >
               <span style={{ width: 28, height: 28, display: "grid", placeItems: "center", flexShrink: 0 }}>
-                <Ratio w={pw} h={ph} max={26} on={on} />
+                <Ratio w={sw} h={sh} max={26} on={on} />
               </span>
               <span style={{ flex: 1, fontFamily: "var(--font-mono)", fontVariantNumeric: "tabular-nums" }}>
-                {pw}×{ph}
+                {sw}×{sh}
               </span>
-              {star && (
+              {/* ★「기본 요금」 표시는 프리셋 크기에 대한 것이다. 인퍼런스는 캔버스 크기로 세므로 안 붙인다 */}
+              {star && !out && (
                 <span data-tip={t("options.starHint")} style={{ display: "inline-grid", color: "var(--ink-faint)" }}>
                   {Icon.spark12}
                 </span>

@@ -68,6 +68,10 @@ export default defineConfig({
       ignored: [
         "**/webview/**", "**/src-tauri/**", "**/workspaces/**", "**/models/**", "**/gallery/**",
         "**/_tmp/**", "**/_archive/**", "**/_dist/**", "**/dist/**", "**/logs/**", "**/backend/**",
+        // ★플러그인 폴더 — 감시하면 chokidar 가 폴더마다 핸들을 쥐어 **삭제·이름 바꾸기가 거부된다**
+        //   (실측 2026-09-08: 관리 탭의 삭제가 휴지통 코드 120(DE_ACCESSDENIEDSRC)·rename 액세스 거부. Vite 를
+        //   내리면 바로 풀렸다). 백엔드가 서빙하는 자리라 Vite 가 볼 일도 없다.
+        "**/plugins/**",
       ],
     },
   },
@@ -77,5 +81,9 @@ export default defineConfig({
     //   디버깅이 필요하면 그때 켜서 한 번 빌드하면 된다 (사용자 지시 2026-08-27:
     //   *"안 쓰면 다 빼. 나중에 쓸 일 생기면 추가하면 됨"*).
     sourcemap: false,
+    /* ★★**코드는 한 덩이로 낸다** (사용자 지시 2026-09-29: 모드나 기능을 처음 쓸 때 받게 만들지 않는다).
+       순환 참조를 피하려고 쓴 `import()` 도 따로 떨어진 파일이 되어 처음 쓸 때 받아졌다 (조수 액션 · Tauri API 등 13개).
+       작업자(`new Worker`)는 따로 빌드되므로 여기에 안 걸린다. */
+    rollupOptions: { output: { inlineDynamicImports: true } },
   },
 });

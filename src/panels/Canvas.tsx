@@ -6,7 +6,7 @@ import { useWs, takesOfScene, allCells, allScenes, type ShotEnv } from "../store
 import { SceneLane, takeSrc } from "./SceneLane";
 import { useSceneFocus } from "../store/sceneFocus";
 import { runningPendingId, stepKey, useQueue } from "../store/queue";
-import { removeTakes, stepTake } from "../lib/sceneTakes";
+import { removeTakes, saveTake, stepTake } from "../lib/sceneTakes";
 import { useUi } from "../store/ui";
 import { CanvasTabs } from "./CanvasTabs";
 import { imgUrl } from "../lib/imgUrl";
@@ -18,7 +18,8 @@ import { MaskEditor } from "../components/MaskEditor";
 import { useImageInput } from "../store/imageInput";
 import { EnhanceDialog } from "./EnhanceDialog";
 import { useGallery, type ImageMeta } from "../store/gallery";
-import { usePreviews, withPreviews, isPreviewFile } from "../store/previews";
+import { droppedOf, isPreviewFile, usePreviews, withPreviews } from "../store/previews";
+import type { Dropped } from "../lib/dropImages";
 import { api } from "../lib/backend";
 import { wheelIsOver } from "../lib/wheelAt";
 import {
@@ -36,6 +37,7 @@ import { bumpZoom, setZoom, usePreviewBox } from "../store/previewBox";
 import { applyMetaParams, applyMetaVibes } from "./GalleryMeta";
 import { hasMeta } from "../lib/metaApply";
 import { CharPositioner } from "./CharPositioner";
+import { sendToEditor } from "../editor/sendTo";
 
 /** 캔버스 — 씬 세트 줄 + 씬 무대 (마스크를 칠하는 동안에는 그 자리가 편집기다).
  *
@@ -196,14 +198,25 @@ function SceneActions() {
   /** 씬을 오른쪽에 두는 모드인가 — 아래 여백이 그때만 필요하다 (반환 자리의 ★★주) */
   const vert = useUi((u) => u.laneSide === "right");
   const { base } = useGen();
-  const { current: ws, records, addRecord } = useWs();
-  const file = useSceneFocus((s) => s.file);
+  const { current: ws, records } = useWs();
+  const focused = useSceneFocus((s) => s.file);
+  /* ★★**고른 그림이 없어도 줄은 남는다** (사용자 지적 2026-10-02). 생성을 누르면 선택이 만들어지는
+     대기 칸으로 가서 그림이 비는데, 그때 이 줄이 사라지면 그만큼 큰 그림 자리가 커져 **위치 지정
+     판의 마커가 움직인 것처럼** 보였다. 비어 있는 동안은 줄을 그대로 두고 버튼만 막는다 (`inert`).
+     ★★대기 칸을 고른 동안은 **생성될 그림의 줄**이다 (사용자 지시 2026-10-02): 시드·해상도는 그 장의 값이고,
+       자동 저장을 끄고 넣었으면 「저장」 버튼까지 선다 (`Pending` 의 `seed`·`size`·`unsaved`).
+     ★대기 칸도 아니면(마지막 장을 지운 뒤 등) 마지막으로 보던 그림의 줄을 둔다. 값을 비우지 않는다 —
+       창이 좁으면 이 줄이 두 줄로 접히는데, 비우면 한 줄로 줄어 똑같이 그림 자리가 커졌다 (실측: 66px → 36px). */
+  const last = useRef<string | null>(null);
+  if (focused) last.current = focused;
+  const idle = !focused;
+  const file = focused ?? last.current ?? "";
+  const pendingId = useSceneFocus((s) => s.pending);
+  const pend = useQueue((s) => (idle && pendingId ? s.pending.find((q) => q.id === pendingId) : undefined));
   /** 지금 지우면 몇 장이 가나 — ★**구독해서 읽는다.** 씬 줄에서 고른 것이 늘고 줄면
    *  이 줄의 안내도 따라 바뀌어야 한다 (`getState()` 로만 읽으면 다시 안 그린다). */
   const picked = useSceneFocus((s) => s.picked);
   const many = picked.length;
-  /** ★다중 처리 대상 — 미저장(미리보기)은 파일이 없어 뺀다 (사용자 지시 2026-08-29) */
-  const multiFiles = picked.filter((f) => !isPreviewFile(f));
   const previews = usePreviews((s) => s.items);
   const [enhance, setEnhance] = useState<string[] | null>(null);
   /* ★★**해상도는 프리뷰가 잰 값 그대로**다 (`store/previewBox` 의 `nat`, 2026-08-25).
@@ -211,49 +224,46 @@ function SceneActions() {
      실제 크기는 하나뿐이니 재는 곳도 하나여야 한다 (사용자 지시: *"생성된 이미지 하단에
      해당 이미지의 해상도도 표기. 시드 옆에"*). */
   const nat = usePreviewBox((s) => s.nat);
-  const dims = nat.w ? nat : null;
+  const lastDims = useRef<{ w: number; h: number } | null>(null);
+  if (!idle) lastDims.current = nat.w ? nat : null;
+  // ★비어 있는 동안 미리보기는 대기 칸을 잰다 — 줄에는 생성될 그림(없으면 마지막 그림)의 값을 둔다 (위 ★★주)
+  const dims = pend ? pend.size ?? null : lastDims.current;
   const [saving, setSaving] = useState(false);
-  if (!file) return null;
 
-  /** ★★미저장 그림에도 **같은 줄**이 붙는다 (사용자 지시 2026-08-19).
+  /** ★★미저장 그림에도 **같은 줄**이 붙는다 (사용자 지시 2026-08-19 · 2026-09-30 *"자동저장을 하든
+   *  안 하든 최대한 UI 동일하게"*).
    *
-   *  예전에는 「파일로 저장 · 미리보기 지우기」 둘만 냈다. 미저장은 **아직 파일이 아닐 뿐**
-   *  같은 그림이라, 할 수 있는 일도 같아야 한다. 갈리는 것은 둘뿐이다:
-   *    · 「삭제」 자리에 **「저장」** 이 선다 (저장하면 그 줄이 그대로 「삭제」가 된다)
-   *    · 저장 안 한 동안만 **「미리보기 지우기」**가 하나 더 선다
-   *  ★서버의 파일을 다루는 것(강화·업스케일·보관·탐색기·새 탭으로 복제)은 **먼저 저장하고**
-   *    이어서 한다 (`ensureSaved`). 눌러야 실패하는 단추를 두지 않는다는 규칙 그대로다.
-   *  ★읽기만 하는 것(프롬프트 보기·설정)은 **저장하지 않는다** — 바이트를 그대로 보내
-   *    메타데이터만 읽는다 (`/api/tools/meta-upload`). 훑어보다 저장돼 버리면
-   *    「자동 저장 끄기」의 뜻이 사라진다. */
+   *  미저장은 **아직 파일이 아닐 뿐** 같은 그림이라, 할 수 있는 일도 같아야 한다. 갈리는 것은 하나뿐이다:
+   *    · 저장 안 한 동안만 **「저장」** 이 삭제 옆에 하나 더 선다
+   *  ★삭제는 같은 자리·같은 규칙이다 (`removeTakes`: 옆 장으로 넘어가고 `Ctrl+Z` 로 돌아온다).
+   *    예전에는 「삭제」 자리에 「저장」이 서고 지우개(「미리보기 지우기」)가 따로 있었는데, 지우개는
+   *    되돌릴 수 없었고 큰 자리를 비웠으며 `Del` 은 아예 안 먹었다.
+   *  ★★**저장 버튼 말고는 어디서도 저장하지 않는다** (사용자 지시 2026-09-30: *"명시적으로 저장 버튼
+   *    누른 거 아니면 전부 자동 저장되면 안 됨. 저장 없이 해당 액션이 불가능하면 비활성화"*). 예전에는 보관·
+   *    강화·복제 같은 것을 누르면 먼저 저장해서, 자동 저장을 끈 사람의 그림이 버튼 하나로 저장돼 버렸다.
+   *    · 저장 없이 되는 것은 **다 켠다** (같은 날 사용자 지시). NAI 로 보내는 것(i2i·인페인트·인핸스·업스케일)은
+   *      바이트로 돌고, 보조도구(Tagger·검열·일괄 변환·이미지 편집)는 **데이터로** 받는다 (`droppedOf`).
+   *      보관은 보관함에 데이터로 들이고, 새 탭으로 복제는 새 탭에도 **미저장으로** 옮긴다 (`cloneToNewTab`).
+   *    · 파일 자체가 있어야 하는 것(폴더 열기·별표)만 **꺼 둔다** (`ImageActions` 의 `unsaved`)
+   *  ★읽기만 하는 것(프롬프트 보기·설정)도 바이트를 그대로 보내 메타데이터만 읽는다 (`/api/tools/meta-upload`). */
   const un = previews.find((x) => x.file === file);
-  const dropPreview = () => {
-    usePreviews.getState().drop(file);
-    useSceneFocus.getState().focus(useSceneFocus.getState().cell, null);
-  };
-  const savePreview = async () => {
-    const rec = await usePreviews.getState().save(file);
-    // ★저장한 그 장을 **그대로 보고 있게** 한다 — 미리보기가 빠지면서 화면이 비면
-    //   방금 무엇을 저장했는지 알 수 없다
-    addRecord(rec);
-    useSceneFocus.getState().focus(useSceneFocus.getState().cell, rec.file);
-    return rec.file;
-  };
-  /** 파일이 있어야 하는 일 앞에 부른다. 미저장이면 저장하고 **새 경로**를 돌려준다 */
-  const ensureSaved = async (): Promise<string | null> => {
-    if (!un) return file;
+  /** 파일 자체가 있어야 하는 것(폴더 열기)을 끌지 — 여러 장이면 **하나라도** 미저장이면 끈다 */
+  const unsaved = pend ? !!pend.unsaved : many > 1 ? picked.some(isPreviewFile) : !!un;
+  /** 「저장」 버튼 — ★저장하는 **유일한** 자리다. 저장한 그 장을 그대로 보고 있게 한다 (`saveTake`) */
+  const saveNow = async () => {
     setSaving(true);
     try {
-      const f = await savePreview();
+      const f = await saveTake(file);
       toast(tr("scenes.savedToast", { name: f.split("/").pop() ?? f }));
-      return f;
     } catch (e) {
       toast(String(e), "warn");
-      return null;
     } finally {
       setSaving(false);
     }
   };
+  /** 다중 처리의 대상 — 여러 장 골랐으면 전부, 아니면 보고 있는 한 장 (사용자 지시 2026-08-29).
+   *  ★미저장이 섞여 있어도 그대로다 — 받는 쪽이 미저장을 데이터로 다룬다 (위 ★★주) */
+  const targets = (): string[] => (many > 1 ? picked : [file]);
 
   const rec = records.find((r) => r.file === file);
   /** ★미저장이면 **바이트를 보내** 읽는다 — 저장하지 않는다 (위 주석) */
@@ -292,11 +302,13 @@ function SceneActions() {
     /* ★여러 장 골랐으면 **한 새 탭의 같은 씬**에 테이크로 쌓인다 (사용자 지시 2026-08-29).
        구조·설정은 첫 장이 세운다 — 메타데이터 적용(apply)은 보는 장과 첫 장이 다를 수 있어
        건너뛴다 (환경 스냅샷이 있는 그림은 그것으로 충분하다). */
-    if (multiFiles.length > 1) {
+    if (many > 1) {
       try {
-        const landed = await useWs.getState().cloneToNewTab(multiFiles[0], {
+        const files = targets();
+        if (!files.length) return;
+        const landed = await useWs.getState().cloneToNewTab(files[0], {
           excludeNo: useGen.getState().params.exclude_slot_number,
-          extraFiles: multiFiles.slice(1),
+          extraFiles: files.slice(1),
         });
         if (!landed) return;
         useSceneFocus.getState().focus(landed.cell, landed.file);
@@ -308,10 +320,7 @@ function SceneActions() {
     }
     try {
       const m = await loadMeta().catch(() => null);
-      // ★구조는 **레코드**에서 온다 — 미저장이면 먼저 파일로 남겨야 그 자리가 생긴다
-      const target = await ensureSaved();
-      if (!target) return;
-      const landed = await useWs.getState().cloneToNewTab(target, {
+      const landed = await useWs.getState().cloneToNewTab(file, {
         excludeNo: useGen.getState().params.exclude_slot_number,
         apply: hasMeta(m)
           ? () => {
@@ -335,17 +344,26 @@ function SceneActions() {
        버튼들이 하단 모드랑 딱 붙어 있음"*). 아래 모드에서는 이 줄 밑에 **씬 줄**이 이어져
        그것이 간격 노릇을 하는데, 세로 모드에서는 씬이 오른쪽으로 가 버려 이 줄이 곧
        하단바와 맞닿는다. 아래를 0 으로 둔 것은 그 전제 위의 값이었다. */
-    <div style={{ flexShrink: 0, padding: vert ? "var(--sp-3) var(--sp-4)" : "var(--sp-3) var(--sp-4) 0" }}>
+    <div
+      data-scene-actions={idle ? "idle" : "on"}
+      inert={idle}
+      style={{
+        flexShrink: 0,
+        padding: vert ? "var(--sp-3) var(--sp-4)" : "var(--sp-3) var(--sp-4) 0",
+        opacity: idle ? 0.4 : 1,
+      }}
+    >
       <ImageActions
         url={un ? `data:image/${un.preview.fmt};base64,${un.preview.b64}` : imgUrl(base, ws, file, rec?.ts)}
-        name={un ? tr("scenes.unsaved") : file.split("/").pop() ?? file}
-        seed={(un ?? rec)?.seed ?? 0}
+        name={pend ? (pend.unsaved ? tr("scenes.unsaved") : "") : un ? tr("scenes.unsaved") : file.split("/").pop() ?? file}
+        seed={pend ? pend.seed : (un ?? rec)?.seed ?? 0}
         loadMeta={loadMeta}
         /* ★설정 불러오기도 **그때 구조**를 쓴다 (사용자 지적 2026-08-19: 블록이 한 뭉텅이로 왔다).
            미저장 그림에는 레코드가 없어 스냅샷도 없다 — 그때는 메타데이터로 떨어진다. */
         loadEnv={
           un
-            ? undefined
+            ? // ★미저장은 뽑을 때의 구조를 메모리에 들고 있다 (`PreviewTake.env`) — 저장된 그림과 같게 쓴다
+              async () => (un.env as ShotEnv | null | undefined) ?? null
             : async () =>
                 (
                   await api<{ env: ShotEnv | null }>(
@@ -355,10 +373,13 @@ function SceneActions() {
         }
         /* ★★베이스 이미지도 **그때 것**을 되살린다 (사용자 지시 2026-08-22). 그림에는 안 남고
              보낸 페이로드 기록에만 있다 (`GalleryMeta` 의 `applyRecordedBase` ★주).
-           ★미저장 그림에는 레코드가 없어 가져올 것도 없다 — `loadEnv` 와 같은 규칙이다. */
+           ★미저장 그림은 i2i 베이스를 안 들고 있다 (생성 응답에 페이로드가 안 실린다) — 인퍼런스만
+             들고 있어 그것만 되살린다 (서버 `gallery_base` 와 같은 모양). 없으면 베이스를 건드리지 않는다. */
         loadBase={
           un
-            ? undefined
+            ? (un.inference as { image?: string } | null | undefined)?.image
+              ? async () => ({ image: "", inference: un.inference as { image?: string; name?: string; pick?: number[]; aux?: string | null } })
+              : undefined
             : async () =>
                 await api<{ image?: string }>(
                   `/api/workspaces/${encodeURIComponent(ws)}/base?file=${encodeURIComponent(file)}`,
@@ -368,23 +389,18 @@ function SceneActions() {
         /* ★배율 조절 — 그림 위 겹침에서 이 줄의 **오른쪽**으로 (`ViewZoom` 머리 주석) */
         right={<ViewZoom />}
         dims={dims}
-        /* ★미저장이면 누를 때 저장하고 그 경로로 연다 (`revealPath` 는 함수도 받는다) */
-        revealPath={un ? async () => { const f = await ensureSaved(); return f && `${ws}/${f}`; } : `${ws}/${file}`}
-        ensureFile={un ? ensureSaved : undefined}
+        revealPath={`${ws}/${file}`}
         /* ★여러 장 골랐으면 **전부** (사용자 지시 2026-08-29) — 인핸스 대화상자는 원래 배치다 */
-        onEnhance={async () => {
-          if (multiFiles.length > 1) return setEnhance(multiFiles);
-          const f = await ensureSaved();
-          if (f) setEnhance([f]);
-        }}
-        upscale={{ ws, file, files: multiFiles.length > 1 ? multiFiles : undefined }}
-        multi={multiFiles.length}
+        onEnhance={() => setEnhance(many > 1 ? picked : [file])}
+        upscale={{ ws, file, files: many > 1 ? picked : undefined }}
+        unsaved={unsaved}
+        multi={many}
         onKeep={async () => {
           /* ★누르면 언제나 보관이다 — 무르기(토글)는 걷어냈다 (사용자 결정 2026-08-29:
              *"넣기가 빼기로 변하는 게 비직관적"*). 여러 장 골랐으면 전부 보관한다.
              보관한 뒤에는 갤러리로 데려간다 — 일괄 변환 보내기와 같은 어법. */
           try {
-            const files = multiFiles.length > 1 ? multiFiles : [await ensureSaved()].filter((x): x is string => !!x);
+            const files = targets();
             if (!files.length) return;
             // ★갤러리에서 고른 폴더로 (`BottomNav` 의 ★★주와 같은 규칙)
             const folder = useGallery.getState().folder;
@@ -403,12 +419,11 @@ function SceneActions() {
            ★메타 제거 여부는 변환 도구의 체크가 정한다 (설정이 저장되므로 한 번 켜면 유지). */
         onConvert={async () => {
           // ★여러 장 골랐으면 전부 싣는다 (사용자 지시 2026-08-29)
-          const files = multiFiles.length > 1 ? multiFiles : [await ensureSaved()].filter((x): x is string => !!x);
+          const files = targets();
           if (!files.length) return;
-          const had = new Set(useConvertQueue.getState().items.map((i) => i.rel ?? i.path ?? i.name));
-          const add = files
-            .map((f) => ({ name: f.split("/").pop() ?? f, rel: `${ws}/${f}` }))
-            .filter((i) => !had.has(i.rel));
+          const key = (i: Dropped) => i.rel ?? i.path ?? i.name;
+          const had = new Set(useConvertQueue.getState().items.map(key));
+          const add = files.map((f) => droppedOf(ws, f)).filter((i) => !had.has(key(i)));
           if (add.length) useConvertQueue.getState().add(add);
           useUi.getState().setMode("utility");
           useUi.getState().setView("tab", "tools", "convert" as never);
@@ -417,55 +432,56 @@ function SceneActions() {
            워크스페이스 이름을 앞에 붙인다 (`appActions` 의 censor_add 와 같은 규칙). 같은 장은
            `addImages` 가 걸러 준다. 담은 뒤 검열 화면의 「검열 전」 탭으로 데려간다. */
         onCensor={async () => {
-          const files = multiFiles.length > 1 ? multiFiles : [await ensureSaved()].filter((x): x is string => !!x);
+          const files = targets();
           if (!files.length) return;
           const { useCensor } = await import("../store/censor");
-          await useCensor.getState().addImages(files.map((f) => ({ name: f.split("/").pop() ?? f, rel: `${ws}/${f}` })));
+          await useCensor.getState().addImages(files.map((f) => droppedOf(ws, f)));
           useCensor.getState().setTab("before");
           useUi.getState().setMode("censor");
         }}
+        /* ★이미지 편집으로 보내기 (사용자 지시 2026-09-22) — 검열과 같은 `rel`(아웃풋 루트 기준). 여러 장이면 전부.
+           열린 문서가 있으면 편집기가 한 번 묻는다 (새 문서 / 레이어로 추가). */
+        onEdit={async () => {
+          const files = targets();
+          if (!files.length) return;
+          await sendToEditor(files.map((f) => droppedOf(ws, f)));
+        }}
         extra={
           <>
-            {/* ★미저장이면 「삭제」 자리에 **「저장」** — 저장하면 이 줄이 그대로 「삭제」가 된다 */}
-            {un ? (
+            <button
+              data-scene-delete
+              /* ★★**여러 장 골랐으면 전부 지운다** (사용자 지시 2026-08-22).
+                   씬 줄의 「숨김」 단추를 걷은 자리가 여기다 — 지우는 창구를 하나로 모은다.
+                 ★★`Del` 키와 **같은 규칙**으로 옆 장을 고른다 (`lib/sceneTakes.removeTakes`).
+                   전에는 여기서만 `null` 로 비워서, 단추로 지우면 큰 자리가 텅 비었다
+                   (사용자 지적 2026-08-21). 규칙은 한 곳에만 둔다.
+                 ★★미저장도 **같은 단추**다 (위 `un` 의 ★★주) — 미저장은 휴지통이 아니라 메모리에서
+                   빠지므로 한 장일 때만 툴팁이 다르다. */
+              onClick={() => removeTakes()}
+              /* ★★**문구를 코드에서 잇지 않는다** (사용자 지적 2026-08-26: *"코드에서 조합하는
+                   툴팁이 존재해? 그럼 언어 대응이 안 되는 거 아니야?"*). 조각은 번역돼도
+                   **잇는 기호와 어순은 코드에 박혀** 언어를 안 탄다. 갈래마다 열쇠 하나씩이다. */
+              data-tip={
+                many > 1
+                  ? tr("canvas.hideManyHint", { n: many })
+                  : un
+                    ? tr("scenes.dropPreview")
+                    : tr("canvas.hideHint")
+              }
+              style={{ ...rowBtn, color: "var(--err-ink)", minWidth: 28, justifyContent: "center" }}
+            >
+              {Icon.trash}
+            </button>
+            {/* ★저장 안 한 동안만 — 저장하면 이 단추만 사라지고 줄은 그대로다 */}
+            {(pend ? pend.unsaved : un) && (
               <button
                 data-save-preview
                 disabled={saving}
-                onClick={() => void ensureSaved()}
+                onClick={() => void saveNow()}
                 data-tip={tr("scenes.saveToFile")}
                 style={{ ...rowBtn, color: "var(--warn)", minWidth: 28, justifyContent: "center" }}
               >
                 {Icon.save}
-              </button>
-            ) : (
-              <button
-                data-scene-delete
-                /* ★★**여러 장 골랐으면 전부 지운다** (사용자 지시 2026-08-22).
-                     씬 줄의 「숨김」 단추를 걷은 자리가 여기다 — 지우는 창구를 하나로 모은다.
-                   ★★`Del` 키와 **같은 규칙**으로 옆 장을 고른다 (`lib/sceneTakes.removeTakes`).
-                     전에는 여기서만 `null` 로 비워서, 단추로 지우면 큰 자리가 텅 비었다
-                     (사용자 지적 2026-08-21). 규칙은 한 곳에만 둔다. */
-                onClick={() => removeTakes()}
-                /* ★★**문구를 코드에서 잇지 않는다** (사용자 지적 2026-08-26: *"코드에서 조합하는
-                     툴팁이 존재해? 그럼 언어 대응이 안 되는 거 아니야?"*). 조각은 번역돼도
-                     **잇는 기호와 어순은 코드에 박혀** 언어를 안 탄다. 갈래마다 열쇠 하나씩이다. */
-                data-tip={many > 1 ? tr("canvas.hideManyHint", { n: many }) : tr("canvas.hideHint")}
-                style={{ ...rowBtn, color: "var(--err-ink)", minWidth: 28, justifyContent: "center" }}
-              >
-                {Icon.trash}
-              </button>
-            )}
-            {/* 저장 안 한 동안만 — 파일이 아니라 **화면의 미리보기**를 버린다.
-                ★지우개다 — 파일을 지우는 휴지통과 **다른 일**이라 모양도 달라야 한다
-                  (v2 도 「미리보기 지우기」에 지우개를 썼다) */}
-            {un && (
-              <button
-                data-drop-preview
-                onClick={dropPreview}
-                data-tip={tr("scenes.dropPreview")}
-                style={{ ...rowBtn, minWidth: 28, justifyContent: "center" }}
-              >
-                {Icon.eraser}
               </button>
             )}
           </>
@@ -613,6 +629,11 @@ function ScenePreview() {
   const stepImg = useQueue((q) => (cell ? (q.steps[stepKey(ws, cell)] ?? "") : ""));
   /** 지금 그리고 있는 대기 칸 — 씬 줄과 **같은 답**을 본다 (`store/queue.runningPendingId`) */
   const runId = useQueue(() => runningPendingId(activeSceneGroup()?.id));
+  /** ★★그리는 중인 그림의 **완성 크기** (사용자 지적 2026-10-02: 배율을 걸어 두면 스트리밍 그림이 다 된 뒤와
+   *  다른 크기로 보였다). NAI 의 중간 그림은 완성본보다 작을 수 있어(`imgutil.preview_jpeg` 의 ★주), 그 픽셀 크기에
+   *  배율을 곱하면 같은 100% 가 더 작게 그려진다. 대기 칸에 적어 둔 결과 크기(`Pending.size`)를 기준으로 잰다.
+   *  ★적어 둔 것이 없으면(재연결로 되살린 칸) 그림의 크기 그대로다. */
+  const stepSize = useQueue((q) => q.pending.find((x) => x.id === (pendingSel ?? runId))?.size);
   const previews = usePreviews((s) => s.items);
 
   /* ★캐릭터 배치 — 큰 그림 위에 판을 겹친다 (`CharPositioner` 머리 주석).
@@ -805,7 +826,8 @@ function ScenePreview() {
           /* ★★큰 그림도 **끌면 카드 커버**가 된다 (덱·손패·프롬프트 배너가 받는다).
                싱글 캔버스를 걷을 때 이 출발점이 씬 칸의 것과 함께 사라져 있었다
                (사용자 지적 2026-08-18). 고스트는 `DragLayer` 가 작게 그리므로 화면을 안 가린다.
-             ★미저장은 못 끈다 — 파일이 없어 커버로 쓸 수 없다 (받는 쪽이 경로를 쓴다). */
+             ★미저장은 이미지 입력 칸으로만 끈다 (`kind: "imageInput"`) — 파일이 없어 커버로 쓸 수 없다
+               (받는 쪽이 경로를 쓴다). 베이스·Inference 는 바이트를 그대로 받는다. */
           onPointerMove={panMove}
           onPointerUp={panUp}
           onPointerDown={
@@ -814,13 +836,11 @@ function ScenePreview() {
                  커버로 끌기는 「꽉차게」에서 그대로 살아 있다. */
             movable
               ? panDown
-              : cur?.preview
-              ? undefined
               : (e) =>
                   startDrag(e, {
                     dir: "image",
-                    kind: "image",
-                    img: { ws, file, url: cur ? takeSrc(cur, base, ws, true) : imgUrl(base, ws, file) },
+                    kind: cur?.preview ? "imageInput" : "image",
+                    img: { ws, file, url: cur ? takeSrc(cur, base, ws, true) : imgUrl(base, ws, file), v: cur?.ts },
                   })
           }
           onLoad={(e) => {
@@ -832,9 +852,9 @@ function ScenePreview() {
                직접 주고 왼쪽 위에서 밀어 놓는다 — 그래야 넘치는 만큼을 끌어 볼 수 있다. */
             ...geom,
             borderRadius: "var(--r-1)",
-            // ★끌어 볼 수 있으면 그 커서다. 아니면 **카드 커버로 끄는** 출발점 그대로
-            cursor: movable ? (drag.current ? "grabbing" : "move") : cur?.preview ? undefined : "grab",
-            ...(cur?.preview || movable ? null : dragSourceStyle),
+            // ★끌어 볼 수 있으면 그 커서다. 아니면 **카드 커버·이미지 입력으로 끄는** 출발점 그대로
+            cursor: movable ? (drag.current ? "grabbing" : "move") : "grab",
+            ...(movable ? null : dragSourceStyle),
           }}
         />
       ) : (!pendingSel || pendingSel === runId) && stepImg ? (
@@ -859,7 +879,7 @@ function ScenePreview() {
           /* ★크기를 여기서도 잰다 — 배율·가운데 잡기가 **그림의 실제 크기**를 안다는 전제로
              돌아간다. 같은 값이면 스토어가 무시하므로 프레임마다 다시 그리지 않는다
              (`store/previewBox` 의 `setNat`). */
-          onLoad={(e) => setNat({ w: e.currentTarget.naturalWidth, h: e.currentTarget.naturalHeight })}
+          onLoad={(e) => setNat(stepSize ?? { w: e.currentTarget.naturalWidth, h: e.currentTarget.naturalHeight })}
           onPointerMove={panMove}
           onPointerUp={panUp}
           onPointerDown={movable ? panDown : undefined}

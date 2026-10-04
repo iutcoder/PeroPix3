@@ -1,16 +1,25 @@
 import { create } from "zustand";
+
+/** 플러그인 캔버스의 프레임 하나 — 자리·크기(캔버스 좌표), 접힘, 앞뒤 차례(`z` 가 클수록 앞) */
+export type PluginFrame = { x: number; y: number; w: number; h: number; fold?: boolean; z: number };
 import { PICK_DROP, type MetaPick } from "../lib/metaApply";
+import { COLORS, type BlockColor } from "../lib/blocks";
+import { normTag } from "../lib/tagSearch";
 import { useEffect, useRef } from "react";
 
 /** 모드 = 하단 네비의 자리. v2.x 의 모드 전환이 여기로 온다.
  *  싱글·세트는 모드가 아니라 캔버스 탭이므로 여기 없다. */
-export type ModeId = "generate" | "gallery" | "censor" | "utility";
+export type ModeId = "generate" | "gallery" | "censor" | "editor" | "utility" | "plugins";
 
 export const MODES: { id: ModeId; label: string; color: string }[] = [
   { id: "generate", label: "생성", color: "var(--mode-single)" },
   { id: "gallery", label: "갤러리", color: "var(--mode-gallery)" },
   { id: "censor", label: "자동검열", color: "var(--mode-censor)" },
+  // ★이미지 편집 — 레이어·브러시·변형·보정 (사용자 지시 2026-09-22, `src/editor/`). 자동검열과 보조 도구 사이
+  { id: "editor", label: "이미지 편집", color: "var(--mode-editor)" },
   { id: "utility", label: "보조 도구", color: "var(--mode-utility)" },
+  // ★플러그인 — 설치된 플러그인의 캔버스 + 관리 (사용자 제안 2026-09-07, `docs/plugin-design.md`)
+  { id: "plugins", label: "플러그인", color: "var(--mode-plugins)" },
 ];
 
 const KEY = "peropix.ui";
@@ -79,6 +88,24 @@ type Persisted = {
   laneHeadW: number;
   /** 씬 칸 높이 — 사용자가 손잡이로 정한다 */
   laneHeight: number;
+  /** 갤러리 좌 패널에서 **작가 필터가 쓰는 높이**(px). 폴더 목록과의 경계를 끌어 바꾼다.
+   *  ★작가 목록이 길어 폴더 목록을 밀어 버렸다 (사용자 지적 2026-09-21) — 어느 쪽을 넓게
+   *    볼지는 그때그때 다르므로 값 하나로 두고 사람이 정한다. */
+  artistH: number;
+  /** 작가 필터를 **펼쳐 두었나** (사용자 지시 2026-09-21: 다시 켜도 펼친 채로).
+   *  ★여기 사는 이유: 패널 접힘은 화면 상태라 저장하는 자리가 여기다 (`leftCollapsed`·`view.fold`
+   *    와 같은 갈래). 갤러리 저장소에 두면 앱을 켤 때마다 접힌 채로 시작한다.
+   *  ★펼칠 때 색인을 훑는 일은 그대로 갤러리 저장소가 한다 (`rescanArtists`). */
+  artistOpen: boolean;
+  /** 작가마다 칠해 둔 색 — 열쇠는 `normTag` 를 지난 태그다 (사용자 지시 2026-09-21).
+   *  ★색은 **블록과 같은 일곱 가지**다 (`lib/blocks` 의 `COLORS`) — 같은 점을 누르는 조작이라
+   *    고를 수 있는 색이 다르면 같은 장치로 안 읽힌다.
+   *  ★색이 없는 작가는 표에 아예 없다 (`null` 로 두면 표가 지운 작가로 계속 부푼다).
+   *  ★보관함은 워크스페이스와 별개이므로 이 색도 앱 전체에 하나다. */
+  artistColor: Record<string, BlockColor>;
+  /** 작가를 골라 두지 않았어도 **칸마다 그 그림의 작가를 전부 적는다** (사용자 지시 2026-09-21).
+   *  ★골라 둔 작가가 있으면 그것만 진하게 보이고 나머지는 흐려진다 (`panels/Gallery` 의 `Cell`). */
+  artistAlways: boolean;
   /** 생성 화면을 끄고 **슬롯만 모아 본다** — 선별 뒤 확인용 (사용자 결정 2026-08-04) */
   curated: boolean;
   /** ★슬롯당 몇 장 만드나 (페로픽스파이 `countPerSlot`). 한 번에 여러 장을 뽑아
@@ -86,7 +113,8 @@ type Persisted = {
   perSlot: number;
   /** ★★**조수의 작업을 자동 승인한다** (사용자 결정 2026-08-24).
    *
-   *  켜면 승인 카드를 안 띄우고 바로 실행한다. 끄면(기본) 되돌릴 수 있는 일까지 전부 묻는다.
+   *  켜면(기본, 2026-09-07 부터) 승인 카드를 안 띄우고 바로 실행한다. 끄면 되돌릴 수 있는
+   *  일까지 전부 묻는다.
    *  ★칸이 **둘인** 까닭: 이 앱에는 되돌릴 수 있는 것과 없는 것이 섞여 있다. 일상 작업은
    *    안 끊기게 하되 정말 위험한 것만 남기려면 아래 `agentAskHard` 가 함께 있어야 한다. */
   agentAuto: boolean;
@@ -156,6 +184,34 @@ type Persisted = {
    *  탭을 누르면 목록만 갈리는 게 아니라 **그 크기가 바로 걸린다** — 세로로 뽑다가
    *  가로로 옮길 때 목록에서 한 번 더 고르지 않아도 된다. */
   sizeLast: Record<"landscape" | "portrait" | "square", [number, number]>;
+  /** ★이미지 편집의 **저장 설정** (사용자 지시 2026-09-22) — 자리 세 갈래(일괄 변환·검열과 같다)와 형식(PNG·WebP 무손실).
+   *  일괄 변환의 `convertLast` 와 같은 사정: 열 때마다 기본값이면 매번 다시 맞춘다. */
+  editLast: { mode: "overwrite" | "sub" | "folder"; dest: string; fmt: "png" | "webp" };
+  /** 이미지 편집의 붓 — **브러시와 지우개가 따로** 기억된다 (사용자 지시 2026-09-22). 크기·경도·불투명도, 브러시는 색까지.
+   *  페인트통은 허용치만 제 것이고 색은 브러시의 것을 쓴다 (전경색 하나) */
+  editorBrush: {
+    brush: { size: number; hard: number; opacity: number; color: string };
+    eraser: { size: number; hard: number; opacity: number };
+    bucket: { tolerance: number };
+  };
+  /** 이미지 편집 글자 도구의 마지막 글꼴·크기·색·굵기·정렬 — 새 글자 레이어의 기본값 (`editor/model` 의 `TextStyle`) */
+  editorText: { font: string; size: number; color: string; bold: boolean; align: "left" | "center" | "right" };
+  /** 만화 페이지 말풍선 도구의 마지막 값 — 새 말풍선의 기본값 (`editor/comic` 의 `BubbleMeta`) */
+  editorBubble: {
+    kind: "speech" | "narration" | "shout" | "thought" | "whisper" | "wavy" | "phone";
+    font: string; size: number; color: string; bold: boolean; vertical: boolean;
+    pad: number; lineGap: number; stroke: number; line: string; fill: string;
+  };
+  /** 만화 페이지 효과음 도구의 마지막 값 — 새 효과음의 스타일·크기(A4 보통 폭 기준)·글, 문구 모음의 분류·언어 (`editor/sfx`) */
+  editorSfx: {
+    style: "impact" | "speed" | "shake" | "sweet" | "horror";
+    size: number; text: string;
+    cat: "general" | "action" | "emotion" | "adult" | "mine";
+    lang: "ko" | "ja" | "en";
+  };
+  /** 이미지 편집의 **캔버스 밖 배경** — `dark`·`light`·`checker` 또는 `#rrggbb`. 투명 그림을 열면 안팎이 같은 색이라
+   *  영역이 안 보이므로 바깥만 따로 바꾼다. 문서가 아니라 보기 설정이라 여기 산다 (사용자 지시 2026-09-22) */
+  editorBg: string;
   /** ★★씬 줄을 **어디에 두나** (사용자 지시 2026-08-22).
    *
    *  `bottom` 은 지금까지의 모습 — 큰 그림 아래에 가로로 눕는다.
@@ -180,6 +236,13 @@ type Persisted = {
     fold: Record<string, boolean>;
     /** 섹션마다 `Prompt` 를 보고 있나 `Undesired Content` 를 보고 있나 */
     tab: Record<string, "p" | "u">;
+    /** 플러그인 캔버스에서 **꺼내 두지 않은** 플러그인 (열쇠 = 플러그인 id). 설치하면 기본은 캔버스에 있고, 프레임의 × 로
+     *  닫고 패널의 + 로 다시 꺼낸다 (2026-09-08 탭 → 2026-09-09 캔버스). 관리의 켜기/끄기와 다르다 — 프레임만 없을 뿐 플러그인은 돈다. */
+    hide: Record<string, boolean>;
+    /** 플러그인 캔버스의 **프레임** — 자리·크기·접힘·앞뒤 (열쇠 = 플러그인 id). 캔버스 좌표(배율 1 기준) */
+    frame: Record<string, PluginFrame>;
+    /** 플러그인 캔버스의 화면 이동·배율 (열쇠 = "plugins") */
+    pan: Record<string, { x: number; y: number; z: number }>;
   };
   /** 세로 모드일 때 씬 쪽의 폭 (`bottom` 일 때의 `laneHeight` 에 해당) */
   laneWidth: number;
@@ -202,9 +265,14 @@ const DEFAULTS: Persisted = {
   laneSize: 96,
   laneHeadW: 286,
   laneHeight: 302,
+  artistH: 240,
+  artistOpen: false,
+  artistColor: {},
+  artistAlways: false,
   curated: false,
   perSlot: 1,
-  agentAuto: false,
+  // ★★기본 켬 (사용자 결정 2026-09-07: 자유도 우선, `CLAUDE.md`). 되돌릴 수 없는 것만 묻는다.
+  agentAuto: true,
   agentAskHard: true,
   notifyDone: true,
   notifySound: false,
@@ -225,10 +293,16 @@ const DEFAULTS: Persisted = {
                  mode: "sub", dest: "" },
   // 기본은 각 방향의 기본 해상도 (`SIZE_PRESETS` 의 ✦ 표시)
   sizeLast: { landscape: [1216, 832], portrait: [832, 1216], square: [1024, 1024] },
+  editLast: { mode: "sub", dest: "", fmt: "png" },
+  editorBrush: { brush: { size: 24, hard: 0.8, opacity: 100, color: "#ff5a6e" }, eraser: { size: 40, hard: 0.8, opacity: 100 }, bucket: { tolerance: 32 } },
+  editorText: { font: FONTS[0].stack, size: 48, color: "#ffffff", bold: false, align: "left" },
+  editorBubble: { kind: "speech", font: FONTS[0].stack, size: 40, color: "#111111", bold: false, vertical: false, pad: 18, lineGap: 1.25, stroke: 2.5, line: "#111111", fill: "#ffffff" },
+  editorSfx: { style: "impact", size: 150, text: "쾅", cat: "general", lang: "ko" },
+  editorBg: "dark",
   laneSide: "bottom",
   laneWidth: 420,
   laneHeadH: 132,
-  view: { cat: {}, fold: {}, tab: {} },
+  view: { cat: {}, fold: {}, tab: {}, hide: {}, frame: {}, pan: {} },
 };
 
 export const COLS_MIN = 1;
@@ -244,10 +318,18 @@ function load(): Persisted {
       for (const k of ["leftWidth", "rightWidth"] as const) {
         if (typeof got[k] === "number") got[k] = widths(got[k]);
       }
-      // ★접힘도 같은 길을 밟는다 — 불리언 하나였던 저장본을 모드마다 그 값으로 채운다
+      // ★접힘도 같은 경로를 지난다 — 불리언 하나였던 저장본을 모드마다 그 값으로 채운다
       for (const k of ["leftCollapsed", "rightCollapsed"] as const) {
         if (typeof got[k] === "boolean") got[k] = folds(got[k]);
       }
+      // ★모드가 늘면(플러그인, 2026-09-07) 옛 저장본의 표에 그 칸이 없다 — 기본값으로 채운다
+      for (const k of ["leftWidth", "rightWidth", "leftCollapsed", "rightCollapsed"] as const) {
+        if (got[k] && typeof got[k] === "object") got[k] = { ...DEFAULTS[k], ...got[k] };
+      }
+      // ★작업 상태의 칸이 늘면(`hide`, 2026-09-08) 옛 저장본에 그 칸이 없다 — 빈 표로 채운다
+      if (got.view && typeof got.view === "object") got.view = { ...DEFAULTS.view, ...got.view };
+      // ★붓에 도구가 늘면(페인트통, 2026-09-22) 옛 저장본에 그 칸이 없다 — 기본값으로 채운다
+      if (got.editorBrush && typeof got.editorBrush === "object") got.editorBrush = { ...DEFAULTS.editorBrush, ...got.editorBrush };
       return { ...DEFAULTS, ...got };
     }
   } catch {}
@@ -268,6 +350,11 @@ type S = Persisted & {
   setLaneSize: (n: number) => void;
   setLaneHeadW: (n: number) => void;
   setLaneHeight: (n: number) => void;
+  setArtistH: (n: number) => void;
+  /** 작가의 색을 **다음 색으로 돌린다** — 블록 머리의 색 점과 같은 조작이다 */
+  cycleArtistColor: (tag: string) => void;
+  setArtistAlways: (v: boolean) => void;
+  setArtistOpen: (v: boolean) => void;
   setLeftWidth: (w: number) => void;
   setAiWidth: (w: number) => void;
   toggleAi: () => void;
@@ -291,6 +378,12 @@ type S = Persisted & {
   setMaskBrush: (v: number) => void;
   /** 일괄 변환의 마지막 설정을 얹는다 (한 칸씩 바뀐다) */
   setConvertLast: (v: Partial<Persisted["convertLast"]>) => void;
+  setEditLast: (v: Partial<Persisted["editLast"]>) => void;
+  setEditorBrush: (which: "brush" | "eraser" | "bucket", v: Partial<Persisted["editorBrush"]["brush"] & Persisted["editorBrush"]["bucket"]>) => void;
+  setEditorText: (v: Partial<Persisted["editorText"]>) => void;
+  setEditorBubble: (v: Partial<Persisted["editorBubble"]>) => void;
+  setEditorSfx: (v: Partial<Persisted["editorSfx"]>) => void;
+  setEditorBg: (v: string) => void;
   setStreamPreview: (v: boolean) => void;
   setFocusNewPending: (v: boolean) => void;
   /** 그 방향에서 마지막에 고른 크기를 적어 둔다 */
@@ -357,6 +450,28 @@ export const useUi = create<S>((set, get) => ({
   setLaneSize: (n) => set({ laneSize: Math.min(LANE_MAX, Math.max(LANE_MIN, Math.round(n))) }),
   setLaneHeadW: (n) => set({ laneHeadW: Math.min(HEAD_MAX, Math.max(HEAD_MIN, Math.round(n))) }),
   setLaneHeight: (n) => set({ laneHeight: Math.max(84, Math.round(n)) }),
+  // ★아래로는 머리 한 줄, 위로는 패널을 다 먹지 않을 만큼만
+  setArtistH: (n) => set({ artistH: Math.min(720, Math.max(96, Math.round(n))) }),
+  /* ★차례는 블록과 같다 (`COLORS` 의 맨 앞이 「색 없음」) — 한 바퀴 돌면 다시 없어진다.
+     ★색을 벗기면 **표에서 뺀다.** `null` 로 남기면 한 번 눌러 본 작가가 영영 쌓인다. */
+  cycleArtistColor: (tag) => {
+    const key = normTag(tag);
+    const now = get().artistColor;
+    const next = COLORS[(COLORS.indexOf(now[key] ?? null) + 1) % COLORS.length];
+    const map = { ...now };
+    if (next) map[key] = next;
+    else delete map[key];
+    set({ artistColor: map });
+    get().commitLayout();
+  },
+  setArtistAlways: (v) => {
+    set({ artistAlways: v });
+    get().commitLayout();
+  },
+  setArtistOpen: (v) => {
+    set({ artistOpen: v });
+    get().commitLayout();
+  },
   /** 세로 모드의 씬 폭 — ★**칸 하나만 남을 만큼까지 줄인다** (사용자 지시 2026-08-22).
    *  머리가 좁아지면 글이 줄바꿈으로 접히고, 그래도 모자라면 잘린다 — 큰 그림을 넓게 쓰려고
    *  줄이는 것이라 여기서 막지 않는다. */
@@ -456,6 +571,31 @@ export const useUi = create<S>((set, get) => ({
     set({ convertLast: { ...get().convertLast, ...v } });
     get().commitLayout();
   },
+  setEditLast: (v) => {
+    set({ editLast: { ...get().editLast, ...v } });
+    get().commitLayout();
+  },
+  setEditorBrush: (which, v) => {
+    const cur = get().editorBrush;
+    set({ editorBrush: { ...cur, [which]: { ...cur[which], ...v } } });
+    get().commitLayout();
+  },
+  setEditorText: (v) => {
+    set({ editorText: { ...get().editorText, ...v } });
+    get().commitLayout();
+  },
+  setEditorBubble: (v) => {
+    set({ editorBubble: { ...get().editorBubble, ...v } });
+    get().commitLayout();
+  },
+  setEditorSfx: (v) => {
+    set({ editorSfx: { ...get().editorSfx, ...v } });
+    get().commitLayout();
+  },
+  setEditorBg: (v) => {
+    set({ editorBg: v });
+    get().commitLayout();
+  },
   setSizeLast: (dir, wh) => {
     const cur = get().sizeLast[dir];
     if (cur && cur[0] === wh[0] && cur[1] === wh[1]) return;   // 같은 값이면 저장을 안 부른다
@@ -521,10 +661,10 @@ export const useUi = create<S>((set, get) => ({
     //   `notifyDone`·`perSlot`·`curated` 가 빠져 있어, 켜 놓아도 껐다 켜면 기본값으로
     //   돌아갔다 (감사 2026-08-16). 필드를 늘리면 **여기에도 더할 것.**
     const { leftWidth, rightWidth, leftCollapsed, rightCollapsed, cols, laneSize, laneHeadW,
-      laneHeight, font, textScale, importPick, aiWidth, aiCollapsed,
+      laneHeight, artistH, artistOpen, artistColor, artistAlways, font, textScale, importPick, aiWidth, aiCollapsed,
       notifyDone, notifySound, notifyVolume, perSlot, curated, agentAuto, agentAskHard,
-      tagSuggest, artistPrefix, weightHl, fmView, streamPreview, focusNewPending, enhanceLast, maskBrush, convertLast, sizeLast,
-      laneSide, laneWidth, laneHeadH, view } = get();
+      tagSuggest, artistPrefix, weightHl, fmView, streamPreview, focusNewPending, enhanceLast, maskBrush, convertLast, editLast, editorBrush, editorText,
+      editorBubble, editorSfx, editorBg, sizeLast, laneSide, laneWidth, laneHeadH, view } = get();
     try {
       localStorage.setItem(
         KEY,
@@ -537,6 +677,10 @@ export const useUi = create<S>((set, get) => ({
           laneSize,
           laneHeadW,
           laneHeight,
+          artistH,
+          artistOpen,
+          artistColor,
+          artistAlways,
           font,
           textScale,
           importPick,
@@ -558,6 +702,12 @@ export const useUi = create<S>((set, get) => ({
           enhanceLast,
           maskBrush,
           convertLast,
+          editLast,
+          editorBrush,
+          editorText,
+          editorBubble,
+          editorSfx,
+          editorBg,
           sizeLast,
           laneSide,
           laneWidth,
