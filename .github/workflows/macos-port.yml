@@ -32,6 +32,10 @@ jobs:
       - name: Build frontend
         run: npm run build
 
+      # tauri-build validates resources even during cargo check.
+      - name: Prepare bundled Python runtime
+        run: bash scripts/prepare-macos-python.sh
+
       - name: Check Tauri shell
         working-directory: src-tauri
         run: cargo check --target aarch64-apple-darwin
@@ -39,9 +43,6 @@ jobs:
       - name: Test Tauri shell
         working-directory: src-tauri
         run: cargo test --target aarch64-apple-darwin
-
-      - name: Prepare bundled Python runtime
-        run: bash scripts/prepare-macos-python.sh
 
       - name: Build macOS app bundle
         env:
