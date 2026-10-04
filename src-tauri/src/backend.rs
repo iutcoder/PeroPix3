@@ -584,6 +584,7 @@ pub fn spawn() -> std::io::Result<Child> {
         .env("PEROPIX_KEY", backend_key())
         .env("PEROPIX_DATA_DIR", &root)
         .env("PEROPIX_RESOURCE_DIR", &resources)
+        .env("PYTHONDONTWRITEBYTECODE", "1")
         // ★★파이썬의 출력은 **UTF-8 로** — 안 주면 윈도우 콘솔 코드페이지(cp949)로 찍어 로그에
         //   두 인코딩이 섞이고, 한글이 깨져 보이며, 자르기(`trim_bytes` 주석)가 막혔다 (2026-09-05)
         .env("PYTHONIOENCODING", "utf-8")
@@ -787,7 +788,7 @@ mod log_tests {
     ///   파이프에서 읽어 파일에 닿기까지가 실제로 이어져 있는지는 프로세스를 띄워 봐야 안다.
     ///   여기를 갈아엎었으므로(파일 핸들 상속 → 파이프 중계) 가장 큰 위험이 「로그가 통째로
     ///   안 남는다」이고, 그것은 앱을 켜 보기 전에는 눈에 안 띈다.
-    #[cfg(windows)]
+    #[cfg(unix)]
     #[test]
     fn 자식의_출력이_파일까지_온다() {
         use std::process::{Command, Stdio};
@@ -798,8 +799,8 @@ mod log_tests {
         let f = std::fs::OpenOptions::new().create(true).append(true).open(&path).unwrap();
         let sink = Arc::new(Mutex::new(super::Sink::new(f, 0)));
 
-        let mut child = Command::new("cmd")
-            .args(["/c", "echo repeat&echo repeat&echo repeat&echo last"])
+        let mut child = Command::new("/bin/sh")
+            .args(["-c", "printf 'repeat\\nrepeat\\nrepeat\\nlast\\n'"])
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .spawn()

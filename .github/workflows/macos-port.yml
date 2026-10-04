@@ -44,6 +44,8 @@ jobs:
         run: bash scripts/prepare-macos-python.sh
 
       - name: Build macOS app bundle
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
         run: >-
           npx tauri build --bundles app
           --config '{"build":{"beforeBuildCommand":""}}'
@@ -59,11 +61,18 @@ jobs:
           test -f "$APP/Contents/Resources/models/censor/ntd11_anime_nsfw_segm_v5-variant1.onnx"
           test -f "$APP/Contents/Resources/public/tags.json"
           test -f "$APP/Contents/Resources/shared/terms.json"
+          test -f "$APP/Contents/Resources/plug-app/peropix.js"
+          test -f "$APP/Contents/Resources/plug-app/base.css"
           test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$APP/Contents/Info.plist")" = \
             "io.github.iutcoder.peropix3"
           xattr -cr "$APP"
           codesign --force --deep --sign - --timestamp=none "$APP"
           codesign --verify --deep --strict --verbose=2 "$APP"
+
+      - name: Test macOS backend integration
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: src-tauri/python/bin/python3 scripts/test-macos-smoke.py
 
       - name: Setup Python
         uses: actions/setup-python@v5
