@@ -350,8 +350,29 @@ def pick_dir(start: str = "") -> str | None:
     ★★**못 띄우면 조용히 `None` 을 돌려주지 않는다** (같은 제보). 취소와 구분이 안 돼서,
       창이 아예 안 뜨는 동안에도 화면은 아무 말이 없었다 — 부르는 쪽은 `null` 을 「취소」로
       읽는다. 실패는 예외로 올려 보내 화면이 까닭을 띄우게 한다."""
+    if sys.platform == "darwin":
+        script = '''
+on run argv
+    try
+        if (count of argv) > 0 and item 1 of argv is not "" then
+            set chosen to choose folder default location (POSIX file (item 1 of argv))
+        else
+            set chosen to choose folder
+        end if
+        return POSIX path of chosen
+    on error number -128
+        return ""
+    end try
+end run
+'''
+        initial = start if start and Path(start).is_dir() else ""
+        command = ["/usr/bin/osascript", "-e", script, initial]
+    elif sys.platform == "win32":
+        command = [sys.executable, "-c", _PICK_DIR, start or ""]
+    else:
+        raise OSError("폴더 선택 대화상자는 이 플랫폼에서 지원되지 않습니다")
     try:
-        r = subprocess.run([sys.executable, "-c", _PICK_DIR, start or ""],
+        r = subprocess.run(command,
                            capture_output=True, text=True, timeout=300)
     except Exception as e:
         raise OSError(f"폴더 찾기 창을 띄우지 못했습니다 ({e})") from e
