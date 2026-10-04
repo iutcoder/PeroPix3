@@ -459,12 +459,12 @@ function SaveHint() {
   if (!set) return null;
   /** 화면에 적힌 그 자리 — 탐색기로 열 때도 **같은 문자열**을 쓴다 (둘이 갈리면 안 된다).
    *
-   *  ★★규칙 정본은 `backend/workspace.out_dir` 다: `output/멀티/<탭>/<세트>/`.
+   *  ★★규칙 정본은 `backend/workspace.out_dir` 다: `output/<탭>/<세트>/` (「멀티」 한 겹은 2026-10-01 에 걷었다).
    *    여기 적혀 있던 것은 **틀렸다** (사용자 지적 2026-08-19: 열면 400):
    *      · 위층(탭=`chars`) 폴더가 빠져 있었다
    *      · 씬 폴더를 붙이고 있었는데 **씬은 폴더가 아니다** (파일 이름 앞의 번호다) */
   const tabName = (spec?.tabs ?? []).find((c) => c.id === spec?.activeTab)?.name;
-  const rel = `output/멀티/${tabName ? `${tabName}/` : ""}${set.name}`;
+  const rel = `output/${tabName ? `${tabName}/` : ""}${set.name}`;
   return (
     <span
       style={{

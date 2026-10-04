@@ -13,7 +13,9 @@ import { wrapSetTabInCard } from "../lib/sceneCards";
 export { takesOf, takesOfScene, dedupeByFile, type Rec } from "../lib/takes";
 import { dedupeByFile, takesOf } from "../lib/takes";
 import type { Rec } from "../lib/takes";
+import { isPreviewFile, previewOf, usePreviews } from "./previews";
 import { moveTo } from "../lib/moveTo";
+import { carryDocs } from "../lib/carryEditor";
 import { planDelete, type DelPlan, type DelTarget } from "../lib/delPlan";
 export type { DelPlan, DelTarget } from "../lib/delPlan";
 // ★**형만** 가져온다 — `gen.ts` 가 이 파일을 부르므로 값으로 가져오면 순환이 된다
@@ -53,6 +55,9 @@ export type TabPrompt = {
    *    백엔드(`agent._set_prompt`)는 줄곧 `chars` 였으므로 **타입만 거짓말을 하고 있었고**,
    *    그 탓에 이 값을 읽으려는 코드가 타입 오류를 만났다 (적대 검토 2026-08-24). */
   chars?: Char[];
+  /** ★순차 생성 모드 — **탭의 것**이다 (`store/prompt` 의 `seqChars` ★★주).
+   *  없으면 꺼진 것이다 (옛 워크스페이스). */
+  seqChars?: boolean;
 };
 
 /** 슬롯(세트 탭의 칸) — v2 의 슬롯 그대로. `locked` 는 생성에서 뺀다.
@@ -327,7 +332,11 @@ type S = {
   ) => Promise<{ file: string; cell: string } | null>;
   /** ★지우기 = **휴지통으로 이동**. 파일이 실제로 자리에서 없어지고, `Ctrl+Z` 로 되돌아온다.
    *  비우는 것은 앱을 켤 때 (24시간 지난 것) — `backend/trash.py` 머리 주석. */
-  deleteFiles: (files: string[], opts?: { undo?: boolean }) => Promise<void>;
+  deleteFiles: (
+    files: string[],
+    /** `also` — 같은 되돌리기 한 걸음에 함께 되살릴 것 (함께 지운 미저장 그림, `lib/sceneTakes.removeTakes`) */
+    opts?: { undo?: boolean; also?: () => void },
+  ) => Promise<void>;
   /** 화면이 그림을 못 읽었다 — **정말 없으면** 그 장을 목록에서 뺀다 (`forgetMissing` 의 ★★주) */
   forgetMissing: (file: string) => Promise<void>;
   activeSceneGroup: () => SceneGroup | undefined;
@@ -342,7 +351,8 @@ type S = {
    *  ★한 번에 하나만 돈다 — 자세한 것은 구현부의 ★★주. */
   renumberSet: (groupId: string) => Promise<void>;
   closeSet: (id: string) => void;
-  renameSceneGroup: (id: string, name: string) => void;
+  /** 이름을 바꾸고 그림을 새 이름의 폴더로 옮긴다 (`renamePlace`). 못 바꿨으면 그 이유를 준다 */
+  renameSceneGroup: (id: string, name: string) => Promise<string | null>;
 
   /** ★**무엇이 사라지나** — 부작용 없는 계산 (`lib/delPlan`). 확인 창·승인 카드의 문구가 이걸 쓴다 */
   planRemove: (target: DelTarget) => DelPlan;
@@ -388,7 +398,8 @@ type S = {
   activeTabOf: () => WsTab | undefined;
   switchTab: (id: string) => void;
   addTab: (name?: string) => void;
-  renameTab: (id: string, name: string) => void;
+  /** 이름을 바꾸고 그 탭의 그림을 새 이름의 폴더로 옮긴다 (`renamePlace`). 못 바꿨으면 그 이유를 준다 */
+  renameTab: (id: string, name: string) => Promise<string | null>;
   removeTab: (id: string) => void;
   /** 이 워크스페이스가 쓸 NAI 계정 (`Spec.account`). ★이미 큐에 넣은 것은 안 따라온다 */
   setAccount: (id: string) => void;
@@ -558,6 +569,95 @@ function withGroupMoved(spec: Spec, groupId: string, toTabId: string, fillGroup:
   return { ...spec, sceneGroups, activeSceneGroup };
 }
 
+/** 탭·씬 그룹의 **이름을 바꾸고 그림을 새 이름의 폴더로 옮긴다** (사용자 결정 2026-09-29).
+ *
+ *  ★★저장 자리는 이름으로 짓는다 (`output/<탭>/<씬 그룹>/`). 예전에는 이름만 바꿔서 이미 만든
+ *    그림이 옛 폴더에 남았고, 비워진 옛 이름을 나중에 다른 탭이 받으면 한 폴더에 섞였다.
+ *    옮기는 것은 서버다 (`Store.rename_place`). 배선은 `moveGroupToTab` 과 같다 — 밀린 편집을 먼저
+ *    쓰고, 이름은 바로 바꿔 보이고, 끝날 때까지 조작과 자동 저장을 멈추고, 답은 화면이 아직 이
+ *    워크스페이스일 때만 대입한다.
+ *  ★생성 중이거나 큐에 걸린 씬이 있으면 **바꾸지 않는다** — 큐는 넣을 때의 이름을 들고 가서,
+ *    도착한 그림이 옛 폴더로 간다 (`generating` 의 ★★주).
+ *  ★옮길 그림이 없으면 서버를 안 부른다 — 이름만 바뀌는 것은 예전과 같다.
+ *  ★되돌리기 기록은 **비우지 않는다** (`lib/undo` 의 ★★주 — 씬 번호 개명 `runRenumber` 도 같다).
+ *  @returns 못 바꿨으면 그 이유 (조수가 그대로 전한다) */
+/** 옮긴 그림을 **편집 캔버스**에도 따라 보낸다 (`lib/carryEditor` 의 머리 주석).
+ *  ★서버가 `state.json` 을 고치면 안 된다 — 화면이 캔버스를 들고 있다가 통째로 다시 쓴다. 부팅 이전만
+ *    화면이 뜨기 전이라 서버가 고친다 (`backend/server.py` 의 `_carry_editor`).
+ *  ★값으로 부르면 순환이 된다 (`editor/cutGen` 이 이 파일을 읽는다) — **부를 때** 싣는다 (`generating` 과 같다). */
+async function carryEditor(ws: string, moves: Record<string, string> | undefined, to?: string): Promise<void> {
+  if (!moves || !Object.keys(moves).length) return;
+  const { useEditor } = await import("../editor/store");
+  const docs = carryDocs(useEditor.getState().docs, ws, moves, to);
+  if (docs) useEditor.setState({ docs });
+}
+
+async function renamePlace(
+  get: () => S,
+  set: (p: Partial<S>) => void,
+  kind: "tab" | "sceneGroup",
+  id: string,
+  name: string,
+): Promise<string | null> {
+  const cur = get().current;
+  const spec = get().spec;
+  const nm = name.trim();
+  if (!cur || !spec || !nm) return null;
+  const place = kind === "tab"
+    ? (spec.tabs ?? []).find((c) => c.id === id)
+    : spec.sceneGroups.find((x) => x.id === id);
+  if (!place || place.name === nm) return null;
+  const groups = spec.sceneGroups.filter(
+    (x) => x.kind === "sceneGroup" && (kind === "tab" ? x.tabId === id : x.id === id),
+  );
+  const refuse = (why: string) => {
+    toast(why, "warn");
+    return why;
+  };
+  // ★다른 옮기기가 도는 동안에는 화면이 잠겨 있다 — 여기 오는 것은 조수뿐이다
+  if (moveBusy) return refuse(t("busy.renameWait"));
+  if (await generating(new Set(groups.map((x) => x.id)))) return refuse(t("busy.generatingRename"));
+  const named = (s: Spec): Spec =>
+    kind === "tab"
+      ? { ...s, tabs: (s.tabs ?? []).map((c) => (c.id === id ? { ...c, name: nm } : c)) }
+      : { ...s, sceneGroups: s.sceneGroups.map((x) => (x.id === id ? { ...x, name: nm } : x)) };
+  // ★옮길 그림이 없다 — 이름만 바꾼다
+  if (!groups.some((g) => takesOf(get().records, { id: g.id, name: g.name, idOnly: g.idOnly }).length)) {
+    set({ spec: named(spec) });
+    queueSave(get);
+    return null;
+  }
+  for (const fn of beforeWsSwitch) fn();
+  await flushSave(get);
+  if (get().current !== cur || !get().spec) return null;
+  const before = get().spec!;
+  set({ spec: named(before) });
+  moveBusy = cur;
+  try {
+    const r = await withBusy(t("busy.renaming", { name: nm }), () =>
+      api<{ spec: Spec; records: Rec[]; moved: number; moves: Record<string, string> }>(
+        `/api/workspaces/${encodeURIComponent(cur)}/${kind === "tab" ? "tabs" : "scene-groups"}/${encodeURIComponent(id)}/rename`,
+        { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name: nm }) },
+      ));
+    if (get().current === cur) {
+      set({ spec: keepView(migrate(r.spec), get().spec), records: dedupeByFile(r.records ?? []) });
+      // ★보던 장·고른 장도 경로로 적혀 있다 — 안 옮기면 씬에서 보던 자리를 잃는다
+      if (r.moved) useSceneFocus.getState().remap(r.moves ?? {});
+    }
+    void carryEditor(cur, r.moves);
+    return null;
+  } catch (e) {
+    if (get().current === cur) set({ spec: before });
+    return refuse(t(kind === "tab" ? "tab.renameFailed" : "sceneGroup.renameFailed", { name: place.name, why: String(e) }));
+  } finally {
+    moveBusy = null;
+    if (saveHeld) {
+      saveHeld = false;
+      queueSave(get);
+    }
+  }
+}
+
 /** 개명이 도는 중인가 — ★**한 번에 하나만** (`renumberSet` 의 ★★주) */
 let renumBusy = false;
 /** 도는 동안 또 들어온 그룹 — 끝나고 한 번만 다시 돈다 */
@@ -601,8 +701,18 @@ async function runRenumber(
     const now = get().spec;
     if (!now) return;
     const sel = now.selection;
+    void carryEditor(current, Object.fromEntries(moves));
     set({
-      records: get().records.map((x) => (moves.has(x.file) ? { ...x, file: moves.get(x.file)! } : x)),
+      // ★강화·업스케일 결과가 가리키는 원본(`enhance_of`)도 — 서버 색인도 같이 고친다 (`_rewrite_paths`)
+      records: get().records.map((x) =>
+        moves.has(x.file) || (x.enhance_of && moves.has(x.enhance_of))
+          ? {
+              ...x,
+              file: moves.get(x.file) ?? x.file,
+              enhance_of: x.enhance_of ? (moves.get(x.enhance_of) ?? x.enhance_of) : x.enhance_of,
+            }
+          : x,
+      ),
       spec: {
         ...now,
         // ★별표는 경로로 적혀 있다 — 안 옮기면 조용히 풀린다
@@ -876,7 +986,7 @@ const saveActive = (v: string) => {
  *    구독은 `spec` 이 **이미 갈린 뒤**에 돌아서, 담으려는 순간에는 담을 자리(옛 spec)가 없다.
  *    그래서 워크스페이스를 옮기면 떠나는 탭의 수치가 통째로 사라졌다 (2026-08-23).
  *  ★두 파일이 서로를 부르므로(순환) `workspace.ts` 는 `gen.ts` 를 **값으로 못 부른다**.
- *    이름을 등록해 두고 부르는 이 길이 그 제약을 지나는 방법이다. */
+ *    이름을 등록해 두고 부르는 이 방식으로 그 제약을 지난다. */
 const beforeWsSwitch: (() => void)[] = [];
 export const onBeforeWsSwitch = (fn: () => void) => {
   beforeWsSwitch.push(fn);
@@ -1027,13 +1137,18 @@ export const useWs = create<S>((set, get) => ({
     // ★열려 있던 탭 줄을 **지우기 전에** 적어 둔다 — 되돌릴 때 폴더만 살아나고 탭이
     //   안 돌아오면 "되돌렸다"고 말해 놓고 화면은 그대로인 상태가 된다
     const hadTabs = get().openWs;
-    const r = await api<{ trashed: TrashEntry[] }>(
+    const r = await api<{ trashed: TrashEntry[]; left?: boolean }>(
       `/api/workspaces/${encodeURIComponent(name)}`,
       { method: "DELETE" },
     );
     const { items } = await api<{ items: WsInfo[] }>("/api/workspaces");
     set({ list: items });
-    if (r.trashed?.length)
+    /* ★★**못 비웠으면 말해 준다** (사용자 지시 2026-09-15: *"그냥 삭제를 하면 확실하게 해당
+       폴더가 사라지게 만들어"*). 내용은 휴지통으로 갔는데 다른 프로그램이 파일을 쥐고 있어
+       원래 폴더가 남는 수가 있다 — 그때 조용히 넘어가면 지운 워크스페이스가 목록에 그대로
+       서 있고, 사용자는 삭제가 먹히지 않았다고만 본다. 되돌리기 안내와 겹치지 않게 이쪽만 띄운다. */
+    if (r.left) toast(t("common.trashedButLeft"));
+    else if (r.trashed?.length)
       undoToast(t("common.trashed", { n: 1 }), t("common.undo"), async () => {
         await api("/api/workspaces/restore", {
           method: "POST",
@@ -1058,7 +1173,7 @@ export const useWs = create<S>((set, get) => ({
     /* ★★**지운 이름으로 저장이 나가면 안 된다** (사용자 실측 2026-09-02: 지운 워크스페이스가 다시 켜면
        되살아나 있었다). 옆 탭을 여는 길은 **밀린 편집을 먼저 쓰는데**(`open` 의 `flushSave`), 그 순간
        `current` 가 아직 지운 이름이라 그 PUT 이 `workspace.json` 만 든 빈 폴더를 도로 만들었다 — 서버의
-       `Store.save` 는 폴더를 만드는 것이 정상이다 (새 워크스페이스도 같은 길로 태어난다). 옆 탭을
+       `Store.save` 는 폴더를 만드는 것이 정상이다 (새 워크스페이스도 같은 경로로 태어난다). 옆 탭을
        열기 **전에** 지운 것을 놓아 버린다 — 밀린 저장은 버리고, 현재를 비운다. */
     dropPendingSave();
     get().close();
@@ -1130,19 +1245,27 @@ export const useWs = create<S>((set, get) => ({
   setStars(files, on) {
     const spec = get().spec;
     if (!spec || files.length === 0) return;
+    // ★미저장 그림은 경로가 없어 별표를 그 그림(메모리)에 붙인다 — 저장하면 `saveTake` 가 옮겨 적는다
+    const pv = files.filter(isPreviewFile);
+    const real = files.filter((f) => !isPreviewFile(f));
     const cur = spec.selection.starred ?? [];
-    const touched = new Set(files);
+    const touched = new Set(real);
     const next = on
-      ? [...cur, ...files.filter((f) => !cur.includes(f))]
+      ? [...cur, ...real.filter((f) => !cur.includes(f))]
       : cur.filter((f) => !touched.has(f));
-    if (next.length === cur.length && on) return;
+    if (next.length === cur.length && on && pv.every((f) => get().isStarred(f))) return;
+    const pvBack = pv.length ? usePreviews.getState().star(pv, on) : null;
     // ★되돌리는 방법을 **그때 만들어** 로그에 담는다 (`lib/undo`)
-    pushUndo(t("common.undoStar"), () => get().restoreStars(cur));
+    pushUndo(t("common.undoStar"), () => {
+      pvBack?.();
+      if (real.length) get().restoreStars(cur);
+    });
+    if (!real.length) return;
     set({ spec: { ...spec, selection: { ...spec.selection, starred: next } } });
     queueSave(get);
   },
 
-  /** 별표를 그때 상태로 되돌린다 — 로그가 담아 둔 길이다 (직접 부르지 않는다). */
+  /** 별표를 그때 상태로 되돌린다 — 로그가 담아 둔 되돌리기다 (직접 부르지 않는다). */
   restoreStars(before) {
     const spec = get().spec;
     if (!spec) return;
@@ -1201,8 +1324,13 @@ export const useWs = create<S>((set, get) => ({
     //   (`/api/keep/origin`). 출처를 모르는 보관함 그림은 찾아볼 자리가 아예 없다.
     const origin = o.from === "keep" ? (o.origin ?? null) : { ws: current, file };
     const local = origin?.ws === current;
-    const rec = local ? records.find((r) => r.file === origin!.file) : undefined;
-    const saved = origin
+    /* ★★미저장 그림은 파일도 기록도 없다 — 구조는 **들고 있는 것**(`PreviewTake.env`)을 쓰고, 새 탭에도
+       **미저장으로** 옮긴다 (사용자 지시 2026-09-30: 저장하지 않고 되는 기능은 다 켠다 · 저장 버튼 말고는 저장하지 않는다) */
+    const pv = o.from === "keep" ? undefined : previewOf(file);
+    const rec = pv ?? (local ? records.find((r) => r.file === origin!.file) : undefined);
+    const saved = pv
+      ? { env: (pv.env as ShotEnv | null | undefined) ?? null }
+      : origin
       ? await api<{ env: ShotEnv | null }>(
           `/api/workspaces/${encodeURIComponent(origin.ws)}/env?file=${encodeURIComponent(origin.file)}`,
         ).catch(() => ({ env: null }))
@@ -1288,7 +1416,19 @@ export const useWs = create<S>((set, get) => ({
     // ★`load` 는 저장을 예약하지 않는다 (`prompt.ts` 의 `onEdit` 는 편집에만 붙는다) —
     //   여기서 한 번 흘려보내야 새 탭의 프롬프트가 파일에 남는다
     await get().save();
-    const r = await api<{ file: string; record: Rec }>(
+    const tabName = (sp.tabs ?? []).find((c) => c.id === sp.activeTab)?.name ?? null;
+    /** 미저장 한 장을 새 탭의 그 씬에 **미저장으로** 앉힌다 — 서버에 아무것도 안 쓴다 */
+    const seat = (f: string): string | null => {
+      const it = previewOf(f);
+      if (!it) return null;
+      return usePreviews.getState().add({
+        workspace: current, scene_group: tab.name, scene_group_id: tab.id, cell: cell.name, cell_id: cell.id,
+        seed: it.seed, enhance_of: it.enhance_of, tab: tabName, cell_no: 1, exclude_slot_number: o.excludeNo,
+        env: it.env ?? null, inference: it.inference ?? null, b64: it.preview.b64, fmt: it.preview.fmt,
+      }).file;
+    };
+    const first = seat(file);
+    const r = first ? { file: first, record: null } : await api<{ file: string; record: Rec }>(
       `/api/workspaces/${encodeURIComponent(current)}/copy`,
       {
         method: "POST",
@@ -1297,7 +1437,7 @@ export const useWs = create<S>((set, get) => ({
           file,
           /* ★그림이 앉는 자리는 **세트**다 (`CopyBody`). 2026-08-24 개명 뒤에도 여기가
              옛 열쇠(`tab`·`tab_id`)로 남아 있어 서버가 `set` 을 못 받았다.
-             ★`tab` 은 이제 **탭 이름**이다 — 저장 경로 한 칸(`멀티/<탭>/<세트>/`)이 된다. */
+             ★`tab` 은 이제 **탭 이름**이다 — 저장 경로 한 칸(`output/<탭>/<세트>/`)이 된다. */
           scene_group: tab.name,
           scene_group_id: tab.id,
           // ★씬 값을 **넷 다** 싣는다 — 하나라도 비면 그 그림이 어느 씬 것인지 화면이 못 찾는다
@@ -1316,10 +1456,11 @@ export const useWs = create<S>((set, get) => ({
     );
     // ★목록을 다시 읽지 않는다 — 서버가 돌려준 레코드 한 줄만 얹으면 화면이 따라온다
     //   (업스케일·「파일로 저장」과 같은 방식)
-    get().addRecord(r.record);
+    if (r.record) get().addRecord(r.record);
     /* ★다중 선택 복제 (사용자 지시 2026-08-29) — 나머지 장도 **같은 씬**으로 보낸다.
        같은 자리라 테이크로 쌓이고, 구조·설정은 첫 장이 이미 세웠다. */
     for (const f of o.extraFiles ?? []) {
+      if (seat(f)) continue;
       const more = await api<{ file: string; record: Rec }>(
         `/api/workspaces/${encodeURIComponent(current)}/copy`,
         {
@@ -1387,7 +1528,10 @@ export const useWs = create<S>((set, get) => ({
        이미 없어 **갈 자리 없는 그림**이 된다 (`removeAt` 의 ★★주).
        ★그림 자체는 휴지통에 있으므로 24시간 안에 꺼낼 수 있다 — 잃는 것은 없다. */
     if (opts.undo !== false)
-      pushUndo(t("common.undoImages"), () => void get().restoreFiles(r.moved, before));
+      pushUndo(t("common.undoImages"), () => {
+        opts.also?.();
+        void get().restoreFiles(r.moved, before);
+      });
   },
 
   toggleStar(file) {
@@ -1395,7 +1539,8 @@ export const useWs = create<S>((set, get) => ({
   },
 
   /** ★`?? []` — 별표가 없던 시절에 저장된 워크스페이스에는 이 칸이 아예 없다 */
-  isStarred: (file) => !!get().spec?.selection.starred?.includes(file),
+  isStarred: (file) =>
+    isPreviewFile(file) ? !!previewOf(file)?.starred : !!get().spec?.selection.starred?.includes(file),
 
   activeSceneGroup: () => get().spec?.sceneGroups.find((t) => t.id === get().spec!.activeSceneGroup),
 
@@ -1489,7 +1634,7 @@ export const useWs = create<S>((set, get) => ({
     // ★지금 편집기 내용을 **떠나는 캐릭터에** 담고 옮긴다 (탭 전환과 같은 순서)
     const stashed = stash(spec, spec.activeSceneGroup);
     /* ★★**떠나는 탭에 지금 보던 씬 그룹을 적어 둔다** (사용자 지시 2026-08-30: 탭을 오가면
-       마지막으로 보던 씬 그룹이 열려 있게). 기록하는 자리는 여기 하나다 — 어떤 길로 씬 그룹을
+       마지막으로 보던 씬 그룹이 열려 있게). 기록하는 자리는 여기 하나다 — 어떤 경로로 씬 그룹을
        골랐든(선택·새로 만들기·복제) 떠나는 순간의 것이 곧 「마지막으로 보던 것」이다. */
     const tabs = (stashed.tabs ?? []).map((c) =>
       c.id === spec.activeTab ? { ...c, lastSceneGroup: spec.activeSceneGroup } : c,
@@ -1548,12 +1693,7 @@ export const useWs = create<S>((set, get) => ({
   },
 
   renameTab(id, name) {
-    const spec = get().spec;
-    if (!spec || !name.trim()) return;
-    set({
-      spec: { ...spec, tabs: (spec.tabs ?? []).map((c) => (c.id === id ? { ...c, name: name.trim() } : c)) },
-    });
-    queueSave(get);
+    return renamePlace(get, set, "tab", id, name);
   },
 
   /* ── 줄의 차례 바꾸기 (사용자 지시 2026-08-24) ────────────────────────
@@ -1612,10 +1752,11 @@ export const useWs = create<S>((set, get) => ({
     try {
       // ★끝날 때까지 **조작을 잠근다** (`store/busy` 의 ★★주) — 그 사이의 편집은 갈 곳이 없다
       const r = await withBusy(t("busy.movingTab", { name: tab.name }), () =>
-        api<{ spec: Spec; records: Rec[]; moved: number }>(
+        api<{ spec: Spec; records: Rec[]; moved: number; moves?: Record<string, string> }>(
         `/api/workspaces/${encodeURIComponent(cur)}/tabs/${encodeURIComponent(tabId)}/move`,
         { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ to, fill }) },
       ));
+      void carryEditor(cur, r.moves, to);
       if (get().current === cur) {
         // ★옮기는 동안 사용자가 다른 탭을 열었을 수 있다 — 그 자리를 지킨다 (`keepView` 의 ★★주)
         const next = keepView(migrate(r.spec), get().spec);
@@ -1671,10 +1812,11 @@ export const useWs = create<S>((set, get) => ({
     try {
       // ★끝날 때까지 **조작을 잠근다** (`store/busy` 의 ★★주)
       const r = await withBusy(t("busy.movingGroup", { name: g.name }), () =>
-        api<{ spec: Spec; records: Rec[]; moved: number }>(
+        api<{ spec: Spec; records: Rec[]; moved: number; moves?: Record<string, string> }>(
         `/api/workspaces/${encodeURIComponent(cur)}/scene-groups/${encodeURIComponent(groupId)}/move`,
         { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ to_tab: toTabId, fill }) },
       ));
+      void carryEditor(cur, r.moves);
       if (get().current === cur) {
         /* ★★**보고 있는 탭은 화면이 정본이다** (사용자 지적 2026-08-28: *"옮긴 탭으로 들어갔는데
              옮기는 게 완료된 후에 강제로 원래 있던 탭이 열림"*). 옮기는 동안에는 자동 저장을
@@ -2029,12 +2171,7 @@ export const useWs = create<S>((set, get) => ({
   },
 
   renameSceneGroup(id, name) {
-    const spec = get().spec;
-    if (!spec || !name.trim()) return;
-    set({
-      spec: { ...spec, sceneGroups: spec.sceneGroups.map((t) => (t.id === id ? { ...t, name } : t)) },
-    });
-    queueSave(get);
+    return renamePlace(get, set, "sceneGroup", id, name);
   },
 }));
 

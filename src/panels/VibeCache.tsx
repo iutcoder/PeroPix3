@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { useI18n } from "../i18n";
 import { api, backendUrl, type TrashEntry } from "../lib/backend";
-import { MAX_VIBES, pushVibe } from "../store/imageInput";
+import { MAX_VIBES, pushVibe, type ImageInputStore } from "../store/imageInput";
 import { ask } from "../store/ask";
 import { toast, undoToast } from "../store/toast";
 import { Icon } from "../components/Icon";
@@ -38,7 +38,7 @@ type Detail = {
  *  거기에 보관"*). `onClose` 를 주면 **창**으로 뜨고(이미지 입력 패널의 단추), 안 주면
  *  **그 자리에 그대로** 그려진다 (갤러리의 바이브 칸).
  *  ★한 벌로 둔다 — 목록을 두 번 만들면 한쪽에서 지운 것이 다른 쪽에 남는다. */
-export function VibeCache({ onClose }: { onClose?: () => void }) {
+export function VibeCache({ onClose, store }: { onClose?: () => void; /** 꺼낸 바이브를 넣을 한 벌. 없으면 생성 모드 것 */ store?: ImageInputStore }) {
   const t = useI18n((s) => s.t);
   const [items, setItems] = useState<Entry[] | null>(null);
   const [base, setBase] = useState("");
@@ -75,7 +75,7 @@ export function VibeCache({ onClose }: { onClose?: () => void }) {
         encoded: d.vibe_data,
         encoded_model: d.model,
         encoded_info_extracted: d.info_extracted,
-      });
+      }, store);
       if (!ok) return toast(t("imgIn.vibeFull", { n: MAX_VIBES }), "warn");
       /* ★창이면 꺼내 쓴 뒤 닫는다. 갤러리 칸에서는 **그대로 머문다** —
          거기서는 여러 개를 이어서 꺼내는 것이 자연스럽다. */

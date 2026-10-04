@@ -1,6 +1,7 @@
 import { api } from "../lib/backend";
 import type { AnyCard, CardKind } from "../store/cards";
 import type { View } from "../store/prompt";
+import { previewOf } from "../store/previews";
 
 /** 그림을 **꽂는** 창구 — 배너든 카드 앞면이든 덱 커버든 여기를 지난다.
  *
@@ -16,10 +17,12 @@ import type { View } from "../store/prompt";
 /** 생성물을 고정 썸네일로 굳힌다 → tid. 실패하면 null (콘솔에 남는다). */
 export async function pinImage(ws: string, file: string): Promise<string | null> {
   try {
+    // ★미저장 그림은 파일이 없으니 **바이트를 싣는다** (사용자 지시 2026-09-30: 저장하지 않고 되는 기능은 다 켠다)
+    const pv = previewOf(file);
     const r = await api<{ tid: string }>("/api/pin", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ workspace: ws, file }),
+      body: JSON.stringify(pv ? { workspace: ws, data: pv.preview.b64 } : { workspace: ws, file }),
     });
     return r.tid;
   } catch (e) {

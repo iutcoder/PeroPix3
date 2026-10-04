@@ -14,6 +14,7 @@ from __future__ import annotations
 import base64
 import binascii
 import io
+import math
 from pathlib import Path
 
 from PIL import Image
@@ -227,7 +228,7 @@ def convert(
     """변환 + (원하면) 일괄 이름 바꾸기.
 
     저장 자리는 `mode` 가 정한다 (위 `MODES`). `folder` 는 아웃풋 루트 아래 `dest` 폴더에
-    모은다 — 브라우저에서 떨군 것처럼 **원본 자리를 모르는** 경우의 유일한 길이다.
+    모은다 — 브라우저에서 떨군 것처럼 **원본 자리를 모르는** 경우의 유일한 방법이다.
 
     ★★`overwrite` 만이 **원본을 없앤다.** 그래도 지우지 않고 **휴지통으로 보낸다**
       (`backend/trash.py`) — 이 모듈의 나머지가 지키는 「원본을 지키다」와 같은 뜻이고,
@@ -306,7 +307,13 @@ def convert(
             dst.write_bytes(blob)
             results.append({"name": name, "saved": dst.name, "dir": str(dst.parent), "ok": True})
         except Exception as e:  # 한 장이 깨져도 나머지는 간다
-            results.append({"name": name, "error": str(e), "ok": False})
+            # ★★**까닭이 빈 예외가 있다** (인자 없이 만든 예외 · `MemoryError`). 그대로 실으면
+            #   화면에 「실패」만 뜨고 무엇이 막혔는지 알 길이 없다 — 클래스 이름으로라도 채운다.
+            # ★로그에도 남긴다: 화면의 한 줄은 사용자가 옮겨 적어 줘야 하지만 로그는 파일에 남아
+            #   (`logs/peropix.log`) 다음 제보 때 앞뒤를 맞출 수 있다.
+            why = str(e) or e.__class__.__name__
+            print(f"[변환] 실패 {name}: {why}", flush=True)
+            results.append({"name": name, "error": why, "ok": False})
 
     # ★「완료 후 폴더 열기」 (v2 `convertOpenFolder`). 여는 것은 **방금 우리가 쓴 자리**뿐이라
     #   사용자가 준 경로를 그대로 여는 창구를 새로 열지 않는다 (files.open_dir 주석).
@@ -316,6 +323,20 @@ def convert(
                 files_mod.open_dir(Path(r["dir"]))
                 break
     return {"results": results, "ok": sum(1 for r in results if r["ok"])}
+
+
+def _finite(v):
+    """NaN·무한대를 None 으로 — JSON 응답이 그 값에서 통째로 실패한다.
+
+    ★남의 그림의 메타데이터에는 `NaN` 이 글자 그대로 들어 있을 수 있고 파이썬 `json.loads` 는 그것을
+      숫자로 받아 준다. 응답을 만들 때 `json.dumps` 는 거부해서 EXIF 리더가 오류만 냈다 (사용자 로그 2026-09-28)."""
+    if isinstance(v, float):
+        return v if math.isfinite(v) else None
+    if isinstance(v, dict):
+        return {k: _finite(x) for k, x in v.items()}
+    if isinstance(v, (list, tuple)):
+        return [_finite(x) for x in v]
+    return v
 
 
 def read_meta(root: Path, it: Item) -> dict:
@@ -365,4 +386,4 @@ def read_meta(root: Path, it: Item) -> dict:
             out["vibe"]["data"] = str(info.get("vibe_data") or "")
     # ★500자에서 자른다 — 화면에 통째로 쏟으면 읽을 수 없다 (v2 도 같은 자리에서 잘랐다)
     out["extra"] = {k: str(v)[:500] for k, v in info.items() if k not in SHOWN_CHUNKS}
-    return out
+    return _finite(out)

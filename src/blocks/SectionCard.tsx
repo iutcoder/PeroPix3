@@ -76,6 +76,7 @@ export function SectionCard({
   overlay,
   onRename,
   renameTip = "",
+  nameTag,
   bannerLead,
   bannerActions,
   hoverLift,
@@ -104,6 +105,8 @@ export function SectionCard({
   onRename?: (v: string) => void;
   /** 연필 단추의 안내 문구 — i18n 은 부르는 쪽이 든다 */
   renameTip?: string;
+  /** 이름 **뒤**에 붙는 것 — 캐릭터 카드의 인물 번호 (`CharPositioner` 의 `CharNo`) */
+  nameTag?: ReactNode;
   /** 배너 우측 버튼 (켜기·삭제 등) */
   bannerActions?: ReactNode;
   /** 이름변경 **앞**에 서는 버튼 — 카드 자체를 다루는 것(차례 바꾸기)이 여기 온다 */
@@ -235,6 +238,7 @@ export function SectionCard({
               {name}
             </b>
           )}
+          {nameTag && <span style={{ alignSelf: "center", display: "flex" }}>{nameTag}</span>}
           {/* ★★카드 종류를 적지 않는다 (사용자 지시 2026-08-19) — 「스타일 카드」·
               「CHARACTER CARD」는 그 자리에 있는 것만으로 이미 아는 것이라, 이름 옆에서
               자리만 먹었다. 프롭도 함께 걷었다. */}

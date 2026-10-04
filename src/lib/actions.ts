@@ -65,6 +65,8 @@ export type ActionDef = {
   confirm?: Risk | ((a: Record<string, any>) => Promise<Risk> | Risk);
   /** 승인 카드에 띄울 문구 — 무엇이 사라지는지·얼마가 드는지를 **미리 세어** 보여 준다 */
   preview?: (a: Record<string, any>) => Promise<string> | string;
+  /** 닫아 둔 기능의 액션 — 그 깃발(`comic.COMIC_READY`)이 닫혀 있으면 조수 도구 목록에서 빠진다 (`scripts/gen-actions.mjs`) */
+  gate?: "comic";
   run: (a: Record<string, any>) => Promise<ActionResult> | ActionResult;
 };
 

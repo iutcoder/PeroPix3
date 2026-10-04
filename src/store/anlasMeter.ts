@@ -1,6 +1,7 @@
 import { create } from "zustand";
 import { useSub } from "./sub";
 import { currentAccountId } from "./accounts";
+import { useQueue } from "./queue";
 import { toast } from "./toast";
 import { t } from "../i18n";
 import { judge, type MeterCond } from "../lib/anlasMeter";
@@ -51,15 +52,24 @@ export const useAnlasMeter = create<S>((set, get) => ({
     // 잔액을 모르면(토큰 없음·통신 실패) 기준선이 없다. 재지 않는다
     const before = useSub.getState().subs[acc]?.anlas;
     const armed = { ...get().armed };
-    if (!acc || measuring.has(acc) || typeof before !== "number") {
+    /* ★★**같은 계정의 앞 배치가 아직 돌고 있으면 재지 않는다** (사용자 제보 2026-09-30). 화면 잔액은
+       배치가 끝날 때만 다시 물으므로, 도는 중인 배치(취소했는데 나가 있던 한 장이 오는 중인 것 포함)가
+       쓰는 몫이 아직 안 들어 있다. 그 값을 기준선으로 걸면 앞 배치 몫까지 이 배치의 청구로 잡혀
+       「요금 표시가 실제와 달랐습니다」가 뜬다. 앞 배치의 기준선도 함께 버린다 — 그쪽이 끝날 때는
+       이 배치의 몫이 섞인다. */
+    const q = useQueue.getState();
+    const lane = q.progress.lanes?.[acc];
+    const busy = q.pending.some((p) => p.account === acc) || (!!lane && (lane.total > lane.completed || lane.queue_length > 0));
+    if (!acc || measuring.has(acc) || busy || typeof before !== "number") {
       delete armed[acc];
       set({ armed });
       return;
     }
     // ★기준선은 **화면에 보이던 잔액**이다. 여기서 새로 물으면 그 왕복이 생성 버튼을 늦추고,
     //   무엇보다 우리가 방금 보낸 생성 요청과 경쟁해 어느 쪽이 먼저 반영됐는지 알 수 없게 된다.
-    //   앱은 배치가 끝날 때마다 잔액을 다시 물으므로(`queue.ts` 의 `job_done`) 이 값은 보통
-    //   최신이다. 그 사이 밖에서 충전·소모가 있었다면 이번 회차만 어긋나게 나온다.
+    //   앱은 배치가 끝날 때마다(완료·취소·실패) 잔액을 다시 묻고(`queue.ts` 의 `settleBatch`),
+    //   도는 중이면 위에서 물러섰으므로 이 값은 최신이다. 그 사이 밖에서 충전·소모가 있었다면
+    //   이번 회차만 어긋나게 나온다.
     armed[acc] = { before, est, cond };
     set({ armed });
   },

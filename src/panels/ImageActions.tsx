@@ -8,6 +8,7 @@ import { pushUndo } from "../lib/undo";
 import { useUi } from "../store/ui";
 import { ask } from "../store/ask";
 import { toast } from "../store/toast";
+import { usePlugins, isOn, usePickText } from "../lib/pluginHost";
 import {
   applyMeta,
   applyMetaParams,
@@ -21,6 +22,7 @@ import { upscaleCost } from "../lib/anlas";
 import { useCurrentSub } from "../store/sub";
 import { currentAccountId } from "../store/accounts";
 import { useWs, type Rec } from "../store/workspace";
+import { droppedOf, previewOf, usePreviews } from "../store/previews";
 import type { ImageMeta } from "../store/gallery";
 import { sendToTagger } from "./tools/TaggerTool";
 import { FolderOpenButton } from "../components/FolderOpenButton";
@@ -41,7 +43,6 @@ export function ImageActions({
   loadMeta,
   loadEnv,
   loadBase,
-  ensureFile,
   hideSettings,
   dims,
   revealPath,
@@ -49,9 +50,12 @@ export function ImageActions({
   onEnhance,
   upscale,
   multi,
+  unsaved,
   onKeep,
   onConvert,
   onCensor,
+  onEdit,
+  getUrl,
   onClone,
   onLeave,
   extra,
@@ -64,17 +68,13 @@ export function ImageActions({
   /** 실제 해상도 — 페로픽스파이 `res-tag`. 그림을 띄우는 쪽이 `onLoad` 로 재서 준다 */
   dims?: { w: number; h: number } | null;
   /** 뿌리 기준 경로 — 있으면 「폴더 열기」가 뜬다 (페로픽스파이 📂 Folder) */
-  /** 탐색기에서 열 경로. ★함수로 주면 **누를 때** 정한다 — 미저장 그림은 그때 저장하고
-   *  새 경로를 돌려주면 된다 (`Canvas` 의 `ensureSaved`) */
+  /** 탐색기에서 열 경로. ★함수로 주면 **누를 때** 정한다 */
   revealPath?: string | (() => Promise<string | null>);
   /** ★뿌리가 자리마다 다르다 — 워크스페이스 파일은 아웃풋 루트, 보관함은 `<APP>/gallery`.
    *  버튼은 하나로 두고 **창구만** 갈아 끼운다 (몸통 모양은 둘이 같다). */
   revealApi?: string;
   /** 이 그림의 생성 설정. 없으면 「설정 불러오기」가 안 뜬다 */
   loadMeta?: () => Promise<ImageMeta | null>;
-  /** 파일이 있어야 하는 일 **앞에** 부른다 — 미저장 그림이면 저장하고 새 경로를 돌려준다.
-   *  ★없으면 지금 경로를 그대로 쓴다 (갤러리·저장된 그림). 이 갈래를 부르는 쪽이 안다. */
-  ensureFile?: () => Promise<string | null>;
   /** 생성할 때 남겨 둔 **그때 구조** (`gen.ts` 의 `env`). 있으면 설정 불러오기가 이걸 먼저 쓴다 */
   loadEnv?: () => Promise<ShotEnv | null>;
   /** 그 그림을 뽑을 때의 **베이스 이미지**(i2i·인페인트). 워크스페이스 그림에만 있다 */
@@ -90,11 +90,23 @@ export function ImageActions({
    *  단추(복제·인핸스·업스케일·보관·일괄 변환·삭제)만 남긴다 — 한 장 전용(프롬프트 보기·
    *  설정 불러오기·i2i·인페인트·폴더 열기·시드)은 어느 장의 것인지 애매하다. */
   multi?: number;
+  /** ★★저장하지 않은 그림이다 (여러 장이면 하나라도). **저장 버튼 말고는 어디서도 저장하지 않는다**
+   *  (사용자 지시 2026-09-30: *"명시적으로 저장 버튼 누른 거 아니면 전부 자동 저장되면 안 됨. 저장 없이
+   *  해당 액션이 불가능하면 비활성화"*).
+   *  ★저장 없이 되는 것은 **다 켠다** (같은 날 사용자 지시). NAI 로 보내는 것(i2i·인페인트·인핸스·업스케일)과
+   *    읽기(프롬프트 보기·설정 불러오기)는 바이트로, 보조도구·보관·복제는 데이터로 돈다 (`Canvas` 의 ★★주).
+   *    업스케일 결과는 미저장으로 원본 곁에 붙는다.
+   *  ★파일 자체가 있어야 하는 **폴더 열기만** 꺼 두고 툴팁으로 이유를 말한다. */
+  unsaved?: boolean;
   onKeep?: () => void | Promise<void>;
   /** 「일괄 변환으로 보내기」 — 워크스페이스 파일에만 뜻이 있다 (캔버스가 준다) */
   onConvert?: () => void | Promise<void>;
   /** 자동검열 목록에 담고 그 화면으로 (사용자 지시 2026-09-07: 「보내기」에 「자동검열로 보내기」) */
   onCensor?: () => void | Promise<void>;
+  /** 「이미지 편집으로 보내기」 (사용자 지시 2026-09-22) — 씬 캔버스·갤러리가 준다. 편집기 안에서는 안 준다 */
+  onEdit?: () => void | Promise<void>;
+  /** ★그림을 **누를 때** 굽는 자리 (이미지 편집기) — 합성 결과라 매 편집마다 PNG 를 만들 수 없다. 있으면 `url` 대신 쓴다 */
+  getUrl?: () => Promise<string>;
   /** 「새 탭으로 복제」 — **워크스페이스 파일에만** 뜻이 있다 (보관함에서는 안 넘어온다).
    *  ★미저장 그림에도 안 뜬다: 그때는 부르는 쪽이 이 줄 대신 다른 줄을 그린다 (`SceneActions`) */
   onClone?: () => void | Promise<void>;
@@ -117,6 +129,7 @@ export function ImageActions({
   /** ★쿼리를 하나 붙여 받는다 — 같은 주소를 `<img>` 가 no-cors 로 먼저 캐시해 두면
    *  그 뒤의 `fetch` 가 CORS 로 막힌다 (실측으로 밟았다, 2026-08-04). */
   const asBase64 = async () => {
+    if (getUrl) return (await getUrl()).split(",")[1] ?? "";
     /* ★★**미저장 그림은 주소가 `data:` 다** (자동 저장을 끈 결과 — `Canvas` 가 `takeSrc` 와 같은 꼴로
        준다). 거기에 `?b64=1` 을 붙이면 base64 가 깨져 i2i·인페인트가 실패했다 (사용자 지적
        2026-08-30). 이미 바이트를 들고 있으니 그대로 꺼낸다 — 서버에 물을 것이 없다. */
@@ -230,24 +243,40 @@ export function ImageActions({
     if (!upscale || busy || cost < 0) return;
     setBusy(true);
     try {
-      // ★미저장이면 **먼저 파일로 남긴다** — 업스케일은 서버가 그 파일을 연다
-      const target = ensureFile ? await ensureFile() : upscale.file;
-      if (!target) return;
       // ★여러 장 골랐으면 **전부** (사용자 지시 2026-08-29) — 한 장씩 차례로 보낸다
-      const list = upscale.files?.length ? upscale.files : [target];
+      const many = upscale.files?.length ?? 0;
       /* ★다중일 때만 묻는다 (사용자 결정 2026-08-29) — 장수만큼 Anlas 가 한 번에 나간다.
-         한 장은 공홈처럼 즉시다 (버튼의 비용 표기가 안내다). */
+         한 장은 공홈처럼 즉시다 (버튼의 비용 표기가 안내다).
+         ★저장보다 **먼저** 묻는다 — 취소했는데 미저장이 저장돼 있으면 안 된다 */
       if (
-        list.length > 1 &&
+        many > 1 &&
         !(await ask({
-          title: t("upscale.confirmMany", { n: list.length }),
+          title: t("upscale.confirmMany", { n: many }),
           body: t("upscale.confirmManyBody"),
           ok: t("upscale.button"),
           cancel: t("common.cancel"),
         }))
       )
         return;
+      const list = many ? upscale.files! : [upscale.file];
       for (const f of list) {
+        // ★★미저장은 **바이트를 보내고** 결과도 미저장으로 받는다 — 저장하지 않는다 (`unsaved` 의 ★★주)
+        const pv = previewOf(f);
+        if (pv) {
+          const r = await api<{ b64: string; fmt: string; ts: string }>("/api/upscale", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ workspace: upscale.ws, b64: pv.preview.b64, account: currentAccountId() }),
+          });
+          // 원본과 같은 씬 · 같은 저장 자리 · 같은 구조 (저장된 그림의 업스케일이 원본에서 물려받는 것과 같다)
+          usePreviews.getState().add({
+            workspace: pv.ws, scene_group: pv.scene_group, scene_group_id: pv.scene_group_id,
+            cell: pv.cell, cell_id: pv.cell_id, seed: pv.seed, enhance_of: pv.enhance_of,
+            tab: pv.save.tab, cell_no: pv.save.cell_no, exclude_slot_number: pv.save.exclude_slot_number,
+            env: pv.env ?? null, b64: r.b64, fmt: r.fmt, ts: r.ts,
+          });
+          continue;
+        }
         const r = await api<{ file: string; record: Rec }>("/api/upscale", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -300,16 +329,9 @@ export function ImageActions({
     setBusy(true);
     try {
       // ★여러 장 골랐으면 전부 싣는다 (사용자 지시 2026-08-29: "다중 선택도 대응")
-      const files =
-        isMulti && upscale.files?.length
-          ? upscale.files
-          : [ensureFile ? await ensureFile() : upscale.file];
-      const items = files
-        .filter((f): f is string => !!f)
-        .map((f) => ({
-          name: f.split("/").pop() ?? f,
-          rel: `${upscale.ws}/${f}`,
-        }));
+      const files = isMulti && upscale.files?.length ? upscale.files : [upscale.file];
+      // ★미저장은 데이터로 싣는다 (`droppedOf`)
+      const items = files.filter((f): f is string => !!f).map((f) => droppedOf(upscale.ws, f));
       if (items.length) sendToTagger(items);
     } finally {
       setBusy(false);
@@ -464,7 +486,8 @@ export function ImageActions({
                 }).catch((e) => toast(String(e), "warn"));
               })()
             }
-            tip={t("files.reveal")}
+            disabled={unsaved}
+            tip={unsaved ? t("act.needSaved") : t("files.reveal")}
           />
         )}
         {/* ★★**「어디로 보낼까」는 한 단추로 묶는다** (사용자 지시 2026-09-04).
@@ -473,11 +496,13 @@ export function ImageActions({
             ★단추는 일괄변환이 쓰던 아이콘, 갈래는 **글자**로 (같은 지시). */}
         <SendMenu
           busy={busy}
+          img={url ? { url, name } : undefined}
           items={[
             onClone && { mark: "clone", label: t("act.clone"), run: runClone },
             onKeep && { mark: "keep", label: t("gallery.keep"), run: onKeep },
             onConvert && { mark: "convert", label: t("tools.sendConvert"), run: onConvert },
             onCensor && { mark: "censor", label: t("tools.sendCensor"), run: onCensor },
+            onEdit && { mark: "edit", label: t("tools.sendEdit"), run: onEdit },
           ].filter((x): x is SendItem => !!x)}
         />
         {extra}
@@ -745,8 +770,17 @@ type SendItem = { mark: string; label: string; run: () => void | Promise<void> }
  *    아이콘이 동일한데 동작이 달라서 헷갈림"*). 예전에는 한 줄짜리 목록이 누르는 수만 늘린다고 바로
  *    실행했는데, 같은 아이콘이 자리마다 다른 일을 하게 되어 무엇이 일어날지 알 수 없었다.
  */
-function SendMenu({ busy, items }: { busy: boolean; items: SendItem[] }) {
+function SendMenu({ busy, items: given, img }: { busy: boolean; items: SendItem[]; img?: { url: string; name: string } }) {
   const t = useI18n((s) => s.t);
+  /* ★플러그인이 「보내기」에 둔 갈래 (`lib/pluginHost`, 메뉴 이름 image.send) — 앱 갈래 뒤에 붙는다.
+     그림은 주소와 이름만 넘긴다 (개별 책임: 무엇을 하든 플러그인 몫이다). */
+  const pick = usePickText();   // 갈래 이름표가 언어별 묶음일 수 있다
+  const plug = usePlugins((s) => s.menus["image.send"]);
+  usePlugins((s) => s.items); // 켜기/끄기가 바뀌면 다시 그린다
+  const items: SendItem[] = [
+    ...given,
+    ...(img ? (plug ?? []).filter((m) => isOn(m.plugin)).map((m) => ({ mark: `plugin:${m.key}`, label: pick(m.label), run: () => m.onClick(img) })) : []),
+  ];
   const [open, setOpen] = useState(false);
   const [at, setAt] = useState<{ x: number; y: number } | null>(null);
   const ref = useRef<HTMLButtonElement | null>(null);

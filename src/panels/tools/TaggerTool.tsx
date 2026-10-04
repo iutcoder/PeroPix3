@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useI18n } from "../../i18n";
 import { api } from "../../lib/backend";
 import { useImageDrop, type Dropped } from "../../lib/dropImages";
@@ -16,9 +16,11 @@ import { taggerPct, useTagger } from "../../store/tagger";
  *  그 그림(들)을 여기로 싣고 온다 (`sendToTagger`).
  *
  *  ★읽기만 한다. 저장하지도, 프롬프트에 넣지도 않는다 — 복사해 가는 것이 전부다.
- *  ★★**결과는 블록으로 아래에 쌓인다** (사용자 지시 2026-08-29: *"여러 이미지에도 대응하게,
+ *  ★★**결과는 블록으로 쌓인다** (사용자 지시 2026-08-29: *"여러 이미지에도 대응하게,
  *    연속으로 여러 개 넣어도 되고, 개별로 지울 수 있게"*). 한 번에 여러 장을 떨구면 차례로
  *    돌려 하나씩 붙는다 (서버 추론은 한 번에 하나다 — `tagger._lock`).
+ *  ★★**새로 넣은 것이 맨 위다** (사용자 지시 2026-09-28). 받는 상자 바로 아래에 붙고, 내려가
+ *    있던 기둥도 맨 위로 올린다 — 떨군 결과가 화면 밖 아래에 붙으면 찾으러 내려가야 했다.
  *  ★★**일치율은 옆판**이다 (사용자 지시 2026-08-29): 블록의 단추를 누르면 기둥이 왼쪽으로
  *    조금 밀리고 오른쪽에 그 블록의 태그 전부가 높은 순으로 선다. 다른 블록의 단추를
  *    누르면 즉시 바뀐다. 블록 안에 숫자를 섞지 않는다 — 복사해 갈 문자열이 지저분해진다.
@@ -55,6 +57,7 @@ export function TaggerTool() {
   const [left, setLeft] = useState(0);
   /** 일치율 옆판이 보고 있는 블록 */
   const [detail, setDetail] = useState<number | null>(null);
+  const column = useRef<HTMLDivElement>(null);
   useEffect(() => {
     kept = blocks;
   }, [blocks]);
@@ -103,7 +106,8 @@ export function TaggerTool() {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(it),
         });
-        setBlocks((b) => [...b, { id: ++seq, name: it.name, result: r }]);
+        setBlocks((b) => [{ id: ++seq, name: it.name, result: r }, ...b]);
+        column.current?.scrollTo({ top: 0 });
       } catch (e) {
         toast(`${it.name}: ${String(e)}`, "warn");
       } finally {
@@ -151,6 +155,7 @@ export function TaggerTool() {
       }}
     >
       <div
+        ref={column}
         style={{
           width: COL,
           maxWidth: "100%",
@@ -165,7 +170,7 @@ export function TaggerTool() {
           gap: "var(--sp-4)",
         }}
       >
-        {/* 받는 상자 — 비었을 때는 가운데에 크게, 블록이 있으면 위에 낮게 (그 아래로 쌓인다) */}
+        {/* 받는 상자 — 비었을 때는 가운데에 크게, 블록이 있으면 위에 낮게 (새 블록이 바로 아래에 붙는다) */}
         <div
           {...(downloading ? {} : zone)}
           data-tagger-drop

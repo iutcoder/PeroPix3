@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 from datetime import datetime
 from pathlib import Path
@@ -23,6 +24,7 @@ from pathlib import Path
 from PIL import Image
 from PIL.PngImagePlugin import PngInfo
 
+import thumbs
 import trash
 
 IMG_EXT = {".png", ".jpg", ".jpeg", ".webp"}
@@ -86,6 +88,25 @@ def _remap(st: dict, moved: dict[str, str]) -> None:
     st["sources"] = {k: moved.get(v, v) for k, v in st["sources"].items() if moved.get(v, v)}
 
 
+def carry_sources(root: Path, fn) -> int:
+    """**워크스페이스 쪽** 그림이 옮겨졌을 때 출처 표의 열쇠(`<ws>/<상대경로>`)를 따라 보낸다 (2026-10-01).
+    `fn(열쇠) → 새 열쇠 | None`. 고친 수를 준다.
+    ★안 고치면 그 보관 그림의 「새 탭으로 복제」가 출처의 기록(`env`)을 못 찾고, 원본을 다시 보관하면
+      같은 그림이 두 장이 된다 (`save` 의 토글이 열쇠로 판정한다)."""
+    st = _state(root)
+    n = 0
+    now: dict[str, str] = {}
+    for k, v in st["sources"].items():
+        new = fn(k)
+        if new and new != k:
+            n += 1
+        now[new or k] = v
+    if n:
+        st["sources"] = now
+        _put_state(root, st)
+    return n
+
+
 def stars(root: Path) -> list[str]:
     return _state(root)["starred"]
 
@@ -131,10 +152,33 @@ def folders(root: Path) -> list[dict]:
     ★★첫 줄(`""`)은 **뿌리 폴더 그 자체**다 — 뿌리에 놓인 것만 센다 (사용자 지시 2026-09-06:
       *"최상위 gallery 선택하면 하위 폴더의 이미지는 안 보이게"*). 예전에는 「전체」라 하위까지
       셌는데(2026-08-05), 화면의 첫 줄이 「전체」가 아니라 `gallery` 폴더가 된 뒤로(2026-08-23)
-      다른 폴더와 같은 규칙이어야 맞다. 숫자도 `images()` 가 보여 주는 것과 같아야 한다."""
-    out = [{"path": "", "count": sum(1 for _ in _imgs(root, root, False))}]
-    for d in sorted(p for p in root.rglob("*") if p.is_dir() and _visible(root, p)):
-        out.append({"path": d.relative_to(root).as_posix(), "count": sum(1 for _ in _imgs(root, d, False))})
+      다른 폴더와 같은 규칙이어야 맞다. 숫자도 `images()` 가 보여 주는 것과 같아야 한다.
+
+    ★★**숨은 폴더는 들어가기 전에 쳐낸다** (사용자 지적 2026-09-13: *"갤러리의 폴더 트리
+      로드 시간이 너무 느림"*). 예전에는 `rglob("*")` 로 **모든 파일**을 한 번 훑고 나서
+      폴더만 골랐다 — 정작 필요한 것은 폴더 이름과 개수뿐인데 `.thumbs`(그림 수만큼 쌓인다)와
+      `.trash` 까지 전부 세고 있었다. 한 칸 한 칸 내려가며 점으로 시작하는 칸에서 멈추면
+      그 안은 아예 안 연다. 실측(그림 125장·캐시 352개): **47.5ms → 1.2ms.**
+    ★차례는 그대로 **경로 순**이고, 대소문자를 접어 비교한다 (`rglob` + `sorted(Path)` 와 같다).
+      상위가 하위보다 먼저 와야 화면의 들여쓰기가 맞는다."""
+    out = []
+    stack = [(root, "")]
+    while stack:
+        d, rel = stack.pop()
+        n = 0
+        try:
+            with os.scandir(d) as it:
+                for e in it:
+                    if e.name.startswith("."):        # 우리 내부용 (`_visible` 과 같은 규칙)
+                        continue
+                    if e.is_dir(follow_symlinks=False):
+                        stack.append((Path(e.path), f"{rel}/{e.name}" if rel else e.name))
+                    elif os.path.splitext(e.name)[1].lower() in IMG_EXT:
+                        n += 1
+        except OSError:                               # 읽을 수 없는 폴더는 없는 셈 친다
+            continue
+        out.append({"path": rel, "count": n})
+    out.sort(key=lambda r: tuple(p.lower() for p in r["path"].split("/")))
     return out
 
 
@@ -171,7 +215,38 @@ def move_folder(root: Path, name: str, dest: str) -> dict:
     if d == src.parent:
         return {"path": rel}
     d.mkdir(parents=True, exist_ok=True)
-    tgt = d / src.name
+    return _relocate(root, src, d / src.name)
+
+
+def rename_folder(root: Path, name: str, new: str) -> dict:
+    """폴더 **이름만** 바꾼다 (사용자 지시 2026-09-10: *"갤러리 폴더 더블클릭하면 이름 변경할 수 있게"*).
+
+    ★**부모는 그대로**다 — 자리를 옮기는 것은 끌어다 놓기(`move_folder`)의 일이고, 창구가
+      둘이 되면 어느 쪽이 옮겼는지 흐려진다. 그래서 이름에 `/` 를 넣는 것도 막는다.
+    ★안에 든 그림의 별표·출처는 `_relocate` 가 새 경로로 따라 보낸다."""
+    rel = (name or "").strip().strip("/")
+    leaf = (new or "").strip().strip("/")
+    if not rel:
+        raise ValueError("보관함 자체는 이름을 바꿀 수 없습니다")
+    if not leaf:
+        raise ValueError("폴더 이름이 필요합니다")
+    if "/" in leaf or "\\" in leaf:
+        raise ValueError("이름에 / 는 쓸 수 없습니다")
+    src = safe_folder(root, rel)
+    if not src.is_dir():
+        raise ValueError("없는 폴더입니다")
+    tgt = safe_folder(root, (src.parent / leaf).relative_to(root.resolve()).as_posix())
+    if tgt == src:
+        return {"path": rel}
+    return _relocate(root, src, tgt)
+
+
+def _relocate(root: Path, src: Path, tgt: Path) -> dict:
+    """폴더를 `tgt` 자리로 옮기고 **안에 든 그림의 별표·출처를 새 경로로 따라 보낸다.**
+
+    ★자리 옮기기(`move_folder`)와 이름 바꾸기(`rename_folder`)가 **같은 이 함수**를 쓴다 —
+      곁장부를 따라 보내는 규칙이 두 벌이 되면 한쪽만 고쳐진다. 안 따라가면 별표가 없는
+      파일을 가리키고, 「새 탭으로 복제」가 출처를 잃는다."""
     if tgt.exists():
         raise ValueError("그 자리에 같은 이름의 폴더가 있습니다")
     shutil.move(str(src), str(tgt))
@@ -240,6 +315,27 @@ def images(root: Path, folder: str = "", page: int = 1, limit: int = 0) -> dict:
     }
 
 
+def thumb_path(root: Path, rel: str) -> Path:
+    """그 그림의 **썸네일 캐시 자리**. ★규칙은 여기 하나다 — 굽는 자리가 둘(보관할 때 ·
+    화면이 달라고 할 때)이라, 경로를 각자 셈하면 한쪽이 다른 이름으로 굽고 캐시가 두 벌이 된다."""
+    return root / THUMB_DIR / thumbs.flat_name(rel)
+
+
+def bake_thumb(root: Path, rel: str) -> None:
+    """보관하자마자 썸네일을 **미리 굽는다** (사용자 결정 2026-09-13, 1안).
+
+    ★★왜 여기냐: 예전에는 격자에 처음 뜰 때 구웠다(`/api/keep/thumb`). 한 번에 여러 장을
+      보관한 직후 갤러리를 열면 그 장수만큼의 굽기가 한꺼번에 몰려 목록까지 밀렸다
+      (실측 2026-09-13: 1.5MB PNG 한 장에 180ms). 보관하는 자리는 이미 파일을 복사하며
+      기다리는 자리라, 비용을 그쪽으로 옮긴다.
+    ★**실패해도 보관은 성공이다.** 썸네일은 다시 구우면 되지만 그림은 하나뿐이다 —
+      못 구우면 화면이 달라고 할 때 그때 굽는다 (그 경로는 그대로 남아 있다)."""
+    try:
+        thumbs.derive(safe_folder(root, rel), thumb_path(root, rel))
+    except Exception as e:                            # 굽기는 곁다리다 — 보관을 막지 않는다
+        print(f"[보관] 썸네일을 미리 굽지 못했습니다 ({rel}): {e}", flush=True)
+
+
 def _slice(items: list, page: int, limit: int):
     """정렬된 목록에서 한 쪽을 떼어 준다. ★`limit<=0` 이면 자르지 않는다."""
     if limit <= 0:
@@ -292,6 +388,7 @@ def save(root: Path, src: Path, folder: str, meta: dict | None, key: str = "") -
             im.convert("RGBA" if im.mode in ("RGBA", "LA") else "RGB").save(dst, format="PNG", pnginfo=png)
 
     rel = dst.relative_to(root.resolve()).as_posix()
+    bake_thumb(root, rel)                 # ★격자에서 기다리지 않게 여기서 굽는다 (그 함수의 ★★주)
     if key:
         st["sources"][key] = rel
         _put_state(root, st)
@@ -326,7 +423,9 @@ def import_bytes(root: Path, data: bytes, name: str, folder: str = "") -> dict:
     tmp = dst.with_suffix(dst.suffix + ".part")
     tmp.write_bytes(data)
     tmp.replace(dst)      # ★다 쓴 뒤에 이름을 준다 — 반쯤 쓰인 파일이 목록에 안 뜨게
-    return {"file": dst.relative_to(root.resolve()).as_posix()}
+    rel = dst.relative_to(root.resolve()).as_posix()
+    bake_thumb(root, rel)                 # 밖에서 들인 그림도 같다
+    return {"file": rel}
 
 
 def origin_of(root: Path, rel: str) -> dict | None:

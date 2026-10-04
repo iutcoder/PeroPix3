@@ -28,13 +28,58 @@
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import re
+import time
 
 import httpx
 
 ANTHROPIC_VERSION = "2023-06-01"
+
+# ★★**429·5xx 는 두 번 더 보낸다** (2026-09-22, 페로데스크의 SDK 가 하는 것과 같다).
+#   공급자 쪽의 일시적 혼잡·과부하에 첫 응답만 보고 턴을 버리면, 사용자는 다시 말을 걸어야 하고
+#   그때까지 쌓인 도구 결과도 함께 버려진다. 1.5초·3초 뒤에 한 번씩 — 60초 타임아웃 안이다.
+#   ★`Retry-After` 가 초 단위 숫자로 오면 그것을 따르되 10초까지만 (그보다 길면 기다리게 하는 것이다).
+RETRY_ON = {429, 500, 502, 503, 529}
+RETRY_WAIT = (1.5, 3.0)
+
+
+async def _post(c: "httpx.AsyncClient", url: str, **kw) -> "httpx.Response":
+    """`c.post` 에 재시도를 얹은 것. 응답은 마지막 것이다."""
+    r = await c.post(url, **kw)
+    for wait in RETRY_WAIT:
+        if r.status_code not in RETRY_ON:
+            break
+        ra = (r.headers.get("retry-after") if getattr(r, "headers", None) else None) or ""
+        try:
+            wait = min(10.0, float(ra)) if ra.strip() else wait
+        except ValueError:
+            pass
+        await asyncio.sleep(wait)
+        r = await c.post(url, **kw)
+    return r
+
+
+# ★★오픈라우터의 402 — 「requires more credits, or fewer max_tokens … can only afford N」 (2026-09-22).
+#   오픈라우터는 요청 전에 「입력 + max_tokens 만큼의 출력」 값을 키 한도에 미리 걸어 두고,
+#   `max_tokens` 가 없으면 **고정 상한(65,536)** 을 쓴다 (문서 「Credit Limits」). 우리는 안 보내는
+#   것이 기본이라(`chat` 주석) 키의 남은 한도가 그 상한 아래로 내려가는 순간 모든 요청이 거절된다.
+#   ★그래서 **거절당했을 때만** N 보다 조금 작은 값을 붙여 한 번 더 보낸다 — 기본 정책은 그대로다.
+#   ★N 이 2,000 미만이면 그대로 오류다: 그 값으로는 답이 잘려 다른 모양의 실패가 된다.
+AFFORD_RE = re.compile(r"can only afford (\d+)")
+AFFORD_MARGIN = 1000
+AFFORD_MIN = 2000
+
+
+def afford_tokens(text: str) -> int | None:
+    """402 본문에서 「감당할 수 있는 토큰 수」를 꺼낸다. 없으면 None."""
+    m = AFFORD_RE.search(text or "")
+    if not m:
+        return None
+    n = int(m.group(1))
+    return n - AFFORD_MARGIN if n >= AFFORD_MIN else None
 # ★60초다 (사용자 결정 2026-08-08). 늘리는 것은 해결이 아니라 **기다리게 하는 것**이다 —
 #   공급자가 불안정해서 나는 타임아웃은 라우팅(아래 OR_ROUTING)으로 고치고, 여기서는 빨리 포기한다.
 TIMEOUT = 60.0
@@ -161,6 +206,7 @@ CURATED = {
         "openai/gpt-5.6-sol",
         "x-ai/grok-4.6",   # ★4.5 → 4.6 (사용자 지시 2026-08-30: 목록에 4.6 이 떠서 올렸다)
         "deepseek/deepseek-v4-pro",
+        "deepseek/deepseek-v4.1-flash",   # ★사용자 지시 2026-09-22
         "qwen/qwen3.8-max",
     ],
 }
@@ -286,6 +332,9 @@ VERTEX_THINKING: dict[str, dict] = {
     # ★3.6 Flash 는 뺐다 (사용자 지시 2026-08-30: 필요 없음) — 3.7 Flash 가 그 자리다
     # ★이름이 `gemini-3.1-pro` 가 아니다 — 그건 404 다 (실측 2026-08-08)
     "gemini-3.1-pro-preview": {"efforts": ["high", "medium", "low"], "default": "high"},
+    # ★3.5 Flash (사용자 요청 2026-09-15) — 실측: minimal·low·medium·high 는 200, xhigh 는 400.
+    #   기본 단계는 문서에서 확인하지 못해 비워 둔다 (화면에는 「모델 기본값」만 뜬다).
+    "gemini-3.5-flash": {"efforts": ["high", "medium", "low", "minimal"], "default": ""},
 }
 
 # ★★**고를 수 있는 것 전부** — 위 표는 「추론 단계를 아는 것」일 뿐이다 (2026-08-25).
@@ -302,9 +351,70 @@ VERTEX_MODELS = [
     #   그래서 여기서는 단계를 안 보낸다 (위 ★★주). ★**2026-10-16 은퇴 예정**이므로
     #   그 뒤로는 404 가 된다 (구글 문서: 2.5 Pro·Flash·Flash-Lite 은퇴일).
     "gemini-2.5-pro",
+    # ★2.5 Flash 는 **도로 뺐다** (사용자 지시 2026-09-15). 실측으로 200 이 떴지만 쓸 일이 없다 —
+    #   같은 날 더했다가 같은 날 걷었다. 다시 더하지 말 것.
 ]
 # OpenAI 목록에는 대화용이 아닌 것도 섞여 온다 — 이름으로 걸러 낸다
 NOT_CHAT = ("embedding", "tts", "whisper", "dall-e", "moderation", "audio", "realtime", "image", "search")
+
+
+# ★★**직접 연결은 창을 오픈라우터 공개 목록에서 찾는다** (사용자 지시 2026-09-22). 앤트로픽·OpenAI 의 목록 API 는
+#   창을 안 준다 (OpenAI: id·created·owned_by·shutdown_date 뿐, 앤트로픽: id·display_name·created_at 뿐, 실측).
+#   Vertex 는 고정 목록이라 물어볼 창구가 없다. 오픈라우터 공개 목록(키 없이 열린다)은 같은 모델을
+#   `anthropic/claude-opus-4.6` 꼴로 들고 있어 창(`context_length`)과 단가 경계(`pricing.overrides`)를 함께 준다.
+#   못 찾으면 없는 채로 두어 화면이 12만 기본값을 쓴다 (`lib/chatContext.compactAt`).
+OR_PUBLIC = "https://openrouter.ai/api/v1/models"
+OR_PREFIX = {"anthropic": "anthropic", "openai": "openai", "vertex": "google"}
+OR_WINDOWS_TTL = 3600.0
+_or_windows_cache: dict = {"at": 0.0, "map": {}}
+
+
+def or_id(pid: str, model: str) -> str:
+    """직접 연결의 모델 id 를 오픈라우터 id 로. 앤트로픽만 모양이 다르다: 날짜 꼬리를 떼고 `4-5` 를 `4.5` 로
+    (`claude-sonnet-4-5-20250929` → `anthropic/claude-sonnet-4.5`, `claude-3-5-sonnet` → `claude-3.5-sonnet`)."""
+    m = model
+    if pid == "anthropic":
+        m = re.sub(r"-\d{8}$", "", m)
+        m = re.sub(r"(\d)-(\d)", r"\1.\2", m)
+    return f"{OR_PREFIX[pid]}/{m}"
+
+
+def window_of(m: dict) -> dict:
+    """오픈라우터 목록 한 줄에서 창(`ctx`)과 단가 경계(`tier`)만. 오픈라우터 목록과 직접 연결 둘 다 이것을 쓴다.
+    ★단가 경계는 `pricing.overrides[].min_prompt_tokens` (예: Grok 4.6 은 20만부터 두 배). 여럿이면 가장 낮은 것."""
+    out: dict = {}
+    if m.get("context_length"):
+        out["ctx"] = int(m["context_length"])
+    tiers = [int(o["min_prompt_tokens"]) for o in ((m.get("pricing") or {}).get("overrides") or [])
+             if isinstance(o, dict) and o.get("min_prompt_tokens")]
+    if tiers:
+        out["tier"] = min(tiers)
+    return out
+
+
+async def or_windows() -> dict[str, dict]:
+    """오픈라우터 공개 목록 → `{id: {ctx, tier}}`. 한 시간 캐시. 실패하면 빈 dict (창 없이 간다: 목록 자체는 뜬다)."""
+    now = time.monotonic()
+    if _or_windows_cache["map"] and now - _or_windows_cache["at"] < OR_WINDOWS_TTL:
+        return _or_windows_cache["map"]
+    try:
+        async with httpx.AsyncClient(timeout=8.0) as c:
+            r = await c.get(OR_PUBLIC)
+        if r.status_code >= 400:
+            return {}
+        mp = {m["id"]: window_of(m) for m in (r.json().get("data") or []) if isinstance(m, dict) and m.get("id")}
+    except Exception:
+        return {}
+    _or_windows_cache.update(at=now, map=mp)
+    return mp
+
+
+def attach_windows(pid: str, rows: list[dict], windows: dict[str, dict]) -> None:
+    """직접 연결의 목록 행에 오픈라우터에서 찾은 창·단가 경계를 붙인다. 못 찾은 행은 그대로."""
+    for row in rows:
+        w = windows.get(or_id(pid, row["id"]))
+        if w:
+            row.update(w)
 
 
 async def models(llm: dict) -> dict:
@@ -330,6 +440,15 @@ async def models(llm: dict) -> dict:
                 # 제미나이는 추론이 필수다 — 사실상 끄기는 `minimal` 이다
                 row["reasoningLocked"] = True
             out.append(row)
+        # ★★**상위 버전은 오픈라우터 공개 목록에서 찾는다** (사용자 지적 2026-09-22: 3.7 Flash 가 있는데 3.8 이 안 떴다).
+        #   Vertex 는 목록 API 가 API 키를 안 받아(`publishers/google/models` 는 OAuth 만, 실측 401) 고정 목록뿐인데,
+        #   그러면 `newer_than` 이 볼 상대가 없어 새 판이 영영 안 뜬다. 오픈라우터의 `google/…` 이 같은 이름을 쓰므로
+        #   그것을 상대로 삼는다 (`:batch` 같은 변종은 뺀다).
+        #   ★오픈라우터에 있다고 Vertex 에도 반드시 있는 것은 아니다 — `new` 표시로 뜨고, 없으면 그 모델의 404 가 그대로 보인다.
+        win = await or_windows()
+        cands = [{"id": i.split("/", 1)[1]} for i in win if i.startswith("google/gemini-") and ":" not in i]
+        out += newer_than(VERTEX_MODELS, cands)
+        attach_windows("vertex", out, win)
         return {"models": out, "fixed": True}
     key = llm.get("key", "")
     if pid == "local":
@@ -371,7 +490,11 @@ async def models(llm: dict) -> dict:
         for m in d.get("models", []):
             if "generateContent" not in (m.get("supportedGenerationMethods") or []):
                 continue
-            out.append({"id": m["name"].split("/")[-1], "label": m.get("displayName") or ""})
+            row = {"id": m["name"].split("/")[-1], "label": m.get("displayName") or ""}
+            # ★창 크기 — 제미나이 목록은 `inputTokenLimit` 으로 준다 (압축 문턱이 본다)
+            if m.get("inputTokenLimit"):
+                row["ctx"] = int(m["inputTokenLimit"])
+            out.append(row)
     elif pid == "openai":
         for m in d.get("data", []):
             mid = m.get("id", "")
@@ -390,6 +513,8 @@ async def models(llm: dict) -> dict:
                 inp = 0.0
             img = "image" in ((m.get("architecture") or {}).get("input_modalities") or [])
             row = {"id": m["id"], "label": m.get("name") or "", "in": round(inp, 3), "vision": img}
+            # ★창 크기와 단가 경계 — 화면의 대화 압축 문턱이 이것으로 접는다 (`lib/chatContext.ts`). 없으면 기본값
+            row.update(window_of(m))
             # ★추론 단계는 **모델이 알려 준다** — 코드에 박으면 모델마다 다른 것을 못 맞춘다
             #   (문서: "Use this when building client UIs"). `mandatory` 면 끌 수 없다.
             rs = m.get("reasoning") or {}
@@ -398,6 +523,8 @@ async def models(llm: dict) -> dict:
                 row["effortDefault"] = rs.get("default_effort") or ""
                 row["reasoningLocked"] = bool(rs.get("mandatory"))
             out.append(row)
+    if pid in OR_PREFIX:
+        attach_windows(pid, out, await or_windows())
     out.sort(key=lambda m: m["id"])
     if pid in CURATED:
         pick = CURATED[pid]
@@ -480,8 +607,33 @@ def _anthropic_images(messages: list[dict]) -> list[dict]:
     return out
 
 
+#: 앤트로픽이 아는 `tool_use` 조각의 키
+_TOOL_USE_KEYS = ("type", "id", "name", "input")
+
+
+def _anthropic_tool_uses(messages: list[dict]) -> list[dict]:
+    """`tool_use` 조각에서 앤트로픽이 모르는 키를 뺀다.
+
+    ★`raw` 는 제미나이가 다음 턴에 그대로 되돌려 받아야 하는 원본이라 정본에 남는다 (`_gemini`).
+      버텍스로 시작한 대화를 앤트로픽으로 이어 가면 그것이 그대로 실린다.
+    ★앤트로픽은 모르는 필드를 400 으로 돌려준다 (조수 메시지의 `usage` 가 실려 첫 턴부터 깨졌던 것과 같은 종류, 사용자 제보 2026-09-28)."""
+    out = []
+    for m in messages:
+        c = m.get("content")
+        if not isinstance(c, list) or not any(
+            isinstance(b, dict) and b.get("type") == "tool_use" and set(b) - set(_TOOL_USE_KEYS) for b in c
+        ):
+            out.append(m)
+            continue
+        out.append({**m, "content": [
+            {k: b[k] for k in _TOOL_USE_KEYS if k in b} if isinstance(b, dict) and b.get("type") == "tool_use" else b
+            for b in c
+        ]})
+    return out
+
+
 async def _anthropic(key, model, system, messages, tools, max_tokens, url, effort="") -> dict:
-    messages = _anthropic_images(messages)
+    messages = _anthropic_tool_uses(_anthropic_images(messages))
     body: dict = {
         # ★여기만 `max_tokens` 를 **꼭** 보낸다 — Messages API 가 요구한다 (문서 확인).
         #   다른 경로는 안 보내고 모델 기본값을 쓴다 (`chat()` 주석).
@@ -506,7 +658,8 @@ async def _anthropic(key, model, system, messages, tools, max_tokens, url, effor
             for t in tools
         ]
     async with httpx.AsyncClient(timeout=TIMEOUT) as c:
-        r = await c.post(
+        r = await _post(
+            c,
             url,
             headers={
                 "x-api-key": key,
@@ -588,7 +741,27 @@ def _to_openai(system: str, messages: list[dict], cache: bool = False) -> list[d
                 out.append({"role": "user", "content": parts})
             elif texts:
                 out.append({"role": "user", "content": "\n".join(texts)})
+    # ★★**마지막 메시지에도 표식을 건다** (2026-09-22). 시스템에만 걸면 클로드 계열은 도구 명세와
+    #   지침까지만 캐시되고 **대화 앞부분은 매 바퀴 새로 읽는다.** 오픈라우터 문서: 표식은 넷까지,
+    #   자리는 system·user·tool 메시지. 마지막에 걸면 거기까지의 앞부분 전체가 캐시 후보가 된다.
+    #   ★Grok·OpenAI·딥식은 자동 캐시라 이 표식과 무관하고, 있어도 탈이 없다 (시스템 표식과 같은 사정).
+    if cache and len(out) > 1:
+        _mark_last(out[-1])
     return out
+
+
+def _mark_last(m: dict) -> None:
+    """메시지 하나의 마지막 글 조각에 `cache_control` 을 단다. 글이 문자열이면 조각 목록으로 바꾼다."""
+    c = m.get("content")
+    if isinstance(c, str):
+        m["content"] = [{"type": "text", "text": c, "cache_control": {"type": "ephemeral"}}]
+        return
+    if isinstance(c, list):
+        for part in reversed(c):
+            if isinstance(part, dict) and part.get("type") == "text":
+                part["cache_control"] = {"type": "ephemeral"}
+                return
+        c.append({"type": "text", "text": " ", "cache_control": {"type": "ephemeral"}})
 
 
 async def _openai_compat(key, model, system, messages, tools, max_tokens, url,
@@ -619,7 +792,13 @@ async def _openai_compat(key, model, system, messages, tools, max_tokens, url,
         ]
     headers = {"Authorization": f"Bearer {key}", "content-type": "application/json"}
     async with httpx.AsyncClient(timeout=timeout) as c:
-        r = await c.post(url, headers=headers, json=body)
+        r = await _post(c, url, headers=headers, json=body)
+        # ★오픈라우터의 402 「can only afford N」 — 그 값으로 한 번 더 (위 `afford_tokens` 의 ★★주)
+        if r.status_code == 402 and routing and "max_tokens" not in body:
+            n = afford_tokens(r.text)
+            if n:
+                body["max_tokens"] = n
+                r = await _post(c, url, headers=headers, json=body)
         # ★★공식 OpenAI 의 추론 모델은 `/v1/chat/completions` 에서 **도구와 추론을 함께 못 쓴다**
         #   (실측 2026-08-30, gpt-5.6-terra: "Function tools with reasoning_effort are not supported
         #   … use /v1/responses or set reasoning_effort to 'none'"). 우리는 이 창구에 효과 단계를
@@ -629,7 +808,7 @@ async def _openai_compat(key, model, system, messages, tools, max_tokens, url,
         if (r.status_code == 400 and tools and "reasoning_effort" in r.text
                 and "reasoning_effort" not in body):
             body["reasoning_effort"] = "none"
-            r = await c.post(url, headers=headers, json=body)
+            r = await _post(c, url, headers=headers, json=body)
     if r.status_code >= 400:
         return {"error": _err(r)}
     d = r.json()
@@ -776,7 +955,8 @@ async def _gemini(key, model, system, messages, tools, max_tokens, url, effort="
             }
         ]
     async with httpx.AsyncClient(timeout=TIMEOUT) as c:
-        r = await c.post(
+        r = await _post(
+            c,
             url.format(model=model),
             params={"key": key},  # ★버텍스 Express 는 쿼리로 키를 받는다 (헤더가 아니다)
             headers={"content-type": "application/json"},

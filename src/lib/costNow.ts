@@ -10,11 +10,12 @@
  */
 
 import { anlasCost, type Cost } from "./anlas.ts";
-import { modelCaps, useGen } from "../store/gen";
+import { useGen } from "../store/gen";
 import { useImageInput } from "../store/imageInput";
 import { useSub } from "../store/sub";
 import { allScenes, useWs } from "../store/workspace";
 import { useUi } from "../store/ui";
+import { usePrompt } from "../store/prompt";
 
 /** 지금 세트에서 **한 바퀴에 나가는 장 수** — 잠긴 씬·잠긴 카드는 빠진다.
  *
@@ -26,10 +27,19 @@ export function slotsNow(): number {
   return allScenes(tab).filter((x) => !x.cell.locked && !x.card.locked).length;
 }
 
-/** 한 바퀴가 실제로 만드는 장 수 = 잠기지 않은 씬 × 슬롯당 장수.
- *  ★★`perSlot` 을 빼먹으면 조수가 "10장"이라고 해 놓고 30장이 나간다 (시뮬레이션 구멍 B). */
+/** ★★**순차 생성 모드면 켜 둔 인물 수만큼 장이 는다** (2026-09-15). 그 모드는 인물을 한 장에
+ *  모으지 않고 **한 명씩** 뽑는다 (`store/gen` 의 `parties`). 꺼져 있거나 켜진 인물이 없으면 1 이다. */
+export const seqTimesNow = (): number => {
+  const p = usePrompt.getState();
+  return p.seqChars ? Math.max(1, p.chars.filter((c) => c.on).length) : 1;
+};
+
+/** 한 바퀴가 실제로 만드는 장 수 = 잠기지 않은 씬 × 슬롯당 장수 × (순차 모드면) 인물 수.
+ *  ★★`perSlot` 을 빼먹으면 조수가 "10장"이라고 해 놓고 30장이 나간다 (시뮬레이션 구멍 B).
+ *  ★★세는 자리는 **여기 하나**다 — 푸터도 조수도 이것을 부른다. 화면이 따로 곱하면
+ *    「예상 > 실제」가 조용히 생긴다 (카드 잠금에서 한 번 밟은 자리다). */
 export const countNow = (rounds = 1): number =>
-  slotsNow() * useUi.getState().perSlot * Math.max(1, rounds);
+  slotsNow() * useUi.getState().perSlot * seqTimesNow() * Math.max(1, rounds);
 
 /** 지금 설정으로 `rounds` 바퀴 돌 때의 값. ★`free` 가 참이면 **돈이 안 나간다**. */
 export function costNow(rounds = 1): Cost {
@@ -37,7 +47,7 @@ export function costNow(rounds = 1): Cost {
   const img = useImageInput.getState();
   // ★지금 워크스페이스의 **계정** 것이다 — 계정마다 티어·Opus 잔량이 다르다 (`store/sub`)
   const sub = useSub.getState().current();
-  const cap = modelCaps(params.model);
+  const ride = img.riding();
   // ★해상도 칸이 아니라 **나가는 크기**로 센다 (Focused 인페인트는 서버가 1MP 로 키운다)
   const size = img.costSize();
   const usage = (sub?.tier ?? 0) >= 3 ? (sub?.usage ?? null) : null;
@@ -48,10 +58,11 @@ export function costNow(rounds = 1): Cost {
     steps: params.steps,
     opus: (sub?.tier ?? 0) >= 3,
     opusExhausted: !!usage?.isNegative,
-    // ★그 모델이 지원하지 않으면 안 나간다 — 능력표로 막아야 보내는 것과 표시가 같아진다
-    uncachedVibes: cap.vibe && img.vibeOn ? img.vibes.filter((v) => !v.encoded).length : 0,
-    activeVibes: cap.vibe && img.vibeOn ? img.vibes.length : 0,
-    refCount: cap.char_ref && img.refOn ? img.refs.length : 0,
+    // ★★거르는 규칙은 **`riding` 하나**다 (모델 능력 · 묶음 스위치 · 낱장 스위치).
+    //   여기서 다시 적으면 화면의 요금과 실제로 나가는 것이 갈린다
+    uncachedVibes: ride.vibes.filter((v) => !v.encoded).length,
+    activeVibes: ride.vibes.length,
+    refCount: ride.refs.length,
     inpaint: img.costInpaint(),
     strength: img.costStrength(),
     count: countNow(rounds),

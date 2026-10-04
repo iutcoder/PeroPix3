@@ -12,6 +12,7 @@
  */
 import { useUi } from "../store/ui";
 import { useWs } from "../store/workspace";
+import { useEditor } from "../editor/store";
 
 export type AgentAt =
   | { kind: "card"; cardKind: string; id: string; log?: string }
@@ -28,7 +29,9 @@ export type AgentAt =
     }
   | { kind: "file"; workspace?: string; path?: string; log?: string }
   | { kind: "guide"; log?: string }
-  | { kind: "queue"; workspace?: string; sceneGroup?: string; log?: string };
+  | { kind: "queue"; workspace?: string; sceneGroup?: string; log?: string }
+  /** 이미지 편집의 만화 캔버스 — 그 캔버스의 그 페이지 (AI 콘티, 설계 10번) */
+  | { kind: "comic"; doc?: string; page?: string; log?: string };
 
 /** 그 자리를 여는 문구 (툴팁) — **무엇이 열리는지** 미리 말해 준다 */
 export function atLabel(at: AgentAt, t: (k: string) => string): string {
@@ -38,6 +41,7 @@ export function atLabel(at: AgentAt, t: (k: string) => string): string {
     case "file": return t("ai.atFile");
     case "guide": return t("ai.atGuide");
     case "queue": return t("ai.atQueue");
+    case "comic": return t("ai.atComic");
   }
 }
 
@@ -60,6 +64,14 @@ export async function openAt(at: AgentAt): Promise<void> {
   if (at.kind === "file") {
     ui.setMode("utility");
     if (at.path) ui.reveal("left", `file:${at.path}`, true);
+    return;
+  }
+  if (at.kind === "comic") {
+    ui.setMode("editor");
+    // 캔버스를 그것으로 바꾸고 그 페이지로 무대를 옮긴다
+    await useEditor.getState().hydrate();
+    if (at.doc && useEditor.getState().docs.some((d) => d.id === at.doc)) useEditor.getState().setCur(at.doc);
+    if (at.page) useEditor.getState().revealPage(at.page);
     return;
   }
 

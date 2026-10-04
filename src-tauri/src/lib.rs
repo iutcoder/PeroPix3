@@ -1,4 +1,5 @@
 mod backend;
+mod winstate;
 
 use std::sync::Mutex;
 use std::sync::OnceLock;
@@ -22,10 +23,15 @@ fn uptime_ms() -> u128 {
 /// ★★**이번 실행의 열쇠가 주소 앞머리로 붙는다** (`/k/<열쇠>`, 2026-08-26). 화면이 쓰는
 ///   주소는 전부 이 값에 경로를 이어 붙여 만들어지므로, 여기 한 번 붙이면 그림 태그와
 ///   웹소켓까지 함께 덮인다 — 왜 필요한지는 `backend::backend_key` 의 ★★주에 있다.
+/// ★★**포트는 파이썬이 알려 온 것이다** (2026-09-29, `backend::wanted_port` 의 ★★주). 알려 올 때까지
+///   기다리므로 명령 스레드를 붙잡지 않게 따로 돌린다.
 #[tauri::command]
-fn backend_url() -> String {
+async fn backend_url() -> String {
     let key = backend::backend_key();
-    let base = format!("http://127.0.0.1:{}", backend::backend_port());
+    let port = tauri::async_runtime::spawn_blocking(backend::backend_port)
+        .await
+        .unwrap_or(backend::DEFAULT_PORT);
+    let base = format!("http://127.0.0.1:{port}");
     if key.is_empty() { base } else { format!("{base}/k/{key}") }
 }
 
@@ -37,11 +43,56 @@ fn drag_restore(window: tauri::WebviewWindow, ratio_x: f64, offset_y: f64) -> Re
     Err("Windows 전용 창 복원 명령입니다".into())
 }
 
+/// 창 크기·자리를 적어 둔다 — **화면이 부른다** (`WindowFrame` 의 크기 사건, 300ms 디바운스).
+/// 켤 때 그대로 되살린다 (`winstate` 머리 주석 · `run` 의 setup).
+#[tauri::command]
+fn note_window(x: i32, y: i32, w: u32, h: u32, maximized: bool) {
+    let s = winstate::WinState { x, y, w, h, maximized };
+    if let Err(e) = winstate::save(&backend::root(), &s) {
+        backend::log_line(&format!("[window] 창 자리를 못 적었습니다: {e}"));
+    }
+}
+
 /// 이 앱이 서 있는 자리. ★화면이 **「지금 붙은 백엔드가 내 것인가」**를 묻는 데 쓴다 —
 /// 백엔드도 같은 값을 알려 주므로(`/api/health` 의 `root`), 둘이 다르면 남의 것에 붙은 것이다.
 #[tauri::command]
 fn app_root() -> String {
     backend::root().to_string_lossy().to_string()
+}
+
+#[tauri::command]
+fn restart_backend(app: tauri::AppHandle) -> Result<(), String> {
+    let state = app.try_state::<backend::Backend>().ok_or("백엔드 상태가 없습니다")?;
+    state.kill();
+    let child = backend::spawn().map_err(|e| format!("백엔드를 다시 띄우지 못했습니다: {e}"))?;
+    backend::log_line(&format!("[backend] respawned, asking port {}", backend::wanted_port().0));
+    if let Ok(mut g) = state.0.lock() {
+        *g = Some(child);
+    }
+    Ok(())
+}
+
+/// **그냥 다시 켠다** — 앱 전체를. `apply_update` 의
+/// 뒷부분과 같은 차례(사이드카 내림 → 자물쇠 놓음 → 새 판 띄움 → 나감)인데 갈아 끼우는 것이 없다.
+/// ★`update::relaunch` 를 쓰지 않는다 — 그쪽은 뿌리의 `PeroPix.exe` 를 띄우는데, 개발 중(`tauri dev`)에는
+///   exe 가 `target/debug/` 에 있어 뿌리에 없다. **지금 도는 그 exe** 를 그대로 띄운다.
+#[tauri::command]
+fn restart_app(app: tauri::AppHandle) -> Result<(), String> {
+    let root = backend::root();
+    if let Some(state) = app.try_state::<backend::Backend>() {
+        state.kill();
+    }
+    if let Some(l) = app.try_state::<InstanceLock>() {
+        if let Ok(mut g) = l._file.lock() {
+            g.take();
+        }
+    }
+    let exe = std::env::current_exe().map_err(|e| format!("실행 파일을 못 찾았습니다: {e}"))?;
+    let mut cmd = std::process::Command::new(exe);
+    cmd.current_dir(&root);
+    cmd.spawn().map_err(|e| format!("다시 켜지 못했습니다: {e}"))?;
+    app.exit(0);
+    Ok(())
 }
 
 struct InstanceLock {
@@ -63,7 +114,7 @@ pub fn run() {
 
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
-        .invoke_handler(tauri::generate_handler![backend_url, app_root, uptime_ms, drag_restore])
+        .invoke_handler(tauri::generate_handler![backend_url, app_root, uptime_ms, drag_restore, note_window, restart_backend, restart_app])
         .setup(move |app| {
             app.manage(InstanceLock { _file: lock });
             /* ★★**웹뷰 바탕을 어둡게 깔아 둔다** (사용자 지적 2026-08-27: *"처음에 흰 화면이
@@ -76,11 +127,32 @@ pub fn run() {
                ★설정 파일로는 못 준다 — `tauri.conf.json` 의 창 스키마에 그 열쇠가 없다. */
             if let Some(w) = app.get_webview_window("main") {
                 let _ = w.set_background_color(Some(tauri::window::Color(0x16, 0x16, 0x1a, 0xff)));
+                /* ★★**마지막에 맞춰 둔 크기·자리로 띄운다** (사용자 지시 2026-09-14: *"재실행할 때마다
+                     창 크기가 고정 같은데, 마지막에 조정했던 크기로 복원해 줘"*). 설정의 1440×900 은
+                     **처음 켤 때의 값**이 된다.
+                   ★★**보이기 전에** 맞춘다 — `tauri.conf.json` 에서 `visible: false` 로 만들어 두고 여기서
+                     맞춘 뒤 띄운다. 뜬 뒤에 맞추면 기본 크기가 한 번 번쩍이고 줄어든다.
+                   ★★**어떤 길로 가도 창은 뜬다** — 아래 `show()` 는 되살리기가 실패하든 말든 돈다.
+                     여기서 일찍 돌아가면 창이 영영 안 보이는 앱이 된다.
+                   ★적어 둔 자리가 지금 화면 밖이면 **자리만** 버리고 크기는 쓴다 (`on_screen`). */
+                if let Some(st) = winstate::load(&backend::root()) {
+                    let _ = w.set_size(tauri::PhysicalSize::new(st.w, st.h));
+                    if winstate::on_screen(&w, &st) {
+                        let _ = w.set_position(tauri::PhysicalPosition::new(st.x, st.y));
+                    } else {
+                        backend::log_line("[window] 적어 둔 자리가 화면 밖이라 가운데로 띄웁니다");
+                        let _ = w.center();
+                    }
+                    if st.maximized {
+                        let _ = w.maximize();
+                    }
+                }
+                let _ = w.show();
             }
             match backend::spawn() {
                 Ok(child) => {
                     app.manage(backend::Backend(Mutex::new(Some(child))));
-                    backend::log_line(&format!("[backend] spawned on port {}", backend::backend_port()));
+                    backend::log_line(&format!("[backend] spawned, asking port {}", backend::wanted_port().0));
                 }
                 Err(e) => {
                     // 백엔드가 안 떠도 창은 띄운다 — 프론트가 상태를 표시하고 로그를 안내한다.

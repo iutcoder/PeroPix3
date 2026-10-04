@@ -1,17 +1,20 @@
 import { useEffect, useState } from "react";
 import { useI18n } from "../i18n";
+import { PluginSlot } from "../components/PluginSlot";
 
 /** ★키를 조립하지 않는다 — i18n 검사가 동적 접두사를 잡는다 (`i18n.test.ts`) */
 const SEED_LABELS = ["options.seedFixed", "options.seedRound", "options.seedScene"] as const;
 const SEED_HINTS = ["options.seedFixedHint", "options.seedRoundHint", "options.seedSceneHint"] as const;
-import { SEED_MODES, modelCaps, randomSeed, useGen } from "../store/gen";
+import { SEED_MODES, randomSeed, useGen, type ParamsHost } from "../store/gen";
 import { useQueue } from "../store/queue";
 import { allScenes, useWs } from "../store/workspace";
 import { useImageInput } from "../store/imageInput";
+import { ImageInputBadge } from "./ImageInputPanel";
 import { useUi } from "../store/ui";
 import { toast } from "../store/toast";
 import { MAX_PER_IMAGE } from "../lib/anlas";
-import { costNow } from "../lib/costNow";
+import { costNow, countNow } from "../lib/costNow";
+import { usePrompt } from "../store/prompt";
 import { usageDuration, usageFullInSeconds, usageLow, usagePercent, usageRefillPerHour } from "../lib/opusUsage";
 import { useCurrentSub, useSub } from "../store/sub";
 import { currentAccountId, useAccounts, useCurrentAccount } from "../store/accounts";
@@ -39,7 +42,7 @@ export function GenerateFooter({ compact = false }: { compact?: boolean }) {
   const accounts = useAccounts((s) => s.items);
   const account = useCurrentAccount();
   const setAccount = useWs((s) => s.setAccount);
-  const { params, set, busy, error, generateAll } = useGen();
+  const { params, busy, error, generateAll } = useGen();
   const { progress, phase, cancelAll } = useQueue();
   /** 잔액을 다시 물어본 횟수 — 누를 때마다 아이콘을 **한 바퀴 더** 돌린다 (v2 `refreshAnlasBtn`).
    *  ★각도를 원위치시키지 않고 누적한다. 되돌리면 애니메이션이 거꾸로 돌아 흔들려 보인다. */
@@ -53,8 +56,6 @@ export function GenerateFooter({ compact = false }: { compact?: boolean }) {
   const [firing, setFiring] = useState(false);
   const tab = useWs((s) => s.activeSceneGroup());
   const img = useImageInput();
-  /** ★그 모델에서 되는 것 — 값 계산이 **보내는 것과 같아야** 한다 (`lib/naiModels.ts`) */
-  const cap = modelCaps(params.model);
   /* ★★캐릭터 상한은 **켜는 순간** 막는다 (사용자 지시 2026-08-21, `store/gen.ts` 의
      `toggleCharCapped`·`clampCharsToModel`). 넘긴 채로 두고 여기서 「초과분은 무시됩니다」를
      띄우던 것을 걷었다 — 다른 자리는 전부 막는데 여기만 알리고 두면, 그대로 생성했을 때
@@ -77,7 +78,10 @@ export function GenerateFooter({ compact = false }: { compact?: boolean }) {
   const slots = sceneSet
     ? allScenes(sceneSet).filter((x) => !x.cell.locked && !x.card.locked).length
     : 1;
-  const count = slots * perSlot;
+  /** ★★**세는 자리는 `countNow` 하나다** — 순차 생성 모드의 인물 수까지 거기서 곱한다
+   *  (`lib/costNow`). 여기서 따로 셈하면 푸터와 비용·조수가 갈린다. */
+  const seqTimes = usePrompt((s) => (s.seqChars ? Math.max(1, s.chars.filter((c) => c.on).length) : 1));
+  const count = countNow();
   /** ★★**생성할 씬이 없으면 그 자리에서 말해 준다** (사용자 지시 2026-08-22:
    *  *"씬카드 없어서 생성불가능할때 생성 버튼쪽에도 경고 띄워줘"*).
    *
@@ -169,8 +173,9 @@ export function GenerateFooter({ compact = false }: { compact?: boolean }) {
       height: size.height,
       steps: params.steps,
       opus: (sub?.tier ?? 0) >= 3,
-      refs: cap.char_ref && img.refOn ? img.refs.length : 0,
-      vibes: cap.vibe && img.vibeOn ? img.vibes.length : 0,
+      // ★실측 장치에 넘기는 수도 **`riding` 하나**에서 온다 (`costNow` 와 같은 값)
+      refs: img.riding().refs.length,
+      vibes: img.riding().vibes.length,
       inpaint: img.costInpaint(),
       count,
       from: "generate",
@@ -259,6 +264,8 @@ export function GenerateFooter({ compact = false }: { compact?: boolean }) {
         justifyContent: "center",
         gap: "var(--sp-2)",
         width: "100%",
+        flex: 1,          /* ★플러그인이 옆자리를 쓰면 둘이 폭을 나눈다 (`generate.primary`) */
+        minWidth: 0,
       }}
     >
       {/* ★★아이콘을 안 붙인다 (사용자 지시 2026-08-19) — 이름이 이미 적혀 있고, 접었을 때는
@@ -295,11 +302,23 @@ export function GenerateFooter({ compact = false }: { compact?: boolean }) {
     </button>
   );
 
+  /** 생성 버튼 줄 — 왼쪽은 플러그인 자리다 (`generate.primary`).
+   *  ★★비어 있으면 아무것도 안 그리므로 생성 버튼이 줄을 다 쓴다 — 플러그인이 없을 때 화면이 달라지지 않는다.
+   *  ★접힌 레일은 폭이 좁아 나눠 쓰면 둘 다 못 읽는다 — 거기서는 위아래로 쌓는다. */
+  const genRow = (
+    <div style={{ display: "flex", flexDirection: compact ? "column" : "row", gap: "var(--sp-2)", alignItems: "stretch" }}>
+      <PluginSlot slot="generate.primary" compact={compact} primary />
+      {genBtn}
+    </div>
+  );
+
   // 접힌 레일 — 버튼만 남긴다. 여기서도 누를 수 있어야 접어 둔 채 계속 만든다
   if (compact) {
     return (
       <div style={{ padding: "var(--sp-2)", borderTop: "1px solid var(--line)", display: "flex", flexDirection: "column", gap: 4 }}>
-        {genBtn}
+        {genRow}
+        {/* ★플러그인이 둔 단추 — 없으면 아무것도 안 그린다 (`lib/pluginHost`, 자리 이름 generate.footer) */}
+        <PluginSlot slot="generate.footer" compact={compact} />
         {/* ★★`CQ` 는 **늘 있다** (사용자 지시 2026-08-19, v2 `collapsedClearQBtn`) —
             돌 때만 나타나면 멈추려는 순간에 자리를 찾게 된다. 돌지 않을 때는 눌러도
             할 일이 없으므로 흐리게 둔다. */}
@@ -422,91 +441,26 @@ export function GenerateFooter({ compact = false }: { compact?: boolean }) {
             }}
           />
           <span style={{ fontSize: "var(--text-2xs)", color: "var(--ink-ghost)" }}>
-            {t("gen.slotsTimes", { s: slots, p: perSlot, t: count })}
+            {/* ★순차 생성 모드면 **인물 수**가 한 칸 더 붙는다 — 곱셈이 눈에 맞아야 한다 */}
+            {seqTimes > 1
+              ? t("gen.slotsTimesSeq", { s: slots, p: perSlot, c: seqTimes, t: count })
+              : t("gen.slotsTimes", { s: slots, p: perSlot, t: count })}
+          </span>
+          {/* ★★**이번 생성에 그림이 실린다**를 여기서 알린다 (사용자 지시 2026-09-21:
+              *"생성 버튼쪽에 표시. 장 수 정하는 곳 우측에 표시하면 될듯"*). 「베이스 이미지」
+              묶음은 접히면 안이 통째로 언마운트돼서, 넣어 둔 그림이 화면 어디에도 안 보인 채
+              생성에 실려 나갔다 — 누르기 직전에 눈에 들어오는 자리가 여기다. */}
+          <span style={{ marginLeft: "auto", display: "grid" }}>
+            <ImageInputBadge />
           </span>
       </div>
 
       {/* 시드 — 매번 만지는 값이라 생성 버튼 바로 위에 고정 */}
-      <div
-        style={{
-          display: "flex",
-          alignItems: "center",
-          gap: "var(--sp-2)",
-          paddingTop: "var(--sp-2)",
-          borderTop: "1px solid var(--line-soft, var(--line))",
-        }}
-      >
-        <span style={{ fontSize: "var(--text-2xs)", color: "var(--ink-faint)", flexShrink: 0 }}>
-          {t("options.seed")}
-        </span>
-        <input
-          data-seed
-          value={params.seed}
-          onChange={(e) => {
-            const v = parseInt(e.target.value, 10);
-            set("seed", Number.isFinite(v) ? v : 0);
-          }}
-          // ★★**랜덤이어도 고칠 수 있다** (사용자 지적 2026-08-16). 랜덤은 아무 숫자를
-          //   넣는 게 아니라 **여기 적힌 값으로 뽑고 나서** 이 칸을 굴리는 것이라,
-          //   잠그면 "이 시드로 한 장 더" 를 아예 못 한다 (`lib/seedRounds` 머리 주석).
-          style={{
-            flex: 1,
-            minWidth: 0,
-            background: "var(--panel)",
-            border: "1px solid var(--line)",
-            borderRadius: "var(--r-2)",
-            padding: "3px var(--sp-3)",
-            fontSize: "var(--text-2xs)",
-            fontFamily: "var(--font-mono)",
-          }}
-        />
-        {/* 주사위 — 지금 자리에서 바로 새 시드를 뽑아 본다 */}
-        <button
-          data-seed-roll
-          onClick={() => set("seed", randomSeed())}
-          data-tip={t("options.seedRoll")}
-          style={{ flexShrink: 0, color: "var(--ink-faint)", display: "grid", padding: "0 2px" }}
-        >
-          {Icon.dice}
-        </button>
-        {/* ★배타적 3택이다 — 체크박스 둘이면 「고정 + 씬마다 랜덤」 같은 뜻 없는 상태가
-            생긴다 (사용자 지적 2026-08-11). v2 의 `랜덤/고정/슬롯마다 랜덤` 이관. */}
-        <div
-          data-seed-mode={params.seed_mode}
-          style={{
-            display: "flex",
-            flexShrink: 0,
-            border: "1px solid var(--line)",
-            borderRadius: "var(--r-2)",
-            overflow: "hidden",
-          }}
-        >
-          {SEED_MODES.map((m, i) => {
-            const on = params.seed_mode === m;
-            return (
-              <button
-                key={m}
-                data-seed-pick={m}
-                onClick={() => set("seed_mode", m)}
-                data-tip={t(SEED_HINTS[i])}
-                style={{
-                  padding: "2px var(--sp-3)",
-                  fontSize: "var(--text-2xs)",
-                  whiteSpace: "nowrap",
-                  borderRight: i < 2 ? "1px solid var(--line)" : undefined,
-                  background: on ? "var(--accent-bg)" : "transparent",
-                  color: on ? "var(--accent-ink)" : "var(--ink-dim)",
-                  fontWeight: on ? "var(--w-semi)" : "var(--w-normal)",
-                }}
-              >
-                {t(SEED_LABELS[i])}
-              </button>
-            );
-          })}
-        </div>
-      </div>
+      <SeedRow />
 
-      {genBtn}
+      {genRow}
+        {/* ★플러그인이 둔 단추 — 없으면 아무것도 안 그린다 (`lib/pluginHost`, 자리 이름 generate.footer) */}
+        <PluginSlot slot="generate.footer" compact={compact} />
 
       {/* ★★진행바는 **언제나 자리를 차지한다** (사용자 지시 2026-08-21: 생성 버튼이 움직였다).
           돌 때만 나타나게 하면 버튼이 그만큼 밀려 올라가, 연달아 누르려던 손이 빗나간다.
@@ -577,7 +531,9 @@ export function GenerateFooter({ compact = false }: { compact?: boolean }) {
             총액은 버튼에 있으므로 여기서는 분해만 보인다 (같은 값을 두 번 두지 않는다) */}
         {!cost.free && count > 1 && (
           <span data-cost-break style={{ fontVariantNumeric: "tabular-nums" }}>
-            {t("gen.costPerSlots", { p: cost.perImage, s: slots, r: perSlot })}
+            {seqTimes > 1
+              ? t("gen.costPerSlotsSeq", { p: cost.perImage, s: slots, r: perSlot, c: seqTimes })
+              : t("gen.costPerSlots", { p: cost.perImage, s: slots, r: perSlot })}
           </span>
         )}
         {cost.encoding > 0 && <span>{t("gen.vibeEncode", { a: cost.encoding })}</span>}
@@ -680,3 +636,92 @@ const qbtn: React.CSSProperties = {
   color: "var(--ink-soft)",
   background: "var(--panel)",
 };
+
+/** 시드 줄 — 숫자칸 · 주사위 · 시드 모드 3택. 생성 푸터와 만화 캔버스의 컷 생성 푸터가 **같은 것**을 쓴다 (값은 `useGen.params` 하나) */
+export function SeedRow({ host }: { /** 읽고 쓸 값. 없으면 생성 모드 것 (만화 캔버스는 자기 값을 준다) */ host?: ParamsHost } = {}) {
+  const t = useI18n((s) => s.t);
+  const gen = useGen((s) => s.params);
+  const setGen = useGen((s) => s.set);
+  const params = host?.params ?? gen;
+  const set = host?.set ?? setGen;
+  return (
+    <div
+      style={{
+        display: "flex",
+        alignItems: "center",
+        gap: "var(--sp-2)",
+        paddingTop: "var(--sp-2)",
+        borderTop: "1px solid var(--line-soft, var(--line))",
+      }}
+    >
+      <span style={{ fontSize: "var(--text-2xs)", color: "var(--ink-faint)", flexShrink: 0 }}>
+        {t("options.seed")}
+      </span>
+      <input
+        data-seed
+        value={params.seed}
+        onChange={(e) => {
+          const v = parseInt(e.target.value, 10);
+          set("seed", Number.isFinite(v) ? v : 0);
+        }}
+        // ★★**랜덤이어도 고칠 수 있다** (사용자 지적 2026-08-16). 랜덤은 아무 숫자를
+        //   넣는 게 아니라 **여기 적힌 값으로 뽑고 나서** 이 칸을 굴리는 것이라,
+        //   잠그면 "이 시드로 한 장 더" 를 아예 못 한다 (`lib/seedRounds` 머리 주석).
+        style={{
+          flex: 1,
+          minWidth: 0,
+          background: "var(--panel)",
+          border: "1px solid var(--line)",
+          borderRadius: "var(--r-2)",
+          padding: "3px var(--sp-3)",
+          fontSize: "var(--text-2xs)",
+          fontFamily: "var(--font-mono)",
+        }}
+      />
+      {/* 주사위 — 지금 자리에서 바로 새 시드를 뽑아 본다 */}
+      <button
+        data-seed-roll
+        onClick={() => set("seed", randomSeed())}
+        data-tip={t("options.seedRoll")}
+        style={{ flexShrink: 0, color: "var(--ink-faint)", display: "grid", padding: "0 2px" }}
+      >
+        {Icon.dice}
+      </button>
+      {/* ★배타적 3택이다 — 체크박스 둘이면 「고정 + 씬마다 랜덤」 같은 뜻 없는 상태가
+          생긴다 (사용자 지적 2026-08-11). v2 의 `랜덤/고정/슬롯마다 랜덤` 이관. */}
+      <div
+        data-seed-mode={params.seed_mode}
+        style={{
+          display: "flex",
+          flexShrink: 0,
+          border: "1px solid var(--line)",
+          borderRadius: "var(--r-2)",
+          overflow: "hidden",
+        }}
+      >
+        {SEED_MODES.map((m, i) => {
+          const on = params.seed_mode === m;
+          return (
+            <button
+              key={m}
+              data-seed-pick={m}
+              onClick={() => set("seed_mode", m)}
+              data-tip={t(SEED_HINTS[i])}
+              style={{
+                padding: "2px var(--sp-3)",
+                fontSize: "var(--text-2xs)",
+                whiteSpace: "nowrap",
+                borderRight: i < 2 ? "1px solid var(--line)" : undefined,
+                background: on ? "var(--accent-bg)" : "transparent",
+                color: on ? "var(--accent-ink)" : "var(--ink-dim)",
+                fontWeight: on ? "var(--w-semi)" : "var(--w-normal)",
+              }}
+            >
+              {t(SEED_LABELS[i])}
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+}

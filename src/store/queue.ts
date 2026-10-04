@@ -77,6 +77,12 @@ export type Pending = {
   /** ★어느 워크스페이스에 넣었나 (사용자 실측 2026-09-02: 복제한 워크스페이스는 씬 그룹 id 가 같아서
    *  한쪽에서 생성하면 **모든** 워크스페이스에 「생성 중」 칸이 떴다). 화면은 제 워크스페이스 것만 그린다 */
   workspace: string;
+  /** ★생성될 그림의 값 — 대기 칸을 고른 동안 그림 아래 줄이 이것을 보인다 (사용자 지시 2026-10-02) */
+  seed?: number;
+  /** 결과 크기 — 인퍼런스면 잘라 낸 크기다 (캔버스가 아니다) */
+  size?: { w: number; h: number };
+  /** 자동 저장을 끄고 넣었나 — 줄의 「저장」 버튼이 이것으로 선다 */
+  unsaved?: boolean;
 };
 
 type S = {
@@ -171,6 +177,16 @@ export const stepKey = (workspace: string, cell: string) => `${workspace}::${cel
  *  ★소켓이 생기기 전 구간을 이것이 지킨다 (`connect` 의 ★주) */
 let connecting = false;
 
+/** ★★개발 모드의 HMR 이 이 모듈을 다시 실행해도 **옛 사본이 살아 있다** (2026-09-29 실측).
+ *  Vite 는 교체 경로 중간에 낀 모듈의 `dispose` 를 부르지 않는다 (`acceptedPath` 만 부른다). 그래서 옛 사본의 소켓이
+ *  남고, 새 사본이 같은 `clientId` 로 붙으면 서버가 옛것을 닫고 → 옛것이 다시 붙어 새것을 닫고 → … 가 돈다
+ *  (개발본에서 10초에 연결 27번). 그 사이 CLI 줄과 턴 끝이 **그때 붙어 있던 사본**의 스토어로 가서 보고 있는 대화에는
+ *  안 오고 옛 대화 파일에 흩어져 저장됐다. 「중단」을 눌러도 턴 끝이 안 와 「일하는 중」에 갇혔다.
+ *  ★가장 나중에 실행된 사본만 붙는다. 배포판은 모듈이 한 번만 실행되므로 번호가 늘 1 이다. */
+const G = globalThis as { __queueGen?: number };
+const gen = (G.__queueGen = (G.__queueGen ?? 0) + 1);
+const retired = () => gen !== G.__queueGen;
+
 /** **지금 그리고 있는 대기 칸**의 번호 (없으면 `null`).
  *
  *  ★★규칙을 여기 하나에 둔다 (사용자 지적 2026-08-28: *"스트리밍 썸네일이 같은 씬에 걸려
@@ -196,6 +212,21 @@ export function runningPendingId(groupId: string | null | undefined): string | n
   return lanes ? null : (mine[0]?.id ?? null);
 }
 
+/** 대기 칸에 적어 둘 **생성될 그림의 값** — 시드 · 결과 크기 · 저장 여부. 항목에 있으면 항목, 없으면 공통 값.
+ *  ★인퍼런스는 캔버스로 나가고 결과는 잘라 낸 자리다 (`imageInput.payload` 의 `inference.crop`). */
+function pendingLooks(base: Record<string, unknown>, it: Record<string, unknown>): Pick<Pending, "seed" | "size" | "unsaved"> {
+  const pick = <T,>(k: string) => (it[k] ?? base[k]) as T | undefined;
+  const seed = pick<number>("seed");
+  const crop = (pick<{ crop?: number[] }>("inference"))?.crop;
+  const w = crop?.[2] ?? pick<number>("width");
+  const h = crop?.[3] ?? pick<number>("height");
+  return {
+    seed: typeof seed === "number" ? seed : undefined,
+    size: w && h ? { w, h } : undefined,
+    unsaved: pick<boolean>("auto_save") === false,
+  };
+}
+
 export const useQueue = create<S>((set, get) => ({
   connected: false,
   progress: EMPTY,
@@ -216,6 +247,7 @@ export const useQueue = create<S>((set, get) => ({
        실측(2026-08-20 로그): 90분 동안 재연결 **58,120번**, 오류 로그 7.5MB.
        그 소음 속에서 평범한 요청이 간헐적으로 거절돼 `Failed to fetch` 로 보였다. */
     if (connecting) return;
+    if (retired()) return; // ★HMR 이 갈아 끼운 옛 사본 — 새 사본이 붙는다 (`gen` 의 ★★주)
     if (sock && (sock.readyState === WebSocket.OPEN || sock.readyState === WebSocket.CONNECTING)) return;
     connecting = true;
     const base = await backendUrl().catch(() => {
@@ -250,6 +282,7 @@ export const useQueue = create<S>((set, get) => ({
       // ★**지금 것이 아니면 아무것도 안 한다** — 옛 소켓이 닫힌 것으로 「끊겼다」를 켜거나
       //   재연결을 걸면, 살아 있는 연결을 두고 다시 붙는 고리가 생긴다 (위 ★주)
       if (sock !== ws) return;
+      if (retired()) return; // ★옛 사본은 다시 붙지 않는다 — 새 사본이 붙어 있다 (`gen` 의 ★★주)
       sock = null;
       set({ connected: false });
       // 지수 백오프 재연결 (최대 10초)
@@ -282,6 +315,7 @@ export const useQueue = create<S>((set, get) => ({
           // ★넣는 쪽이 해석한 계정이다 (`store/gen`·`store/genRemote`) — 서버의 차선과 같은 값
           account: String(base.account ?? ""),
           workspace: String(base.workspace ?? ""),
+          ...pendingLooks(base, it),
         });
       }
     }
@@ -364,7 +398,8 @@ async function flushSpec(out: Record<string, unknown>) {
  *    갖고, 화면 버튼은 확인 창으로, 조수는 **승인 카드**로 묻는다 (`docs/…` 2-5).
  *  ★등록되지 않은 이름은 아래 옛 분기로 내려간다 — 프롬프트 편집처럼 아직 옮기지 않은 것들이다.
  */
-async function runAction(action: string, args: Record<string, any>, ask = true): Promise<Record<string, unknown>> {
+// ★플러그인 호스트(`lib/pluginHost`)도 이 창구를 쓴다 — `ask=false` 로, 승인 카드를 지나지 않는다 (2026-09-07)
+export async function runAction(action: string, args: Record<string, any>, ask = true): Promise<Record<string, unknown>> {
   /* ★★**보낸 시점의 화면이 「지금 자리」다** (사용자 지시 2026-09-07). 사용자가 말을 건 뒤 탭을
      옮겨도 조수의 편집·생성은 말을 건 그 자리에 간다 — 실행 직전에 화면을 그 주소로 맞춘다
      (`lib/promptEdit.alignToTurn`). 워크스페이스가 다르면 거절이다.
@@ -514,7 +549,7 @@ async function legacyAction(action: string, args: Record<string, any>): Promise<
 
        워크스페이스 설정(`workspace.json`)의 주인은 **화면**이다 — 앱이 통째로 들고 있다가
        통째로 저장하므로, 백엔드가 파일에 끼어들어 쓰면 다음 저장에 덮인다. 그래서
-       `edit_style_card` 와 같은 길을 쓴다: 조수가 시키고, **앱이 자기 창구로** 만든다.
+       `edit_style_card` 와 같은 경로를 쓴다: 조수가 시키고, **앱이 자기 창구로** 만든다.
        그러면 화면도 그 자리에서 따라온다.
        ★새 창구를 만들지 않는다 — 사람이 `+` 를 눌렀을 때와 **같은 함수**를 부른다
          (`addTab`·`addSceneGroup`·`addSlot`). 두 벌이 되면 이름 겹침 처리·번호 발급이 갈린다. */
@@ -569,7 +604,7 @@ async function legacyAction(action: string, args: Record<string, any>): Promise<
         : spec?.sceneGroups.find((x) => x.id === spec?.activeSceneGroup);
       if (!set || set.kind !== "sceneGroup") return { error: "세트를 찾지 못했습니다." };
       /* ★씬은 **카드 안**에 산다. 카드가 하나도 없으면 씬을 놓을 자리가 없으므로 먼저 만든다
-         (씬 줄의 「씬 세트 만들기」와 같은 길이다). */
+         (씬 줄의 「씬 세트 만들기」와 같은 경로다). */
       const name = String(args.name ?? "").trim();
       const had = new Set(allCells(set).map((c) => c.id));
       if (!set.cards.length) ws2.addCard(set.id, name ? { cells: [{ id: "", name, blocks: [] }] } : {});
@@ -641,6 +676,20 @@ async function legacyAction(action: string, args: Record<string, any>): Promise<
   }
 }
 
+/** 도착한 그림을 **먼저** 보는 자리 — 이미지 편집의 만화 캔버스가 제 컷에 뽑은 그림을 받는다 (설계 8번 「넣기」).
+ *  ★편집기는 지연 로드라(`App.tsx` 의 `lazy`) 큐가 편집기를 부르지 않는다 — 편집기가 실릴 때 여기에 매단다.
+ *  ★보는 것만 한다. 레코드·대기 칸은 평소대로 아래가 처리한다 */
+export const imageTaps = new Set<(m: Record<string, any>) => void>();
+const tap = (m: Record<string, any>) => {
+  for (const f of imageTaps) {
+    try {
+      f(m);
+    } catch (e) {
+      console.warn("[queue] 그림 받는 자리가 실패했다", e);
+    }
+  }
+};
+
 function handle(m: Record<string, any>, set: Setter, get: () => S) {
   switch (m.type) {
     case "connected": {
@@ -659,6 +708,7 @@ function handle(m: Record<string, any>, set: Setter, get: () => S) {
     //   ★그래도 **자리는 같다**: 씬 줄의 그 씬 칸에 「미저장」 칸으로 들어간다
     //     (v2 `index.html:12146` — 미저장도 저장된 것과 같은 슬롯 카드다).
     case "image_preview": {
+      tap(m);
       // ★다른 워크스페이스의 미저장 그림은 이 화면의 미리보기에 넣지 않는다 — 대기 칸만 지운다
       //   (`render` 의 ★★주와 같은 까닭, 사용자 실측 2026-09-02)
       if (m.workspace && m.workspace !== useWs.getState().current) {
@@ -701,6 +751,7 @@ function handle(m: Record<string, any>, set: Setter, get: () => S) {
       break;
     }
     case "image":
+      tap(m);
       render(m, set, get);
       bump(String(m.account ?? ""), "ok");
       takeProgress(m.progress, set);
@@ -781,6 +832,8 @@ function handle(m: Record<string, any>, set: Setter, get: () => S) {
       toast(queueErrorText(String(m.error ?? "")), "warn");
       bump(String(m.account ?? ""), "err");
       takeProgress(m.progress, set);
+      // ★잡이 통째로 죽으면 `job_done` 이 안 온다 — 그때까지 나간 몫이 화면 잔액에 들게 여기서 묻는다 (`settleBatch` 의 ★★주)
+      if (m.type === "job_error") void useSub.getState().load(String(m.account ?? "") || undefined);
       break;
   }
 }
@@ -837,6 +890,13 @@ function settleBatch(cancelled: boolean, account: string | null, set: Setter, ge
         : "done";
   const done = okN;
   set({ phase });
+
+  /* ★★**취소·실패로 끝나도 잔액을 다시 묻는다** (사용자 제보 2026-09-30: 5장 중 2장째에 취소하고
+     다시 5장을 뽑으니 「25 로 보였는데 40 이 나갔다」). 예전에는 `job_done` 에서만 물어서, 취소한
+     배치가 이미 쓴 몫(끝난 장 + 나가 있던 한 장)이 화면 잔액에 안 들어갔다. 그 옛 잔액이 다음 배치의
+     기준선이 되어(`anlasMeter.arm`) 앞 배치 몫까지 다음 배치의 청구로 잡혔다. 청구 자체는 맞았다.
+     ★끝난 배치(`done`)는 `job_done` 이 이미 물었고 `settle` 도 묻는다 — 여기서는 나머지만 묻는다. */
+  if (phase !== "done") void useSub.getState().load(account ?? undefined);
 
   // ★**실제로 청구된 Anlas 를 잰다** (`store/anlasMeter`). 잰다는 것은 잔액 차이다.
   //   ★온전히 끝난 배치에서만 잰다. 취소·실패·일부 실패는 몇 장이 실제로 나갔는지
@@ -946,7 +1006,7 @@ function consumePending(m: Record<string, any>, set: Setter, get: () => S, mine 
      ★판정 기준을 **대기 항목에서 「보고 있는 씬」으로** 옮겼다. 예전에는 «걷히는 대기가
        내가 고른 그것인가»를 물었는데(`consumePending`), 그 물음은 대기 장부가 성할 때만
        답이 나온다 — 대기가 그림보다 **먼저** 걷히는 길이 여럿이고(`settleBatch`·취소·
-       `applyStatus` 의 청소), 그 길로 가면 옮길 상대를 잃은 채 선택만 남아 놓아졌다.
+       `applyStatus` 의 청소), 그 경로로 가면 옮길 상대를 잃은 채 선택만 남아 놓아졌다.
      ★지금 묻는 것은 «그림이 **내가 보고 있는 씬**에 나왔는가»뿐이다. 대기 장부와 무관하고,
        화면이 다시 그려지든 말든(컴포넌트가 새로 마운트돼도) 같은 답이 나온다.
      ★대기 칸을 고르고 있을 때만 돈다 — 이미 어떤 장을 보고 있으면 새 그림이 나와도

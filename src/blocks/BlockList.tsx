@@ -49,8 +49,17 @@ export function BlockList({
   onDone,
   onNext,
   onTab,
+  noToggle,
+  tagOf,
+  addAs,
 }: {
   blocks: Block[];
+  /** 블록마다 켜고끄기가 **뜻이 없는 자리** — 만화 캔버스의 배경 (켜는 것은 컷이 고른다, `BlockRow` 의 같은 이름) */
+  noToggle?: boolean;
+  /** 블록 이름 뒤의 작은 글 — 만화 캔버스의 배경은 그 배경을 쓰는 페이지·컷 */
+  tagOf?: (b: Block) => React.ReactNode;
+  /** 「+ 블록」 대신 이 이름으로 늘린다 — 단추 글과 새 블록의 이름 (만화 캔버스의 배경: 「+ 배경」 · 「새 배경」) */
+  addAs?: { label: string; name: string };
   onChange: (b: Block[]) => void;
   /** 저장소에서 끌어온 블록을 받을 자리인가 — **화면에서 유일한 id** 를 준다.
    *  ★목록이 여럿이라(베이스·UC·캐릭터마다·씬 칸마다) id 가 겹치면 엉뚱한 곳에 떨어진다 */
@@ -106,7 +115,7 @@ export function BlockList({
        카드로 옮겨지게"*). 끄는 동작은 서랍에 넣는 것과 같은 것(`dir: "save"`)이고 **어디에
        놓느냐**만 다르다 — 서랍이면 사본이 들어가고 원본은 그대로, 다른 목록이면 옮겨진다.
      ★출발한 목록에서 빼는 것은 명부(`blockZones`)를 거친다 — 칩을 카드 너머로 옮길 때와
-       같은 길이다 (`moveTag` 의 ★★주). 빼는 것을 **먼저** 한다.
+       같은 경로다 (`moveTag` 의 ★★주). 빼는 것을 **먼저** 한다.
      ★씬 칸(`single`)에 놓으면 그 하나에 태그가 붙는다 — 서랍에서 받을 때와 같은 규칙. */
   const moveIn = useDropZone({
     id: `blockmove-${libZone ?? "none"}`,
@@ -244,7 +253,7 @@ export function BlockList({
     const at = Math.min(Math.max(splitAt ?? src.length, 0), src.length);
     const head = src.slice(0, at).replace(/[\s,]+$/, "");
     const tail = src.slice(at).replace(/^[\s,]+/, "");
-    const nb = makeBlock(t("block.newBlock"), [], {
+    const nb = makeBlock(addAs?.name ?? t("block.newBlock"), [], {
       open: true,
       color: b.color,
       tags: parseSegs(tail),
@@ -268,7 +277,7 @@ export function BlockList({
     if (!auto.current.has(b.id) || b.tags.length) return;
     auto.current.delete(b.id);
     /* ★★담아 둔 「블록 추가」 칸을 **도로 버린다** — 그 블록은 지금 사라지므로, 남겨 두면
-         `Ctrl+Z` 가 없어진 그것을 되살린다. 이 길은 사용자가 물러난 것이라 되돌릴 일이 없다. */
+         `Ctrl+Z` 가 없어진 그것을 되살린다. 이 경로는 사용자가 물러난 것이라 되돌릴 일이 없다. */
     dropUndo();
     onChange(blocks.filter((_, j) => j !== i));
   };
@@ -350,6 +359,8 @@ export function BlockList({
               bare={single}
               fill={fill}
               open={open}
+              noToggle={noToggle}
+              tag={tagOf?.(b)}
               zone={libZone}
               dup={dup}
               dragging={dragIdx === i}
@@ -360,7 +371,7 @@ export function BlockList({
                  ★`auto` 에는 `Shift+Enter` 로 생긴 것만 든다 (`enterAt`). `+` 로 만든 빈 블록은
                    글이 없어 앞뒤가 같은 자리라 이 값을 줄 필요가 없다. */
               autoCaret={auto.current.has(b.id) ? 0 : undefined}
-              /* ★★**켜고끄기만** 담는다 (사용자 지시 2026-08-22). 이 길은 칩 편집·가중치도
+              /* ★★**켜고끄기만** 담는다 (사용자 지시 2026-08-22). 이 경로는 칩 편집·가중치도
                  함께 지나는데, 그것들은 `BlockBody` 가 이미 담고 있어 두 번 담기면 `Ctrl+Z` 를
                  두 번 눌러야 한 걸음이 물러난다. */
               onChange={(nb) => {
@@ -396,11 +407,11 @@ export function BlockList({
               data-block-add
               onClick={() => {
                 pushUndo(t("common.undoBlockAdd"), () => onChange(blocks), libZone);
-                onChange([...blocks, makeBlock(t("block.newBlock"), [], { open: true })]);
+                onChange([...blocks, makeBlock(addAs?.name ?? t("block.newBlock"), [], { open: true })]);
               }}
               style={addBtn}
             >
-              {t("block.add")}
+              {addAs?.label ?? t("block.add")}
             </button>
           </div>
         </>

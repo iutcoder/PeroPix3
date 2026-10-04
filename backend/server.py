@@ -14,6 +14,7 @@ import io
 import json
 import math
 import os
+import shutil
 import threading
 import time
 import traceback
@@ -30,6 +31,18 @@ import sys
 if str(Path(__file__).resolve().parent) not in sys.path:
     sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+# ★★**배포판은 이 파일이 `__main__` 으로 돌고 있다** (`python server.py`, `src-tauri/src/backend.rs`).
+#   그 상태에서 플러그인이 `import server` 를 하면 파이썬이 `sys.modules` 에서 그 이름을 못 찾아
+#   **이 파일을 통째로 한 번 더 실행한다.** 큐도 계정도 저장소도 별개인 백엔드 사본이 생기고,
+#   그 사본의 큐에는 `run_loop` 가 없어 거기 들어간 잡은 **오류 한 줄 없이 영영 안 나온다**
+#   (만화 제작기 실측 2026-09-20: 생성이 통째로 죽었다).
+# ★개발에서는 `uvicorn.run("server:app")` 이라 이름이 이미 `server` 여서 이 일이 안 일어난다.
+#   **배포판에서만 나는 결함**이라 개발 트리에서는 영원히 안 보인다.
+# ★별명은 **플러그인을 읽기 훨씬 전에** 걸어 둔다. `load_all` 은 이 파일 끝에서 돌고,
+#   그보다 늦게 걸면 그 사이에 들어오는 import 가 그대로 사본을 만든다.
+if __name__ == "__main__":
+    sys.modules["server"] = sys.modules["__main__"]
+
 from fastapi import File, Request, UploadFile, FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
@@ -39,6 +52,7 @@ from pydantic import BaseModel
 import censor
 import files
 import tagger
+import comicfonts
 import tagindex
 import imgutil
 import keep
@@ -55,10 +69,12 @@ import meta
 import guide as guide_mod
 import tools as tools_mod  # ★별칭 필수 — 아래에서 `tools` 라는 이름을 Tools 인스턴스가 가져간다
 import translate as translate_mod
+import recordsdb
 import trash
 import agentlog
 import migrate_terms
 import migrate_thumbs
+import plugins as plugins_mod
 import nai
 import vibe as vibe_mod
 from cards import KINDS, Cards
@@ -136,6 +152,7 @@ if _OLD_ROOT.exists() and not WS_ROOT.exists():
 CONFIG_PATH = DATA_DIR / "config.json"
 
 DATA_DIR.mkdir(parents=True, exist_ok=True)
+comicfonts.init(DATA_DIR)
 store = Store(WS_ROOT)
 # ★카드는 워크스페이스 밖에 있다 — 어느 워크스페이스에서 만들어도 전부에서 보인다
 cards = Cards(DATA_DIR / "cards")
@@ -167,6 +184,23 @@ def _tidy_ws_root() -> None:
 
     old_trash = WS_ROOT / ".trash"
     if old_trash.is_dir():
+        # ★★**지운 워크스페이스는 여기 그대로 둔다** (사용자 지적 2026-09-15: *"삭제해도 trash로
+        #   워크스페이스가 가지 않음 · 워크스페이스는 그자리에 있고 그 안에 트래시 폴더가 생김 ·
+        #   다음에 켰을때 폴더가 남아있으니까 워크스페이스가 복구되잖아"*).
+        #
+        #   이 이전은 2026-08-08 에 「휴지통을 워크스페이스 안으로」 옮기려고 쓴 것인데, 열흘 뒤
+        #   2026-08-18 에 **워크스페이스 삭제**가 같은 자리(`workspaces/.trash/<이름>`)를 쓰기
+        #   시작했다. 이름 모양이 똑같아서 이전이 둘을 구별하지 못했고, 지운 워크스페이스를
+        #   **앱을 켤 때마다 `workspaces/<이름>/.trash/` 로 도로 끄집어냈다** — 폴더가 되살아나고
+        #   내용은 자기 휴지통 속에 파묻혔다. `workspaces/.trash` 에 지운 **그림만** 남아 있던
+        #   까닭이 이것이다 (그림은 파일이라 이 고리를 타지 않는다).
+        #   (실측 2026-09-15: 워크스페이스 8개를 지운 뒤 로그에 `[휴지통] 1 을 워크스페이스 안으로
+        #    옮김`, `workspaces/.trash` 의 폴더는 0개, 껍데기 6개가 한 시각에 되살아나 있었다.)
+        #
+        #   ★가려내는 법: 옛 자리의 한 칸 아래는 **묶음 폴더뿐**이었다 (`20260818_101500` 꼴).
+        #     지운 워크스페이스에는 `workspace.json`·`output` 같은 것이 들어 있다. 그리고 장부에
+        #     적힌 이름은 지금 코드가 일부러 담은 것이므로 무조건 둔다.
+        trashed_names = {str(r.get("at") or "") for r in trash.read_index(old_trash)}
         for ws_dir in list(old_trash.iterdir()):
             # ★★묶음 폴더(`20260818_101500`)는 **지금 쓰는 휴지통**이다 — 파일 관리와
             #   워크스페이스 삭제가 여기에 담는다 (2026-08-18). 옛 자리는 한 칸 아래가
@@ -174,6 +208,11 @@ def _tidy_ws_root() -> None:
             #   `workspaces/20260818_101500/` 이라는 없는 워크스페이스가 생긴다.
             if not ws_dir.is_dir() or trash.STAMP.match(ws_dir.name):
                 continue
+            if ws_dir.name in trashed_names:
+                continue                      # 장부에 적힌 것 = 지운 워크스페이스
+            kids = list(ws_dir.iterdir())
+            if not kids or not all(k.is_dir() and trash.STAMP.match(k.name) for k in kids):
+                continue                      # 옛 자리 모양이 아니다 — 손대지 않는다
             dst = WS_ROOT / ws_dir.name / ".trash"
             try:
                 dst.parent.mkdir(parents=True, exist_ok=True)
@@ -219,28 +258,6 @@ def _tidy_ws_root() -> None:
 _tidy_ws_root()
 
 
-def _split_records() -> None:
-    """색인에 섞여 있는 무거운 것을 곁파일로 옮긴다 (사용자 결정 2026-08-22).
-
-    ★**요청을 받기 전**에 돈다 — 옮기는 도중에 새 그림이 끼어들 수 없다. 그래서 사용자가
-      생성 중이어도 앱을 다시 켜기만 하면 되고, 미리 멈출 필요가 없다.
-    ★한 워크스페이스가 실패해도 앱은 뜬다 — 남겨 두고 다음 부팅에 다시 시도한다
-      (`_tidy_ws_root` 와 같은 규약).
-    ★두 번째 부팅부터는 옮길 것이 없어 아무 일도 안 한다."""
-    for ws_dir in list(WS_ROOT.iterdir()) if WS_ROOT.is_dir() else []:
-        if not ws_dir.is_dir():
-            continue
-        try:
-            n = store.split_records(ws_dir.name)
-        except OSError as e:
-            print(f"[레코드] {ws_dir.name} 을 못 쪼갰습니다 ({e}) — 다음에 다시 시도합니다")
-            continue
-        if n:
-            print(f"[레코드] {ws_dir.name}: {n}줄의 무거운 값을 records-env.jsonl 로 옮김")
-
-
-_split_records()
-
 #: ★★**임포트만으로 사용자 데이터를 고치지 않게 하는 스위치** (실사고 2026-08-28).
 #   아래 이전들은 모듈을 **임포트하는 것만으로** 돈다 — 그런데 판정 하나가(`test_workspace`)
 #   서버를 임포트해서, 판정을 돌린 것만으로 **실제 워크스페이스 전량에 이전이 돌았다.**
@@ -253,28 +270,166 @@ _SKIP_MIGRATIONS = bool(os.environ.get("PEROPIX_SKIP_MIGRATIONS"))
 for _line in (migrate_terms.run(WS_ROOT) if not _SKIP_MIGRATIONS else []):
     print(_line)
 
-# ★★색인과 곁파일을 잇는 **열쇠**를 옛 줄에 달아 준다 (사용자 승인 2026-08-28, 한 번만 돈다).
-#   그 뒤로는 그림을 옮기거나 이름을 바꿔도 100MB 곁파일을 안 건드린다 (`Store.ensure_keys`).
-for _d in sorted(WS_ROOT.iterdir()) if WS_ROOT.is_dir() and not _SKIP_MIGRATIONS else []:
-    if _d.is_dir() and not _d.name.startswith("."):
-        try:
-            _n = store.ensure_keys(_d.name)
-            if _n:
-                print(f"[열쇠 이전] {_d.name}: {_n}줄")
-        except Exception as _e:            # ★한 워크스페이스가 실패해도 앱은 뜬다
-            print(f"[열쇠 이전] {_d.name}: 실패 ({_e})")
-
 for _line in (migrate_thumbs.run(cards, store, pins) if not _SKIP_MIGRATIONS else []):
     print(f"[썸네일 이전] {_line}")
 
 # ★휴지통은 **켤 때** 비운다 (종료 때가 아니라 — 강제 종료에서는 안 돈다, trash.py 머리 주석)
 # ★★뿌리가 넷이다 (2026-08-18, D7): 워크스페이스(+`workspaces/` 자체) · 보관함 ·
 #   바이브 캐시 · 카드 · 대화. 한 곳만 비우면 나머지 휴지통이 영영 쌓인다.
-for _batch in (trash.sweep(WS_ROOT) if not _SKIP_MIGRATIONS else []):
-    print(f"[휴지통 비움] {_batch}")
-for _root in ((DATA_DIR / "cards", DATA_DIR / "chats", DATA_DIR / "vibe-cache") if not _SKIP_MIGRATIONS else ()):
+#   ★워크스페이스 휴지통은 여기가 아니라 `_records_phase` 가 비운다 — 비운 그림의 기록을 함께 빼려면
+#     기록이 새 모양(`records.db`)으로 옮겨진 뒤여야 한다.
+for _root in ((DATA_DIR / "cards", DATA_DIR / "chats", DATA_DIR / "vibe-cache", DATA_DIR / "editor") if not _SKIP_MIGRATIONS else ()):
     for _batch in trash.sweep_at(_root):
         print(f"[휴지통 비움] {_root.name}/{_batch}")
+
+
+#: ★★부팅 때 기록을 옮기는 동안의 상태 (사용자 결정 2026-09-30). `/api/health` 가 화면에 알려 준다.
+#:  `busy` 동안은 `RecordsGate` 가 상태 확인 말고는 전부 막는다. `done`·`total` 은 바이트,
+#:  `ws`·`wsTotal` 은 몇 번째 워크스페이스인지, `failed` 는 옮기지 못한 워크스페이스 이름이다.
+_RECORDS: dict = {"busy": False, "stage": "records", "done": 0, "total": 0, "ws": 0, "wsTotal": 0,
+                  "failed": [], "layoutFailed": []}
+
+
+def _carry_outside(fn) -> None:
+    """그림이 옮겨졌을 때 **워크스페이스 밖**의 경로를 따라 보낸다 (`Store.carry_outside`, 2026-10-01).
+    `fn("<ws>/<옛 상대경로>") → "<ws>/<새 상대경로>" | None`.
+    ★보관함 출처 표 · 파일 관리 휴지통 장부(`workspaces/.trash`, 열쇠가 같은 모양이다).
+    ★편집 캔버스는 여기 없다 — 화면이 들고 있다가 통째로 다시 쓰므로 화면이 고친다
+      (`store/workspace.ts` 의 `carryEditor`). 부팅 이전만 화면이 뜨기 전이라 `_carry_editor` 가 파일을 고친다."""
+    keep.carry_sources(KEEP_DIR, fn)
+    trash.remap_index(trash.trash_root(WS_ROOT), fn)
+
+
+store.carry_outside = _carry_outside
+
+
+def _carry_editor(fn) -> int:
+    """편집 캔버스 상태(`data/editor/state.json`)의 원본 경로·컷 후보를 따라 보낸다 — **부팅 이전에서만** 부른다
+    (`_carry_outside` 의 ★주). 고치기 전에 한 번 베낀다. 고친 수를 준다."""
+    p = EDIT_DIR / "state.json"
+    if not p.is_file():
+        return 0
+    st = json.loads(p.read_text("utf-8"))
+    n = 0
+    for d in st.get("docs") or []:
+        src = d.get("src") if isinstance(d, dict) else None
+        if isinstance(src, dict) and src.get("rel"):
+            new = fn(str(src["rel"]))
+            if new:
+                src["rel"] = new
+                n += 1
+        for layer in (d.get("layers") or []) if isinstance(d, dict) else []:
+            gen = ((layer or {}).get("panel") or {}).get("gen") if isinstance(layer, dict) else None
+            for tk in (gen or {}).get("takes") or []:
+                if isinstance(tk, dict) and tk.get("ws") and tk.get("file"):
+                    new = fn(f"{tk['ws']}/{tk['file']}")
+                    if new:
+                        tk["ws"], _, tk["file"] = new.partition("/")
+                        n += 1
+    if n:
+        b = p.with_name(p.name + ".bak-layout")
+        if not b.exists():
+            shutil.copy2(p, b)
+        tmp = p.with_name(p.name + ".tmp")
+        tmp.write_text(json.dumps(st, ensure_ascii=False), "utf-8")
+        tmp.replace(p)
+    return n
+
+
+def _records_todo() -> list[tuple[str, int]]:
+    """옮길 옛 기록이 남은 워크스페이스와 그 바이트 수. ★싸다 — 파일 크기를 보고 색인만 바이트로 훑는다
+    (`Store.records_todo`, 그림 10만 장의 색인도 수십 ms). 그래서 서버가 뜨는 자리에서 **먼저** 센다."""
+    todo: list[tuple[str, int]] = []
+    for d in sorted(WS_ROOT.iterdir()) if WS_ROOT.is_dir() else []:
+        if not d.is_dir() or d.name.startswith("."):
+            continue
+        try:
+            n = store.records_todo(d.name)
+        except Exception as e:
+            # ★화면에도 알린다 — 로그에만 남기면 그 워크스페이스는 옮겨지지 않은 채 아무 말이 없다
+            _RECORDS["failed"].append(d.name)
+            say("error", "records", f"{d.name}: 옛 기록을 살피지 못했습니다 ({e!r})")
+            continue
+        if n:
+            todo.append((d.name, n))
+    return todo
+
+
+def _layout_todo() -> list[str]:
+    """옛 배치(`output/멀티/…`)가 남은 워크스페이스 (`Store.layout_todo`). ★싸다 — 폴더 두셋을 본다.
+    옮길 것이 없는 워크스페이스에는 그 자리에서 새 배치 표식만 세운다."""
+    out: list[str] = []
+    for d in sorted(WS_ROOT.iterdir()) if WS_ROOT.is_dir() else []:
+        if not d.is_dir() or d.name.startswith("."):
+            continue
+        try:
+            if store.layout_todo(d.name):
+                out.append(d.name)
+        except Exception as e:
+            _RECORDS["layoutFailed"].append(d.name)
+            say("error", "layout", f"{d.name}: 저장 폴더를 살피지 못했습니다 ({e!r})")
+    return out
+
+
+def _records_phase(todo: list[tuple[str, int]], layout: list[str] | None = None) -> None:
+    """옛 기록(곁파일 `records-env.jsonl` · 쪼개기 전 색인 · 열쇠 없는 줄)을 워크스페이스마다
+    `records.db` 로 옮기고, 워크스페이스 휴지통을 비우며 비운 그림의 기록을 뺀다.
+
+    ★★**옮길 것이 있을 때만 앱을 막는다** (사용자 결정 2026-09-30). 옮기는 동안 탭을 다른 워크스페이스로
+      옮기거나 워크스페이스를 지우면 기록이 엇갈리고, 조수·플러그인도 같은 API 로 들어온다. 그래서 화면만이
+      아니라 백엔드가 막는다 (`RecordsGate`). 문을 닫는 것은 부르는 쪽이다 (startup).
+      ★옮길 것이 없는데도 막았더니 개발 리로드 때마다 그 틈에 누른 생성이 503 으로 거절됐다 (사용자 제보
+        2026-09-30: *"2장 생성했는데 다 씬에 뜨지 않음"*). 휴지통 비우기는 막지 않고 뒤에서 돈다 —
+        기록 DB 는 연결을 그때그때 열고 닫으므로 함께 써도 된다.
+    ★★**요청을 받기 전이 아니라 받기 시작한 뒤에** 돈다. 화면은 백엔드를 15초만 기다리는데
+      (`App.tsx`), 5GB 곁파일은 옮기는 데 49초가 든다 (실측). 백엔드는 곧바로 떠서 상태 확인에 답하고,
+      화면은 진행을 보이며 기다린다.
+    ★한 워크스페이스가 실패해도 앱은 뜬다 — 옛 파일이 그대로 남아 다음 부팅에 다시 시도한다.
+      실패한 이름은 화면이 알린다 (`failed`)."""
+    try:
+        _RECORDS.update(total=sum(n for _, n in todo), wsTotal=len(todo))
+
+        def tick(n: int) -> None:
+            _RECORDS["done"] += n
+
+        for i, (ws, n) in enumerate(todo):
+            _RECORDS["ws"] = i + 1
+            start, t0 = _RECORDS["done"], time.time()
+            try:
+                r = store.migrate_records(ws, tick)
+                say("info", "records", f"{ws}: 기록 {r['moved']}장을 records.db 로 옮김 · 못 읽은 줄 {r['unread']}"
+                    f" · {time.time() - t0:.1f}초")
+            # ★`OSError` 만 잡으면 `MemoryError` 같은 것이 이 단계를 통째로 죽인다.
+            #   `repr` 로 찍는다 — `MemoryError` 는 `str` 이 비어 「실패 ()」만 남았다 (사용자 제보 2026-09-30)
+            except Exception as e:
+                _RECORDS["failed"].append(ws)
+                say("error", "records", f"{ws}: 기록을 옮기지 못했습니다 ({e!r}) — 다음 실행에서 다시 합니다")
+                print(traceback.format_exc(), flush=True)
+            _RECORDS["done"] = start + n
+        # ★★저장 폴더 이전은 기록 이전 **다음**이다 (사용자 결정 2026-10-01) — 색인을 새 모양으로 고친 뒤에
+        #   경로를 바꾼다. 휴지통 비우기보다는 **앞**이다: 비운 그림의 기록을 빼는 `forget` 이 새 경로로 맞아야 한다.
+        if layout:
+            _RECORDS.update(stage="layout", done=0, total=len(layout), ws=0, wsTotal=len(layout))
+            for i, ws in enumerate(layout):
+                _RECORDS["ws"] = i + 1
+                t0 = time.time()
+                try:
+                    r = store.migrate_layout(ws)
+                    ed = _carry_editor(r["fn"])
+                    say("info", "layout", f"{ws}: 저장 폴더를 output/<탭>/ 으로 옮김 · {r['moved']}개 · 이름 바뀜 "
+                        f"{r['renamed']} · 색인 {r['rows']}줄 · 편집 캔버스 {ed} · {time.time() - t0:.1f}초")
+                except Exception as e:
+                    _RECORDS["layoutFailed"].append(ws)
+                    say("error", "layout", f"{ws}: 저장 폴더를 옮기지 못했습니다 ({e!r}) — 다음 실행에서 다시 합니다")
+                    print(traceback.format_exc(), flush=True)
+                _RECORDS["done"] = i + 1
+        for b in trash.sweep(WS_ROOT, forget=store.forget):
+            print(f"[휴지통 비움] {b}")
+    except Exception as e:
+        say("error", "records", f"기록 정리가 멈췄습니다 ({e!r})")
+        print(traceback.format_exc(), flush=True)
+    finally:
+        _RECORDS["busy"] = False
 
 app = FastAPI(title="PeroPix Backend", version=APP_VERSION)
 
@@ -305,6 +460,8 @@ async def _log_errors(request, call_next):
 APP_KEY = os.environ.get("PEROPIX_KEY", "").strip()
 #: 잠겼을 때 모든 주소 앞에 붙는 머리. 화면은 `backend_url` 에서 이 값을 통째로 받는다.
 KEY_PREFIX = f"/k/{APP_KEY}" if APP_KEY else ""
+#: 열쇠 없이 여는 단 하나의 자리 — 플러그인 공통 자산 (`KeyGate` 의 ★★주 참조)
+SHARED_OPEN = "/plug/_app/"
 
 
 class KeyGate:
@@ -344,6 +501,15 @@ class KeyGate:
             return await self.app(scope, receive, send)
 
         path = scope.get("path", "")
+        # ★★**공통 자산은 열쇠 없이 연다** (사용자 결정 2026-09-12). 플러그인 화면이 `/plug/_app/base.css`
+        #   로 적는 것은 누가 봐도 자연스러운 표기인데, 배포본에서는 열쇠 앞머리를 건너뛰어 403 이 되고
+        #   **스타일이 통째로 안 실린다** — 개발 중에는 문이 안 잠겨 있어 제작자가 밟기 전에는 모른다.
+        #   ★여는 것은 우리가 플러그인에게 주려고 만든 **정적 파일**뿐이다 (base.css·peropix.js·글꼴).
+        #     비밀이 없고 저장소에도 공개되어 있으며, `peropix.js` 는 부모 창에 postMessage 를 보낼 뿐
+        #     백엔드를 부르지 않는다. 플러그인 자기 파일(`/plug/<id>/…`)과 모든 API 는 그대로 잠긴다 —
+        #     열쇠가 막으려던 것(웹페이지가 127.0.0.1 을 두드려 앱을 조작하는 것)은 그대로다.
+        if scope["type"] == "http" and path.startswith(SHARED_OPEN):
+            return await self.app(scope, receive, send)
         for i, pref in enumerate(self._prefixes()):
             if path == pref or path.startswith(pref + "/"):
                 rest = path[len(pref):] or "/"
@@ -362,6 +528,36 @@ class KeyGate:
         await send({"type": "http.response.body", "body": "PeroPix: 열쇠가 없습니다".encode()})
 
 
+class RecordsGate:
+    """부팅 때 기록을 옮기는 동안(`_records_phase`) **상태 확인 말고는 전부 막는다** (사용자 결정 2026-09-30).
+
+    ★화면만 막으면 조수(바깥 에이전트의 MCP)·플러그인이 같은 API 로 들어와 탭을 옮기거나
+      워크스페이스를 지울 수 있다. 그래서 백엔드가 막는다.
+    ★ASGI 층이다 — 웹소켓도 막는다 (`KeyGate` 의 ★★주와 같은 이유).
+    ★열쇠 문(`KeyGate`) **안쪽**에 선다: 앞머리가 벗겨진 경로를 보고, 열쇠 없는 요청은 여기까지 안 온다.
+    ★CORS **안쪽**에 선다: 막은 답에도 CORS 머리가 붙어 화면이 503 을 그대로 읽는다."""
+
+    #: 막는 동안에도 여는 자리 — 화면이 진행을 묻는 곳과, 부팅 중에 터진 것을 적는 곳
+    OPEN = ("/api/health", "/api/log")
+
+    def __init__(self, app_):
+        self.app = app_
+
+    async def __call__(self, scope, receive, send):
+        if (not _RECORDS["busy"] or scope["type"] not in ("http", "websocket")
+                or scope.get("path") in self.OPEN):
+            return await self.app(scope, receive, send)
+        if scope["type"] == "websocket":
+            return await send({"type": "websocket.close", "code": 1013})   # 1013 = 잠시 뒤 다시
+        await send({"type": "http.response.start", "status": 503,
+                    "headers": [(b"content-type", b"application/json; charset=utf-8")]})
+        await send({"type": "http.response.body",
+                    "body": json.dumps({"detail": "기록과 저장 폴더를 정리하는 중입니다. 잠시 뒤 다시 시도하세요."},
+                                       ensure_ascii=False).encode("utf-8")})
+
+
+# ★먼저 붙인 것이 안쪽이다 — 순서가 `RecordsGate` 머리 주석의 두 ★ 그대로다
+app.add_middleware(RecordsGate)
 # Tauri 는 tauri://localhost 오리진, 개발 중에는 Vite 가 localhost:1420.
 # ★오리진은 열어 두되 **문은 위의 열쇠가 잠근다** — 오리진 목록만으로는 프리플라이트를
 #   안 타는 요청이 새고, 열쇠는 웹페이지가 알 길이 없어 원리적으로 막힌다.
@@ -485,7 +681,7 @@ class GenBody(BaseModel):
     cell: str | None = None
     # ★슬롯 번호(1부터). 파일 이름 앞에 붙어 **탐색기에서 슬롯 순서**를 만든다
     cell_no: int | None = None
-    # 탭 이름 — 저장 경로 한 칸이 된다 (`멀티/<탭>/<세트>/`)
+    # 탭 이름 — 저장 경로 한 칸이 된다 (`output/<탭>/<세트>/`)
     tab: str | None = None
     # 이 그림이 **어느 그림에서 나왔나** (강화·업스케일·인페인트의 원본 파일).
     # ★**묶는 데 쓰지 않는다.** 결과는 언제나 **각각 별개의 그림**으로 보인다
@@ -495,12 +691,19 @@ class GenBody(BaseModel):
     # ★강화의 **원본 파일 경로**. 주면 서버가 그 파일을 읽어 베이스 이미지로 쓴다 —
     #   화면이 4.6MB base64 를 실어 보내지 않아도 되고, 배치로 여러 장을 돌릴 수 있다.
     enhance_from: str | None = None
+    # ★강화할 그림의 **바이트**(base64) — 파일이 없는 그림(저장하지 않은 그림)일 때 `enhance_from` 대신 싣는다
+    #   (사용자 지시 2026-09-30: *"공홈은 저장 안 해도 인핸스·업스케일·i2i 전부 쓸 수 있다"*).
+    enhance_b64: str | None = None
     # 1.0 이면 그대로, 1.5 면 그 배로 키워서 (64 배수로 맞춘다)
     enhance_scale: float = 1.0
     # ★타일 인페인트(Focused) — 원본 좌표계의 **크롭 사각형**. 있으면 그 자리만 잘라 보낸다.
     #   자를 그림은 `base_image` 다 — **파일 경로를 받지 않는다** (사용자 지적 2026-08-20:
     #   갤러리·드롭 그림에는 워크스페이스 경로가 없어 기능이 통째로 막혀 있었다).
     inpaint_rect: dict | None = None
+    #: ★★인퍼런스 (설계 `docs/inference-design.md`). 화면이 정한 배치를 싣는다 (`src/lib/inference.ts`):
+    #:  `{image, name, pick:[w,h], canvas:[W,H], ref:[x,y,w,h], keep:[..], crop:[..]}`.
+    #:  서버는 그 숫자대로 캔버스·마스크를 그리고 결과 칸만 잘라 남긴다 (`_inference_of`).
+    inference: dict | None = None
     # ★화면이 결과를 묶는 **진짜 키**. 폴더는 사람이 읽을 수 있게 이름을 그대로 쓰지만,
     #   이름은 바뀌므로 이름으로 묶으면 이름을 고치는 순간 결과가 화면에서 사라진다.
     #   (옛 레코드에는 없다 — 클라이언트가 id 우선·이름 폴백으로 읽는다)
@@ -598,10 +801,12 @@ class WildcardBody(BaseModel):
 
 
 class PinBody(BaseModel):
-    """어느 생성물을 고정 썸네일로 굳힐지. **바이트를 올리지 않는다** — 서버가 원본에서 굽는다."""
+    """어느 생성물을 고정 썸네일로 굳힐지. 파일이면 **바이트를 올리지 않는다** — 서버가 원본에서 굽는다."""
 
     workspace: str
-    file: str
+    file: str | None = None
+    #: ★파일이 없는 그림(저장하지 않은 그림)의 base64 — 그때만 싣는다 (사용자 지시 2026-09-30: 저장하지 않고 되는 기능은 다 켠다)
+    data: str | None = None
 
 
 class ThumbBody(BaseModel):
@@ -647,7 +852,10 @@ async def health():
             #   내 것인가»를 물을 수 있어야 한다 — 아니면 창은 이쪽인데 데이터는 저쪽이
             #   되고, 그게 조용히 일어난다 (실측 2026-08-08 의 포트 다툼).
             "root": str(APP_DIR), "port": CURRENT_PORT,
-            "hasLlm": bool(llm_settings().get("key"))}
+            "hasLlm": bool(llm_settings().get("key")),
+            # ★부팅 때 기록을 옮기는 중이면 화면은 이것을 보며 기다린다 (`_records_phase`)
+            "records": {**_RECORDS, "failed": list(_RECORDS["failed"]),
+                        "layoutFailed": list(_RECORDS["layoutFailed"])}}
 
 
 async def _check_nai_token(token: str) -> str:
@@ -769,7 +977,7 @@ def write_mcp_endpoint() -> None:
     try:
         # ★★**문이 안 잠겨 있으면 열쇠를 적지 않는다** (실측 2026-08-31). 개발 모드에서는
         #   껍데기가 열쇠를 안 만들어 `KEY_PREFIX` 가 비고, KeyGate 가 통째로 지나간다 —
-        #   그런데 주소에 `/k/…` 를 붙이면 **그런 길이 없어 404** 가 온다. 실제로 밟았다.
+        #   그런데 주소에 `/k/…` 를 붙이면 **그런 라우트가 없어 404** 가 온다. 실제로 밟았다.
         MCP_ENDPOINT.write_text(
             json.dumps({"port": CURRENT_PORT, "key": k if KEY_PREFIX else ""}, ensure_ascii=False),
             encoding="utf-8")
@@ -885,6 +1093,8 @@ class CliRun(BaseModel):
     model: str = ""
     #: 추론 강도 — 비우면 CLI 기본값
     effort: str = ""
+    #: ★앱 밖 도구(파일·셸·웹) 허용 — 설정 「앱 밖 도구 허용」 (사용자 결정 2026-09-07, 기본 켬)
+    open: bool = True
 
 
 @app.get("/api/cli/detect")
@@ -933,7 +1143,8 @@ async def _session_for(agent: str, exe: str, backend: str, chat: str,
         #   ★어느 CLI 인지 함께 실어야 화면이 어느 모양으로 읽을지 안다 (모양이 서로 다르다).
         #   ★★번호를 붙여 **남기고** 내보낸다. 소켓이 잠깐 끊겨도 되받을 수 있어야 한다
         #     (`genqueue` 머리 주석 — 안 그러면 「일하는 중…」에서 영원히 멈춘다).
-        await Q.broadcast(Q.add_cli_event(agent, ev))
+        # ★그림 데이터는 떼고 보낸다 — 화면은 도구 결과의 글만 쓴다 (`agentsession.drop_images`)
+        await Q.broadcast(Q.add_cli_event(agent, agentsession.drop_images(ev)))
 
     # ★워크스페이스가 아니라 **앱 안의 빈 폴더**(`data/agent/`)에서 돌린다
     _sess = agentsession.make(agent, exe, cliagent.work_dir(DATA_DIR), backend, emit)
@@ -956,7 +1167,7 @@ async def cli_run(body: CliRun, port: int = 0):
     backend = f"http://127.0.0.1:{port or CURRENT_PORT}{KEY_PREFIX}"
     system = body.system or agent_mod.system_prompt(CONFIG.get("support_url", ""), GUIDE.block())
     s = await _session_for(agent, exe, backend, body.chat, body.resume)
-    s.model, s.effort = body.model, body.effort
+    s.model, s.effort, s.open = body.model, body.effort, body.open
 
     # 도는 중이면 끼워 넣어 본다 — 되면 새 턴을 열지 않는다
     if s.busy:
@@ -1196,7 +1407,7 @@ async def list_workspaces():
 #: 목록에서 빼는 무거운 항목 — 화면은 목록에서 이것들을 안 읽는다.
 #: ★2026-08-22 부터 이 값들은 애초에 색인에 없다 (`workspace.ENV_NAME`). 여기는 **안전망**으로
 #:   남긴다 — 쪼개기 전에 적힌 줄이나 옛 백업을 되돌린 파일이 섞여도 화면으로 새지 않는다.
-HEAVY_REC = ("resolved", "env")
+HEAVY_REC = ("resolved", "env", "inference")
 
 
 def _light(rec: dict) -> dict:
@@ -1208,7 +1419,8 @@ def _light(rec: dict) -> dict:
 #  못 받는다** — 썸네일도 웹소켓도 **다른 워크스페이스에서 돌고 있는 생성**도 함께 선다.
 #  다음 둘은 반드시 스레드로 보낸다 (`asyncio.to_thread`):
 #    · 워크스페이스 **잠금을 기다리는 것** (`Store.save` — 옮기기가 1~2초 쥐고 있을 수 있다)
-#    · **파일을 통째로 읽고 쓰는 것** (색인 `records`, 곁파일 `heavy_of` — 실측 112MB)
+#    · **파일을 통째로 읽고 쓰는 것** (색인 `records` · 그림 10만 장에 24MB)
+#    · 디스크를 읽는 것 (`heavy_of` — 색인을 훑고 `records.db` 에서 한 장을 꺼낸다)
 #  ★동기(`def`) 핸들러는 FastAPI 가 알아서 스레드로 돌린다 (썸네일이 그래서 멀쩡했다).
 #    `async def` 로 적은 것만 이 규칙에 걸린다.
 @app.get("/api/workspaces/{ws}")
@@ -1278,8 +1490,7 @@ async def gallery_env(ws: str, file: str):
 
     ★없을 수 있다 — 이 기능이 생기기 전(2026-08-19)에 만든 그림은 안 남겼다.
       그때는 화면이 **그 그림이 나온 탭**에서 가져간다 (`cloneToNewTab` 의 폴백)."""
-    # ★무거운 것은 곁파일에 있다 (`workspace.ENV_NAME` 머리 주석) — 색인을 훑지 않는다
-    # ★곁파일은 통째로 읽는다 (실측 112MB) — 루프에서 읽으면 그동안 서버가 선다 (위 ★★주)
+    # ★무거운 것은 `records.db` 에 있다 (`recordsdb` 머리 주석). 디스크를 읽으므로 스레드로 (위 ★★주)
     return {"env": (await asyncio.to_thread(store.heavy_of, ws, file)).get("env")}
 
 
@@ -1296,7 +1507,13 @@ async def gallery_base(ws: str, file: str):
       `/meta` 나 `/env` 에 얹으면 목록을 훑을 때마다 딸려 온다.
     ★강도·노이즈는 페이로드의 **본이름 그대로** 읽는다 (`strength`·`noise`).
       인페인트는 마스크가 함께 있어야 그 모드로 돌아간다."""
-    par = ((await asyncio.to_thread(store.heavy_of, ws, file)).get("resolved") or {}).get("parameters") or {}
+    heavy = await asyncio.to_thread(store.heavy_of, ws, file)
+    # ★★인퍼런스로 뽑은 그림은 **베이스가 없다.** 보낸 페이로드의 `image` 는 참조를 붙인 넓은 캔버스라,
+    #   그것을 베이스로 되살리면 다음 생성이 캔버스 전체를 인페인트한다. 참조와 해상도 칸 값을 돌려준다
+    inf = heavy.get("inference")
+    if isinstance(inf, dict) and inf.get("image"):
+        return {"image": "", "inference": {k: inf.get(k) for k in ("image", "name", "pick", "aux")}}
+    par = (heavy.get("resolved") or {}).get("parameters") or {}
     img = par.get("image")
     if not isinstance(img, str) or not img:
         return {"image": ""}
@@ -1322,18 +1539,25 @@ async def copy_to_tab(ws: str, body: CopyBody):
       「새 탭으로 복제」도 그림이 슬롯에 앉아야 하므로 같은 자리를 쓴다."""
     try:
         src = keep.safe_folder(KEEP_DIR, body.file) if body.from_keep else None
+        # ★★**그때 화면 구조를 물려받는다** (업스케일과 같은 이유 — `upscale` 의 `env` 주석).
+        #   없으면 복제본에서 「설정 불러오기」를 할 때 캐릭터 카드가 `#1`·`#2` 로 되살아난다.
+        #   보관함 그림은 출처 워크스페이스의 기록에서 찾는다 (`keep.origin_of`, 모르면 없다).
+        origin = keep.origin_of(KEEP_DIR, body.file) if body.from_keep else {"workspace": ws, "file": body.file}
+        env = ((await asyncio.to_thread(store.heavy_of, origin["workspace"], origin["file"])).get("env")
+               if origin else None)
         return store.copy_to_scene_group(ws, body.file, body.scene_group, body.scene_group_id, body.cell,
                                  body.cell_id, body.cell_no, body.tab,
-                                 body.exclude_slot_number, src, body.seed)
+                                 body.exclude_slot_number, src, body.seed, env)
     except ValueError as e:
         raise HTTPException(404, str(e))
 
 
-def _refuse_if_generating(ws: str, group_ids: set[str]) -> None:
+def _refuse_if_generating(ws: str, group_ids: set[str],
+                          why: str = "생성 중인 씬이 있습니다. 끝난 뒤에 옮겨 주세요.") -> None:
     """그 세트들 중 하나라도 생성 중이면 거절한다 (`generating_targets` 의 ★★주)."""
     busy = {g for (w, g) in genqueue.generating_targets(Q) if w == ws and g in group_ids}
     if busy:
-        raise HTTPException(409, "생성 중인 씬이 있습니다. 끝난 뒤에 옮겨 주세요.")
+        raise HTTPException(409, why)
 
 
 class MoveTabBody(BaseModel):
@@ -1371,6 +1595,36 @@ async def move_scene_group_api(ws: str, group_id: str, body: MoveGroupBody):
         raise HTTPException(400, str(e))
 
 
+class RenamePlaceBody(BaseModel):
+    name: str
+
+
+async def _rename_place(ws: str, kind: str, place_id: str, group_ids: set[str], name: str):
+    """탭·씬 그룹 이름 바꾸기 (`Store.rename_place`). 그림을 새 이름의 폴더로 옮기므로 스레드로.
+    ★생성 중이면 거절한다 — 큐는 넣을 때의 이름을 들고 가서, 도착한 그림이 옛 폴더로 간다
+      (`generating_targets` 의 ★★주)."""
+    _refuse_if_generating(ws, group_ids, "생성 중인 씬이 있습니다. 끝난 뒤에 이름을 바꿔 주세요.")
+    return await asyncio.to_thread(store.rename_place, ws, kind, place_id, name)
+
+
+@app.post("/api/workspaces/{ws}/tabs/{tab_id}/rename")
+async def rename_tab_api(ws: str, tab_id: str, body: RenamePlaceBody):
+    spec = store.load(ws) or {}
+    groups = {str(g.get("id")) for g in (spec.get("sceneGroups") or []) if g.get("tabId") == tab_id}
+    try:
+        return await _rename_place(ws, "tab", tab_id, groups, body.name)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.post("/api/workspaces/{ws}/scene-groups/{group_id}/rename")
+async def rename_scene_group_api(ws: str, group_id: str, body: RenamePlaceBody):
+    try:
+        return await _rename_place(ws, "sceneGroup", group_id, {group_id}, body.name)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
 class TrashBody(BaseModel):
     files: list[str] = []
     entries: list[dict] = []
@@ -1401,7 +1655,7 @@ class RenumberBody(BaseModel):
 async def renumber_files(ws: str, body: RenumberBody):
     """씬 순서가 바뀌면 **파일 이름의 씬 번호도 따라간다** (사용자 지시 2026-08-24).
 
-    ★조수가 시켰든 사람이 끌어다 놓았든 **같은 길**을 지난다 — 화면의 `moveScene` 이 부른다.
+    ★조수가 시켰든 사람이 끌어다 놓았든 **같은 경로**를 지난다 — 화면의 `moveScene` 이 부른다.
 
     ★★**딴 실에서 돈다** (실측 2026-08-27). 파일을 옮기고 색인을 다시 쓰는 통짜 작업이라
       `async` 안에서 그대로 부르면 **이벤트 루프가 그동안 멈춘다** — 이미 뜬 그림은 멀쩡한데
@@ -1436,7 +1690,15 @@ async def pin_thumb(body: PinBody):
       같은 주소를 평범한 <img> 로 먼저 띄운 적이 있으면 CORS 헤더 없는 캐시 항목이
       재사용돼 **조용히 실패**했다 (실사용: "적용을 눌러도 반응이 없다").
       서버가 원본에서 직접 구우면 그 경로 자체가 없다."""
-    src = store.file_path(body.workspace, body.file)
+    if body.data:
+        try:
+            tid = pins.pin_bytes(base64.b64decode(body.data, validate=True))
+        except (binascii.Error, ValueError):
+            raise HTTPException(400, "그림 데이터를 읽지 못했습니다.")
+        if not tid:
+            raise HTTPException(500, "썸네일을 만들지 못했습니다.")
+        return {"tid": tid}
+    src = store.file_path(body.workspace, body.file) if body.file else None
     if not src:
         raise HTTPException(404, "원본을 찾을 수 없습니다.")
     tid = pins.pin(src, f"{body.workspace}/{body.file}")
@@ -1547,6 +1809,81 @@ def _quality_preset_of(body: GenBody) -> str:
     return "standard" if body.quality_tags else "none"
 
 
+#: 인퍼런스가 기본 프롬프트에 넣는 태그 (NAI 공식 문서의 기법, 설계 문서 2번)
+INFERENCE_TAG = "reference inset"
+
+
+def _rect(v, W: int, H: int) -> tuple[int, int, int, int]:
+    """`[x, y, w, h]` 를 캔버스 안의 정수 사각형으로. 벗어나면 400 이다 (화면이 계산한 값이라 벗어날 일이 없다)"""
+    try:
+        x, y, w, h = (int(n) for n in v)
+    except (TypeError, ValueError):
+        raise HTTPException(400, "인퍼런스 배치가 잘못되었습니다")
+    if w <= 0 or h <= 0 or x < 0 or y < 0 or x + w > W or y + h > H:
+        raise HTTPException(400, "인퍼런스 배치가 캔버스를 벗어났습니다")
+    return x, y, w, h
+
+
+def _inference_of(body: GenBody) -> dict | None:
+    """실어 온 인퍼런스를 검사해 쓸 모양으로. 없거나 강화면 None.
+
+    ★강화는 건너뛴다. 강화 창도 이미지 입력 조각을 싣지만(`EnhanceDialog`), 강화의 베이스는 원본 파일이다."""
+    inf = body.inference
+    if not inf or body.enhance_from:
+        return None
+    if not isinstance(inf, dict) or not isinstance(inf.get("image"), str) or not inf["image"]:
+        raise HTTPException(400, "인퍼런스 참조 그림이 없습니다")
+    try:
+        W, H = (int(n) for n in inf.get("canvas") or ())
+    except (TypeError, ValueError):
+        raise HTTPException(400, "인퍼런스 캔버스 크기가 잘못되었습니다")
+    if W <= 0 or H <= 0 or W % 64 or H % 64 or W * H > nai.UPSCALE_MAX_PX:
+        raise HTTPException(400, "인퍼런스 캔버스 크기가 잘못되었습니다")
+    crop = _rect(inf.get("crop"), W, H)
+    x, y, w, h = crop
+    aux = inf.get("aux")
+    return {"image": inf["image"], "canvas": (W, H), "ref": _rect(inf.get("ref"), W, H),
+            "keep": _rect(inf.get("keep"), W, H), "crop": crop,
+            # 보조 프롬프트 (화면의 `INFER_AUX`). 끄면 안 온다
+            "aux": aux.strip() if isinstance(aux, str) and aux.strip() else None,
+            # 중간 그림은 크기가 다를 수 있어 비율로 자른다 (`imgutil.preview_jpeg`)
+            "frac": (x / W, y / H, (x + w) / W, (y + h) / H)}
+
+
+def _apply_inference(req: nai.GenRequest, inf: dict) -> None:
+    """요청을 인퍼런스로 바꾼다: 캔버스·마스크 · 캔버스 크기 · `reference inset` · 보조 프롬프트 · 캐릭터 좌표.
+
+    ★보조 프롬프트는 켜 두었을 때만 온다. 글은 화면 한 곳(`lib/inference` 의 `INFER_AUX`)에 있다 (사용자 지시 2026-09-29).
+    ★프롬프트·UC·프리셋은 그 밖에 건드리지 않는다 (사용자 결정 2026-09-29, 설계 문서 4번 3).
+    ★캐릭터 좌표는 **결과 칸 기준**으로 온다 (배치 판이 해상도 칸의 비율을 쓴다). 캔버스 좌표로 옮긴다.
+      좌표를 안 쓰는 캐릭터가 하나뿐이면 결과 칸 가운데에 둔다 (실험이 그렇게 쟀다, 설계 문서 6번).
+      여럿이면 좌표 없이 둔다. 마스크가 결과 칸만 열어 두므로 거기 그려진다."""
+    W, H = inf["canvas"]
+    req.base_image, req.base_mask = imgutil.inference_canvas(inf["image"], (W, H), inf["ref"], inf["keep"])
+    req.base_mode = "inpaint"
+    req.base_inpaint_strength = 1.0
+    req.base_noise = 0.0
+    req.width, req.height = W, H
+    # 베이스 프롬프트 맨 앞에 `reference inset` · 보조 프롬프트 차례로 (이미 있으면 안 넣는다)
+    head = [t for t in (INFERENCE_TAG, inf.get("aux")) if t and t not in req.prompt]
+    if head:
+        req.prompt = ", ".join(head + ([req.prompt] if req.prompt.strip() else []))
+    cx, cy, cw, ch = inf["crop"]
+    lone = len([c for c in req.characters if (c.prompt or "").strip()]) == 1
+    for c in req.characters:
+        if not c.use_coord and not lone:
+            continue
+        at = c.center if c.use_coord and c.center else {"x": 0.5, "y": 0.5}
+        c.center = {"x": round((cx + float(at.get("x", 0.5)) * cw) / W, 4),
+                    "y": round((cy + float(at.get("y", 0.5)) * ch) / H, 4)}
+        c.use_coord = True
+
+
+def _inference_record(inf: dict) -> dict:
+    """레코드에 남기는 인퍼런스 (참조 원본 · 이름 · 해상도 칸 값 · 배치)"""
+    return {k: inf.get(k) for k in ("image", "name", "pick", "canvas", "ref", "keep", "crop", "aux")}
+
+
 def _req_of(body: GenBody) -> nai.GenRequest:
     return nai.GenRequest(
         prompt=body.prompt,
@@ -1605,19 +1942,27 @@ async def _generate_one(body: GenBody) -> dict:
     #     (1216×832 ×1.5 는 1824×1248 이 아니라 **1856×1280**).
     #   ★고치는 대상은 `body` 가 아니라 **`req`** 다 — `req` 는 이미 만들어졌으므로 `body` 를
     #     고쳐 봐야 페이로드에 안 들어간다. 예전에 그래서 **강화가 조용히 txt2img 로 나갔다.**
-    if body.enhance_from:
-        src = store.file_path(body.workspace, body.enhance_from)
-        if not src:
-            raise HTTPException(404, "강화할 그림을 찾지 못했습니다")
-        with Image.open(src) as _im:
+    if body.enhance_from or body.enhance_b64:
+        if body.enhance_from:
+            src = store.file_path(body.workspace, body.enhance_from)
+            if not src:
+                raise HTTPException(404, "강화할 그림을 찾지 못했습니다")
+            raw = src.read_bytes()
+        else:
+            raw = base64.b64decode(body.enhance_b64)
+        with Image.open(io.BytesIO(raw)) as _im:
             w, h = _im.size
         sc = max(1.0, float(body.enhance_scale or 1.0))
-        req.base_image = base64.b64encode(src.read_bytes()).decode()
+        req.base_image = base64.b64encode(raw).decode()
         req.base_mode = "img2img"
         req.base_mask = ""
         req.enhance = True
         req.width = nai.align64(math.floor(w * sc))
         req.height = nai.align64(math.floor(h * sc))
+
+    inf = _inference_of(body)
+    if inf:
+        _apply_inference(req, inf)
 
     # ★타일 인페인트 — **잘라낸 조각만** 보내고 결과를 원본 자리에 되붙인다.
     #   정본은 `docs/naia-bgcomp-survey.md` 5절. 없던 것은 「원본 해상도를 지킨 채 일부만
@@ -1691,7 +2036,7 @@ async def _generate_one(body: GenBody) -> dict:
                 img, step = item
                 try:
                     # ★줄이는 것도 여기서 한다 — 받는 쪽은 아무것도 안 기다려야 한다
-                    small = await asyncio.to_thread(imgutil.preview_jpeg, img)
+                    small = await asyncio.to_thread(imgutil.preview_jpeg, img, 85, inf["frac"] if inf else None)
                 except Exception as e:
                     print(f"[스트림] 중간 그림을 줄이지 못했습니다 (건너뜀): {e}")
                     continue
@@ -1746,6 +2091,10 @@ async def _generate_one(body: GenBody) -> dict:
         finally:
             tile_src.close()
 
+    # ★인퍼런스는 결과 칸만 남긴다. 합성(위)은 칠한 자리 밖에만 섞이는 띠를 두므로 결과 칸은 NAI 가 그린 그대로다
+    if inf:
+        png = imgutil.crop_png(png, *inf["crop"])
+
     # 저장 자리·이름은 `store.store_output` 하나가 정한다 (그 메서드 주석)
     # ★옛 워크스페이스가 `jpg` 를 들고 있으면 **PNG 로 떨어뜨린다** — 조용히 투명을
     #   잃는 형식으로 저장하지 않는다 (사용자 결정 2026-08-23)
@@ -1799,6 +2148,8 @@ async def _generate_one(body: GenBody) -> dict:
                 #     **다른 그림의 구조**가 붙는다. 그래서 뽑을 때 것을 왕복시킨다
                 #     (구조뿐이라 작다. `resolved` 는 base64 가 들어 있어 여전히 안 보낸다).
                 "env": shot_env,
+                # ★인퍼런스도 같은 이유로 왕복시킨다 (「파일로 저장」한 그림에서 설정 불러오기가 참조를 되살린다)
+                "inference": _inference_record(body.inference) if inf else None,
                 "workspace": body.workspace}
 
     # ★씬 번호는 탐색기에서 순서를 만들고, **씬 이름**은 그 파일이 무엇인지 알려 준다
@@ -1811,8 +2162,8 @@ async def _generate_one(body: GenBody) -> dict:
     #   화면이 자기 시계로 찍던 때는 `toISOString()`(UTC) 과 여기 지역시각이 섞여서,
     #   방금 만든 그림이 **문자열 비교로 더 옛것**이 되어 줄 오른쪽으로 밀렸다.
     ts = datetime.now().isoformat(timespec="seconds")
-    # ★records 는 append-only. resolved 에 그 시점의 완전한 요청을 남겨
-    #   나중에 spec 이 바뀌어도 재현·비교가 가능하게 한다.
+    # ★records 는 append-only. resolved 에 그 시점의 요청을 남겨
+    #   나중에 spec 이 바뀌어도 재현·비교가 가능하게 한다. 레퍼런스 그림만 뺀다 (`recordsdb.UNRECORDED`).
     store.append_record(
         body.workspace,
         {
@@ -1824,9 +2175,11 @@ async def _generate_one(body: GenBody) -> dict:
             "cell_id": body.cell_id,
             "enhance_of": body.enhance_of,
             "seed": seed,
-            "resolved": payload,
+            "resolved": recordsdb.recorded(payload),
             # ★위에서 한 번 정한 것을 쓴다 (`shot_env` 의 ★주) — 미저장으로 돌려준 것과 같아야 한다
             "env": shot_env,
+            # ★인퍼런스였으면 참조와 배치를 남긴다. 「설정 불러오기」가 이것으로 인퍼런스 칸을 되살린다 (`gallery_base`)
+            "inference": _inference_record(body.inference) if inf else None,
         },
     )
     return {"ok": True, "file": rel, "seed": seed, "bytes": len(data), "ts": ts,
@@ -1837,10 +2190,13 @@ async def _generate_one(body: GenBody) -> dict:
 
 
 class UpscaleBody(BaseModel):
-    """이미 만든 그림 한 장을 4배로 키운다. **파일 경로만** 싣는다 (바이트는 서버가 읽는다)."""
+    """이미 만든 그림 한 장을 4배로 키운다. 파일이면 **경로만** 싣는다 (바이트는 서버가 읽는다)."""
 
     workspace: str
-    file: str
+    file: str | None = None
+    #: ★파일이 없는 그림(저장하지 않은 그림)의 바이트 — 주면 결과도 **파일로 안 남기고** 돌려준다
+    #:  (사용자 지시 2026-09-30: 저장 버튼을 누른 것이 아니면 어디서도 저장하지 않는다)
+    b64: str | None = None
     #: 버전 뿌리 — 없으면 이 파일이 뿌리다 (강화와 같은 자리를 쓴다)
     enhance_of: str | None = None
     #: 어느 NAI 계정으로 (`GenBody.account` 와 같다)
@@ -1856,29 +2212,37 @@ async def upscale_image(body: UpscaleBody):
     ★생성 파이프라인을 타지 않는다 — 프롬프트도 시드도 없는 별개 호출이다.
     ★★2026-08-21 재배포로 **배율을 우리가 못 정한다** — 서버가 정한다 (`nai.upscale`).
       「4배」라는 말을 화면·문구에 새로 박지 말 것."""
-    src = store.file_path(body.workspace, body.file)
-    if not src or not src.exists():
+    src = store.file_path(body.workspace, body.file) if body.file else None
+    if body.b64:
+        raw = base64.b64decode(body.b64)
+    elif src and src.exists():
+        raw = src.read_bytes()
+    else:
         raise HTTPException(404, "업스케일할 그림을 찾지 못했습니다")
-    with Image.open(src) as im:
+    with Image.open(io.BytesIO(raw)) as im:
         w, h = im.size
     # ★공홈도 이 한계에서 버튼을 막는다. 보내 봐야 거절이라 여기서 끊는다
     if w * h > nai.UPSCALE_MAX_PX:
         raise HTTPException(400, f"3MP 보다 큰 그림은 업스케일할 수 없습니다 ({w}x{h})")
 
-    b64 = base64.b64encode(src.read_bytes()).decode()
     try:
-        png = await nai.upscale(b64, w, h, nai_token(body.account))
+        png = await nai.upscale(base64.b64encode(raw).decode(), w, h, nai_token(body.account))
     except RuntimeError as e:
         raise HTTPException(502, str(e))
+    if body.b64:
+        # ★저장하지 않은 그림의 결과는 **미리보기로** 돌려준다 — 화면이 원본 곁(같은 씬)에 미저장으로 얹는다
+        return {"ok": True, "file": None, "b64": base64.b64encode(png).decode(), "fmt": "png",
+                "size": [w * 4, h * 4], "workspace": body.workspace,
+                "ts": datetime.now().isoformat(timespec="seconds")}
 
     # 원본과 **같은 폴더**에 남긴다 — 버전이라 자리가 갈리면 찾기 어렵다.
-    # ★접두를 따로 둔다(`up_001.png`) — 세트 탭의 셀 번호(`003_002.png`)와 섞이면
-    #   폴더만 보고는 무엇이 무엇인지 알 수 없다.
-    path = store.next_name(src.parent, "up", "png")
+    # ★접두를 따로 둔다(`up_001.png`) — 세트 탭의 셀 번호(`003-002.png`)와 섞이면
+    #   폴더만 보고는 무엇이 무엇인지 알 수 없다. 구분자는 옛 `_` 그대로다 (`SEQ_SEP` 는 씬 그림의 것).
+    path = store.next_name(src.parent, "up", "png", sep="_")
     path.write_bytes(png)
     rel = store.rel(body.workspace, path)
 
-    # ★색인은 통째로 읽는다 — 무거운 것을 곁파일로 뺀 뒤로 줄당 211B 라 싸다
+    # ★색인은 통째로 읽는다 — 무거운 것을 따로 뺀 뒤로 줄당 211B 라 싸다
     rec = next(
         (r for r in await asyncio.to_thread(store.records, body.workspace) if r.get("file") == body.file),
         None,
@@ -1932,6 +2296,8 @@ class SavePreviewBody(BaseModel):
     #: ★뽑을 때의 화면 구조 — 생성 응답으로 나갔던 것이 그대로 돌아온다 (`_generate_one` 의 ★주).
     #:  저장 시점의 화면에서 새로 짜면 그 사이 프롬프트를 고쳤을 때 다른 그림의 구조가 붙는다.
     env: dict | None = None
+    #: ★인퍼런스였으면 그 참조와 배치. 생성 응답으로 나갔던 것이 그대로 돌아온다 (`env` 와 같다)
+    inference: dict | None = None
 
 
 @app.post("/api/save-preview")
@@ -1971,6 +2337,7 @@ async def save_preview(body: SavePreviewBody):
         "seed": body.seed,
         # ★뽑을 때의 화면 구조 (위 `env` 의 ★주) — 이것이 있어야 「설정 불러오기」가 카드를 되살린다
         "env": body.env,
+        "inference": body.inference,
     }
     store.append_record(body.workspace, rec)
     # ★레코드를 통째로 돌려준다 — 화면이 목록을 다시 읽지 않고 한 줄만 얹으면 된다 (업스케일과 같다).
@@ -2097,11 +2464,24 @@ async def _process_job(job: dict) -> None:
 async def _start_queue():
     app.state.queue_task = asyncio.create_task(genqueue.run_loop(Q, _process_job))
     # ★★**주소는 여기서 남긴다** (실측 2026-08-31). `main()` 에만 두면 개발 리로드 모드에서
-    #   워커가 그 길을 안 지나 **파일이 옛 주소로 남는다** — 실제로 시험 서버가 적어 둔 포트가
+    #   워커가 그 경로를 안 지나 **파일이 옛 주소로 남는다** — 실제로 시험 서버가 적어 둔 포트가
     #   그대로 남아 개발판에 못 붙었다. 서버가 뜨는 자리는 어느 모드든 반드시 지난다.
     write_mcp_endpoint()
     # ★검열 모델을 뒤에서 미리 올린다 (`censor.warm` 의 ★★주). 데몬 스레드 — 끝나기 전에 서버가 내려가도 붙잡지 않는다
     threading.Thread(target=censor.warm, name="censor-warm", daemon=True).start()
+    # ★★기록 옮기기는 **서버가 뜨는 자리**에서 건다 (`_records_phase`). 임포트 때 걸면 개발 리로드 모드의
+    #   부모 프로세스와 워커가 둘 다 돌리고, 판정이 서버를 임포트하기만 해도 돈다.
+    #   ★★**진짜로 서비스할 때만** 건다 (`PEROPIX_SERVING`, `main()` 이 켠다). 판정이 `TestClient` 로
+    #     서버를 열어도 startup 은 돈다 — 그것만으로 개발 트리의 워크스페이스가 옮겨졌다 (2026-09-30).
+    #   ★★**옮길 것이 있을 때만** 문을 닫는다 (`_records_phase` 의 ★★주). 세는 것은 싸서 여기서 한다.
+    #   ★문을 먼저 닫고 스레드를 띄운다 — 거꾸로 하면 그 사이에 요청이 들어온다.
+    #   ★데몬 스레드: 옮기는 도중에 앱을 꺼도 된다 (`Store.migrate_records` 의 ★「중간에 끊겨도」).
+    if os.environ.get("PEROPIX_SERVING") and not _SKIP_MIGRATIONS:
+        todo = _records_todo()
+        layout = _layout_todo()
+        if todo or layout:
+            _RECORDS["busy"] = True
+        threading.Thread(target=_records_phase, args=(todo, layout), name="records", daemon=True).start()
 
 
 @app.on_event("shutdown")
@@ -2319,7 +2699,7 @@ def _sent_from_record(ws: str, file: str) -> dict:
       본문을 손대 놓았으면 언제나 None 이 됐다 (사용자 지적 2026-08-21).
     ★우리 워크스페이스 그림은 보낸 페이로드를 통째로 기록해 두므로 짐작할 이유가 없다.
       밖에서 가져온 그림에는 기록이 없어 예전처럼 짐작한다."""
-    # ★무거운 것은 곁파일에 있다 (`workspace.ENV_NAME` 머리 주석)
+    # ★무거운 것은 `records.db` 에 있다 (`recordsdb` 머리 주석)
     res = store.heavy_of(ws, file).get("resolved") or {}
     par = res.get("parameters") or {}
     out: dict = {}
@@ -2348,7 +2728,7 @@ def _model_from_record(ws: str, file: str) -> str:
     ★우리는 보낸 페이로드를 통째로 기록해 두므로 **우리 워크스페이스 그림은** 되살릴 수 있다.
       밖에서 가져온 그림은 기록이 없어 여전히 빈 값이다 — 그때는 화면 값이 유지된다.
     ★인페인트 결과는 `model` 이 인페인팅 id 라 원본으로 되돌려 준다 (`nai.base_model`)."""
-    # ★무거운 것은 곁파일에 있다 (`workspace.ENV_NAME` 머리 주석)
+    # ★무거운 것은 `records.db` 에 있다 (`recordsdb` 머리 주석)
     m = (store.heavy_of(ws, file).get("resolved") or {}).get("model")
     return nai.base_model(m) if isinstance(m, str) else ""
 
@@ -2369,7 +2749,7 @@ async def gallery_meta(ws: str, file: str):
             m["nai_model"] = sent["model"]
         return m
 
-    # ★곁파일 읽기(실측 112MB)와 그림 메타 읽기가 함께 있다 — 루프에서 하면 서버가 선다
+    # ★기록 읽기와 그림 메타 읽기가 함께 있다 — 루프에서 하면 서버가 선다
     #   (위 「이벤트 루프에서 하면 안 되는 일」 ★★주)
     return {"file": file, "meta": await asyncio.to_thread(read)}
 
@@ -2404,6 +2784,13 @@ class KeepFolderMove(BaseModel):
 
     name: str = ""
     dest: str = ""
+
+
+class KeepFolderRename(BaseModel):
+    """폴더 이름 바꾸기 — 어느 폴더(`name`)를 무슨 이름(`new`)으로. 부모는 그대로다"""
+
+    name: str = ""
+    new: str = ""
 
 
 class KeepRename(BaseModel):
@@ -2473,6 +2860,15 @@ async def keep_move_folder(body: KeepFolderMove):
         raise HTTPException(400, str(e))
 
 
+@app.post("/api/keep/folder/rename")
+async def keep_rename_folder(body: KeepFolderRename):
+    """폴더 이름 바꾸기 (`keep.rename_folder` 주석)."""
+    try:
+        return keep.rename_folder(KEEP_DIR, body.name, body.new)
+    except (ValueError, OSError) as e:
+        raise HTTPException(400, str(e))
+
+
 @app.post("/api/keep/folder/delete")
 async def keep_drop_folder(body: KeepName):
     """★빈 폴더만 지운다 (keep.drop_folder 주석)."""
@@ -2486,7 +2882,7 @@ async def keep_drop_folder(body: KeepName):
 async def keep_abs_path(body: KeepPath):
     """보관함 그림의 **절대 경로** — 갤러리의 「일괄 변환으로 보내기」가 쓴다 (사용자 지시 2026-09-07).
     ★보관함은 아웃풋 루트 밖이라 변환 도구의 `rel` 로는 못 가리킨다. 절대 경로(`path`)로 싣는다 —
-      밖에서 끌어다 놓은 그림과 같은 길이다 (`tools._read`)."""
+      밖에서 끌어다 놓은 그림과 같은 경로다 (`tools._read`)."""
     try:
         p = keep.safe_folder(KEEP_DIR, body.path)
     except ValueError as e:
@@ -2530,8 +2926,12 @@ async def keep_images(folder: str = "", page: int = 1, limit: int = PAGE):
 
 
 @app.post("/api/keep/save")
-async def keep_save(body: KeepSave):
+def keep_save(body: KeepSave):
     """작업 폴더의 그림을 보관함으로 **복사**한다 (원본은 그대로).
+
+    ★★`def` 다 (`async def` 아님) — 보관할 때 **썸네일을 미리 굽는다**(`keep.bake_thumb`).
+      LANCZOS 축소는 CPU 일이라 async 안에서 하면 굽는 동안 **서버 전체가 멈춘다**
+      (썸네일 엔드포인트가 `def` 인 것과 같은 까닭). FastAPI 는 `def` 를 스레드풀로 돌린다.
 
     ★이미 보관돼 있으면 **무른다** (`removed: true`). 같은 그림에 보관을 두 번 누르면
       사본이 둘 생기던 것을 고친 것이다 (keep.save 주석).
@@ -2558,7 +2958,9 @@ class KeepImport(BaseModel):
 
 
 @app.post("/api/keep/import")
-async def keep_import(body: KeepImport):
+def keep_import(body: KeepImport):
+    """밖에서 온 그림을 보관함에 들인다.
+    ★`def` 인 까닭은 위 `keep_save` 와 같다 — 여기서도 썸네일을 미리 굽는다."""
     import base64
 
     try:
@@ -2613,7 +3015,9 @@ def keep_thumb(rel: str):
         raise HTTPException(404, "not found")
     # ★여기는 `immutable` 을 안 붙인다 — 보관함은 이름을 바꿀 수 있어서 같은 주소가
     #   다른 그림을 가리킬 수 있다 (생성물은 매번 새 파일명이라 붙여도 됐다).
-    t = thumbs.derive(p, KEEP_DIR / keep.THUMB_DIR / thumbs.flat_name(rel))
+    # ★캐시 자리는 `keep.thumb_path` 하나가 정한다 — 보관할 때 미리 굽는 쪽(`keep.bake_thumb`)과
+    #   같은 이름이어야 한다. 여기서 따로 셈하면 캐시가 두 벌이 된다.
+    t = thumbs.derive(p, keep.thumb_path(KEEP_DIR, rel))
     return FileResponse(t or p)
 
 
@@ -2736,8 +3140,13 @@ def files_pick_dir(body: PickDir):
 
     ★`def` 다 (async 아님) — 창이 닫힐 때까지 기다리는 호출이라 스레드풀에서 돌아야
       그동안 서버가 다른 요청을 받는다.
-    ★취소하면 `dir: null` — 그때는 부르는 쪽이 아무것도 안 바꾼다."""
-    return {"dir": files.pick_dir(body.start)}
+    ★취소하면 `dir: null` — 그때는 부르는 쪽이 아무것도 안 바꾼다.
+    ★★**못 띄운 것은 취소가 아니다** — 까닭을 실어 거절한다 (`files.pick_dir` 의 ★★주).
+      둘을 `null` 하나로 뭉뚱그리는 바람에, 창이 아예 안 뜨는 동안 화면이 아무 말도 못 했다."""
+    try:
+        return {"dir": files.pick_dir(body.start)}
+    except OSError as e:
+        raise HTTPException(500, str(e))
 
 
 @app.post("/api/tools/read")
@@ -2867,6 +3276,29 @@ async def tagger_download():
     return tagger.start_download()
 
 
+# ── 만화 글꼴 — 처음 쓸 때 받는다 (설계 `docs/comic-editor-design.md` 9-3, `comicfonts.py`) ──
+
+@app.get("/api/comic-fonts")
+async def comic_fonts_status():
+    """받아 둔 판·글꼴 목록 · 받는 중인가 (진행 바이트 포함)"""
+    return comicfonts.status()
+
+
+@app.post("/api/comic-fonts/ensure")
+async def comic_fonts_ensure():
+    """없거나 판이 올랐으면 백그라운드로 받는다 — 만화 페이지 캔버스가 있을 때 화면이 부른다"""
+    return comicfonts.ensure()
+
+
+@app.get("/api/comic-fonts/file/{rel:path}")
+async def comic_fonts_file(rel: str):
+    p = comicfonts.file_path(rel)
+    if p is None:
+        raise HTTPException(404, "없는 글꼴입니다")
+    kind = {".otf": "font/otf", ".ttf": "font/ttf", ".woff2": "font/woff2", ".woff": "font/woff"}.get(p.suffix.lower(), "application/octet-stream")
+    return FileResponse(p, media_type=kind, headers={"Cache-Control": "max-age=86400"})
+
+
 @app.post("/api/tagger/run")
 def tagger_run(body: TaggerRun):
     """태그 뽑기. ★`def` 다 — ONNX 추론이 수 초를 쥔다 (censor 와 같은 규칙).
@@ -2924,7 +3356,7 @@ def censor_detect(body: CensorDetect):
 def censor_image(body: CensorImage):
     """원본 한 장을 화면에 넘긴다 (떨군 그림·워크스페이스 밖의 그림용).
 
-    ★아웃풋 안의 그림은 이 길로 안 온다 — 화면이 `/api/file` 주소를 바로 가리킨다."""
+    ★아웃풋 안의 그림은 이 경로로 안 온다 — 화면이 `/api/file` 주소를 바로 가리킨다."""
     im, _ = _censor_open(body)
     w, h = im.width, im.height
     out = im
@@ -3069,6 +3501,303 @@ def censor_apply(body: CensorApply):
     return {"file": str(rel).replace("\\", "/"), "name": dst.name}
 
 
+# ── 이미지 편집 — 합성한 그림을 저장한다 (사용자 지시 2026-09-22) ──────────────
+class EditSave(BaseModel):
+    """이미지 편집 모드가 **합성해 구운** 그림을 저장한다. ★서버는 받은 바이트를 적을 뿐이다 (검열과 같다:
+    레이어·변형·보정은 전부 화면이 하고, 여기에는 결과 픽셀만 온다).
+
+    ★★**메타데이터를 남기지 않는다** (사용자 결정 2026-09-22). 편집본은 생성물이 아니라 재현할 설정이 없고,
+      원본 레이어의 알파에 심긴 스텔스 비트가 합성에 그대로 실려 올 수 있으므로 `meta.strip` 으로 **언제나**
+      민다 (tEXt·EXIF·알파 LSB). 브라우저 PNG 에 tEXt 가 없다고 건너뛰지 말 것.
+    ★형식은 **PNG·WebP(무손실) 둘뿐**이다 — 생성 옵션의 저장 형식과 같다 (`OptionsPanel`). 품질 칸은 없다.
+    ★자리는 일괄 변환·검열과 같은 세 갈래다 (`tools.MODES`). `sub`·`folder` 의 실제 폴더는 화면이 `dest` 로
+      준다 (검열 `CensorApply` 와 같은 이유: 어느 것이 「첫 그림」인지는 한 장씩 오는 창구가 모른다)."""
+
+    #: 화면이 문서 크기로 구운 PNG (data URL 이거나 맨 base64, RGBA)
+    image: str = ""
+    #: 원본 파일 이름 — 줄기를 따서 `<줄기>_edit.png` 로 짓는다. 없으면 `edit`
+    name: str = ""
+    fmt: str = "png"
+    mode: str = "sub"
+    dest: str | None = None
+    #: 원본 자리 — 덮어쓰기가 물러나게 할 파일 (아웃풋 루트 기준 `rel` 이거나 절대 경로 `path`)
+    rel: str | None = None
+    path: str | None = None
+    suffix: str = "_edit"
+
+
+def _edit_src(b: EditSave) -> Path | None:
+    """원본 자리 (있으면). ★루트 밖은 `rel` 로 못 가리킨다 (`files.under` 가 막는다)."""
+    if b.rel:
+        try:
+            p = files.under(WS_ROOT, b.rel)
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+        return p if p.is_file() else None
+    if b.path:
+        p = Path(b.path)
+        return p if p.is_file() else None
+    return None
+
+
+def _edit_out(dst: Path) -> dict:
+    """저장한 자리를 화면 계약대로 — 루트 안이면 아웃풋 루트 기준 상대 경로, 밖이면 절대 경로 (검열과 같다)"""
+    root = WS_ROOT.resolve()
+    rel = dst.relative_to(root) if str(dst).startswith(str(root)) else dst
+    return {"file": str(rel).replace("\\", "/"), "name": dst.name}
+
+
+@app.post("/api/edit/save")
+def edit_save(body: EditSave):
+    """편집 결과를 적는다. ★★픽셀은 화면이 그려 보낸다 — 여기서 다시 그리지 않는다.
+
+    · overwrite  원본 자리에 같은 줄기로. 옛 파일은 지우지 않고 휴지통으로 (`tools.retire`: 루트 안은 앱 휴지통,
+                 밖은 OS 휴지통). 물러날 자리가 없으면 **덮어쓰지 않고 세운다.**
+    · sub·folder 화면이 준 폴더(`dest`)에 `<줄기>_edit.<ext>` 로. 겹치면 `_2`·`_3` 을 붙인다 (덮지 않는다)."""
+    raw = body.image.split(",", 1)[-1] if body.image else ""
+    if not raw:
+        raise HTTPException(400, "저장할 그림이 없습니다")
+    try:
+        rendered = base64.b64decode(raw)
+    except (binascii.Error, ValueError) as e:
+        raise HTTPException(400, f"그림을 못 읽었습니다: {e}")
+    fmt = "WEBP" if str(body.fmt).lower() == "webp" else "PNG"
+    ext = ".webp" if fmt == "WEBP" else ".png"
+    try:
+        packed = meta.strip(rendered, fmt)
+    except Exception as e:
+        raise HTTPException(400, f"그림을 못 읽었습니다: {e}")
+    if body.mode not in tools_mod.MODES:
+        raise HTTPException(400, f"모르는 저장 방식입니다: {body.mode}")
+    src = _edit_src(body)
+    stem = Path(body.name).stem if body.name else (src.stem if src else "edit")
+
+    if body.mode == "overwrite":
+        if src is None:
+            raise HTTPException(400, "원본 자리를 모르는 그림은 덮어쓸 수 없습니다. 저장 폴더를 정해 주세요.")
+        dst = src.parent / f"{src.stem}{ext}"
+        gone = [q for q in {src, dst} if q.exists()]
+        if gone and not tools_mod.retire(WS_ROOT, gone):
+            raise HTTPException(400, "옛 파일을 휴지통으로 못 보내 덮어쓰기를 멈췄습니다.")
+        dst.write_bytes(packed)
+        return _edit_out(dst)
+
+    if not body.dest:
+        raise HTTPException(400, "저장할 폴더를 골라 주세요.")
+    p = Path(body.dest)
+    if p.is_absolute():
+        folder = p
+    else:
+        try:
+            folder = files.under(WS_ROOT, body.dest)
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+    folder.mkdir(parents=True, exist_ok=True)
+    dst = folder / f"{stem}{body.suffix}{ext}"
+    n = 2
+    while dst.exists():
+        dst = folder / f"{stem}{body.suffix}_{n}{ext}"
+        n += 1
+    dst.write_bytes(packed)
+    return _edit_out(dst)
+
+
+class EditPages(BaseModel):
+    """만화 페이지 여러 장을 **한 번에** 내보낸다 (설계 11번). 화면이 캔버스마다 구운 PNG 를 이름 차례대로 보낸다.
+    ★메타데이터는 한 장 저장과 같은 이유로 언제나 민다. ★덮어쓰지 않는다 — 이름이 겹치면 묶음 이름에 `_2`·`_3` 을 붙인다."""
+
+    images: list[str] = []
+    #: 묶음 이름 — 낱장은 `<이름>_01.png` …, ZIP·PDF 는 `<이름>.zip` · `<이름>.pdf`
+    base: str = "page"
+    #: png · webp · zip(안은 PNG) · pdf
+    fmt: str = "png"
+    dest: str = ""
+
+
+def _edit_folder(dest: str) -> Path:
+    """저장 폴더 — 절대 경로면 그대로, 아니면 아웃풋 루트 안 (한 장 저장과 같은 규칙)"""
+    if not dest:
+        raise HTTPException(400, "저장할 폴더를 골라 주세요.")
+    p = Path(dest)
+    if p.is_absolute():
+        folder = p
+    else:
+        try:
+            folder = files.under(WS_ROOT, dest)
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+    folder.mkdir(parents=True, exist_ok=True)
+    return folder
+
+
+@app.post("/api/edit/export-pages")
+def edit_export_pages(body: EditPages):
+    if not body.images:
+        raise HTTPException(400, "내보낼 페이지가 없습니다")
+    fmt = str(body.fmt).lower()
+    if fmt not in ("png", "webp", "zip", "pdf"):
+        raise HTTPException(400, f"모르는 형식입니다: {body.fmt}")
+    base = safe_name(Path(body.base or "page").stem) or "page"
+    folder = _edit_folder(body.dest)
+    pages: list[bytes] = []
+    for i, img in enumerate(body.images):
+        raw = img.split(",", 1)[-1]
+        try:
+            pages.append(base64.b64decode(raw))
+        except (binascii.Error, ValueError) as e:
+            raise HTTPException(400, f"{i + 1}쪽 그림을 못 읽었습니다: {e}")
+    n = len(pages)
+    width = max(2, len(str(n)))
+    names = lambda stem, ext: [f"{stem}_{str(k + 1).zfill(width)}{ext}" for k in range(n)]  # noqa: E731
+    # 묶음 이름 — 하나라도 겹치면 통째로 다음 번호로 (덮어쓰지 않는다, 낱장 사이에 옛 파일이 끼지 않게)
+    def free(check) -> str:
+        stem, k = base, 2
+        while check(stem):
+            stem = f"{base}_{k}"
+            k += 1
+        return stem
+
+    try:
+        if fmt in ("png", "webp"):
+            kind = "WEBP" if fmt == "webp" else "PNG"
+            ext = "." + fmt
+            stem = free(lambda st: any((folder / nm).exists() for nm in names(st, ext)))
+            out = []
+            for data, nm in zip(pages, names(stem, ext)):
+                (folder / nm).write_bytes(meta.strip(data, kind))
+                out.append(folder / nm)
+        elif fmt == "zip":
+            import zipfile
+
+            stem = free(lambda st: (folder / f"{st}.zip").exists())
+            dst = folder / f"{stem}.zip"
+            with zipfile.ZipFile(dst, "w", zipfile.ZIP_DEFLATED) as z:
+                for data, nm in zip(pages, names(stem, ".png")):
+                    z.writestr(nm, meta.strip(data, "PNG"))
+            out = [dst]
+        else:
+            stem = free(lambda st: (folder / f"{st}.pdf").exists())
+            dst = folder / f"{stem}.pdf"
+            ims = []
+            for data in pages:
+                im = Image.open(io.BytesIO(data))
+                # PDF 에는 알파가 없다 — 흰 종이 위에 얹는다
+                bg = Image.new("RGB", im.size, (255, 255, 255))
+                bg.paste(im.convert("RGBA"), mask=im.convert("RGBA").split()[-1])
+                ims.append(bg)
+            ims[0].save(dst, "PDF", save_all=True, append_images=ims[1:], resolution=200.0)
+            out = [dst]
+    except HTTPException:
+        raise
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(400, f"내보내지 못했습니다: {e}")
+    return {"files": [_edit_out(q)["file"] for q in out], "dir": str(folder)}
+
+
+# ── 만화 효과음 — 사용자가 더한 문구 (설계 7번: 앱 번들 문구 모음 + `data/` 아래 내 문구) ──
+SFX_PHRASES = DATA_DIR / "sfx-phrases.json"
+
+
+class SfxPhrases(BaseModel):
+    items: list[dict] = []
+
+
+@app.get("/api/edit/sfx-phrases")
+def sfx_phrases():
+    if not SFX_PHRASES.is_file():
+        return {"items": []}
+    try:
+        return {"items": json.loads(SFX_PHRASES.read_text("utf-8")).get("items", [])}
+    except Exception as e:  # noqa: BLE001
+        print(f"[효과음 문구] 못 읽음: {e}")
+        return {"items": []}
+
+
+@app.put("/api/edit/sfx-phrases")
+def sfx_phrases_put(body: SfxPhrases):
+    items = [{"text": str(x.get("text", ""))[:60]} for x in body.items if str(x.get("text", "")).strip()][:500]
+    tmp = SFX_PHRASES.with_suffix(".tmp")
+    tmp.write_text(json.dumps({"items": items}, ensure_ascii=False, indent=2), "utf-8")
+    tmp.replace(SFX_PHRASES)
+    return {"items": items}
+
+
+# ── 이미지 편집 — 열어 둔 캔버스를 재실행 뒤에도 남긴다 (사용자 지시 2026-09-22) ──
+# 화면(`src/editor/persist.ts`)이 레이어 픽셀을 PNG 한 장씩 `data/editor/<캔버스>/<키>.png` 로 올리고, 나머지(이름·크기·
+# 레이어 메타·원본 자리·고른 것)를 `state.json` 으로 통째로 적는다. ★서버는 셈을 안 한다 — 받은 것을 적고, 안 쓰는 것을 치울 뿐이다.
+EDIT_DIR = DATA_DIR / "editor"
+
+
+def _edit_id(s: str) -> str:
+    """캔버스·픽셀 키 — 글자·숫자·`_`·`-` 만 (경로로 새어 나가지 못하게)"""
+    s = str(s or "")
+    if not s or len(s) > 64 or not all(ch.isalnum() or ch in "_-" for ch in s):
+        raise HTTPException(400, f"잘못된 id 입니다: {s[:40]}")
+    return s
+
+
+class EditState(BaseModel):
+    docs: list[dict] = []
+    cur: str | None = None
+    #: 캔버스마다 **지금 쓰는 픽셀 키** (현재 레이어 + 이력) — 없는 것은 치운다
+    keep: dict[str, list[str]] = {}
+
+
+@app.get("/api/edit/state")
+def edit_state():
+    p = EDIT_DIR / "state.json"
+    if not p.is_file():
+        return {"docs": [], "cur": None}
+    try:
+        got = json.loads(p.read_text("utf-8"))
+        return {"docs": got.get("docs", []), "cur": got.get("cur")}
+    except Exception as e:
+        print(f"[편집 상태] 못 읽음: {e}")
+        return {"docs": [], "cur": None}
+
+
+@app.put("/api/edit/state")
+def edit_state_put(body: EditState):
+    """상태를 통째로 적는다. ★닫힌 캔버스의 픽셀 폴더는 **휴지통으로** (24시간 뒤 비운다 — 부팅 비우기 목록에 있다).
+    열린 캔버스에서 이력 밖으로 밀린 픽셀은 그냥 지운다 — 사용자 파일이 아니라 작업 사본이고, 화면에도 더는 없다."""
+    EDIT_DIR.mkdir(parents=True, exist_ok=True)
+    ids = {_edit_id(d.get("id", "")) for d in body.docs}
+    gone = [q.name for q in EDIT_DIR.iterdir() if q.is_dir() and q.name != trash.TRASH and q.name not in ids]
+    if gone:
+        trash.send_at(EDIT_DIR, gone)
+    for did in ids:
+        d = EDIT_DIR / did
+        if not d.is_dir():
+            continue
+        keep = set(body.keep.get(did, []))
+        for f in d.glob("*.png"):
+            if f.stem not in keep:
+                f.unlink(missing_ok=True)
+    tmp = EDIT_DIR / "state.json.tmp"
+    tmp.write_text(json.dumps({"docs": body.docs, "cur": body.cur}, ensure_ascii=False), "utf-8")
+    tmp.replace(EDIT_DIR / "state.json")
+    return {"ok": True}
+
+
+@app.put("/api/edit/px/{doc}/{key}")
+async def edit_px_put(doc: str, key: str, request: Request):
+    d = EDIT_DIR / _edit_id(doc)
+    d.mkdir(parents=True, exist_ok=True)
+    data = await request.body()
+    if not data:
+        raise HTTPException(400, "빈 그림입니다")
+    (d / f"{_edit_id(key)}.png").write_bytes(data)
+    return {"ok": True}
+
+
+@app.get("/api/edit/px/{doc}/{key}")
+def edit_px(doc: str, key: str):
+    p = EDIT_DIR / _edit_id(doc) / f"{_edit_id(key)}.png"
+    if not p.is_file():
+        raise HTTPException(404, "없는 그림입니다")
+    return FileResponse(p, media_type="image/png", headers={"Cache-Control": "no-store"})
+
+
 # ── 파일 관리 (아웃풋 폴더 트리) ────────────────────────────────
 
 
@@ -3082,22 +3811,24 @@ class FilesName(BaseModel):
     name: str = ""
 
 
-# ── 태그 검색 인덱스 (backend/tagindex.py) — 아웃풋 루트의 긍정 프롬프트 원문 ──────
-@app.get("/api/tags/status")
-async def tags_status():
-    return tagindex.status(WS_ROOT)
+# ── 태그 색인 (backend/tagindex.py) — 보관함의 긍정 프롬프트 원문 ────────────────
+# ★뿌리는 **보관함 하나**다. 예전에는 아웃풋 루트를 훑는 `/api/tags/*` 도 있었는데, 그것을
+#   쓰던 생성 화면 옆 태그 서랍이 미완성인 채 잠겨 있다가 걷혔다 (사용자 지시 2026-09-21).
+@app.get("/api/keep/tags/status")
+async def keep_tags_status():
+    return tagindex.status(KEEP_DIR)
 
 
-@app.post("/api/tags/index")
-async def tags_index():
-    """아웃풋 루트를 훑어 곁파일을 갱신한다 — 백그라운드. 진행은 `/api/tags/status`."""
-    return tagindex.start(WS_ROOT)
+@app.post("/api/keep/tags/index")
+async def keep_tags_index():
+    """보관함을 훑어 곁파일을 갱신한다 — 백그라운드. 진행은 `/api/keep/tags/status`."""
+    return tagindex.start(KEEP_DIR)
 
 
-@app.get("/api/tags/data")
-async def tags_data():
+@app.get("/api/keep/tags/data")
+async def keep_tags_data():
     """곁파일 통째 — 태그 집계는 화면이 한다 (`tagindex` 머리 ★★주). 몇 MB 라 딴 실에서 읽는다."""
-    return await asyncio.to_thread(tagindex.load, WS_ROOT)
+    return await asyncio.to_thread(tagindex.load, KEEP_DIR)
 
 
 @app.get("/api/files/tree")
@@ -3234,6 +3965,113 @@ def files_thumb(rel: str):
     return FileResponse(t or p)
 
 
+# ── 플러그인 (`docs/plugin-design.md`) ─────────────────────────────
+#: 사용자가 플러그인을 넣는 자리 — 앱 뿌리(사용자 영역)라 업데이트가 `app/` 을 갈아 끼워도 남는다
+PLUGINS_DIR = APP_DIR / "plugins"
+#: 플러그인이 함께 쓰는 자산 (`plug-app/` → `/plug/_app/`). ★**앱 것이다** — 앱 판과 짝이 맞아야 하고
+#  인터넷 없이도 있어야 해서 앱과 함께 배포한다. 플러그인 코드는 앱에 담지 않는다 (사용자 결정 2026-09-10).
+PLUG_APP_DIR = INNER_DIR / "plug-app"
+#: 원격 목록 주소 — 설정 `plugin_registry` 로 바꾼다. 못 받으면 관리 화면이 그 까닭을 보여 준다
+PLUGIN_REGISTRY = "https://raw.githubusercontent.com/mrm987/peropix-plugins/main/index.json"
+# ★플러그인 파이썬이 앱 액션을 시키는 창구 — import 되기 **전에** 채운다
+plugins_mod.host.tools = tools
+plugins_mod.host.app_dir = APP_DIR
+# ★★라우트를 다 만든 **뒤에** 붙인다 — 플러그인이 `/plug/<id>/…` 를 얻고, 앱 창구는 그대로다.
+#   같은 프로세스라 KeyGate 도 그대로 지난다 (화면은 `/k/<열쇠>/plug/…` 로 부른다).
+#: 꺼 둔 플러그인 id — 폴더는 그대로, 켤 때 붙이지 않는다 (관리 탭의 켜기/끄기, 사용자 지시 2026-09-08)
+# ★★플러그인이 함께 쓰는 자산 — `/plug/_app/base.css`(앱과 같은 모양) · `/plug/_app/peropix.js`(앱 창구).
+#   플러그인 페이지와 **같은 오리진**이라 한 줄 링크로 쓴다. `_` 로 시작해 플러그인 id 와 겹치지 않는다 (ID_RE).
+plugins_mod.mount_shared(app, PLUG_APP_DIR)
+PLUGINS = plugins_mod.load_all(app, PLUGINS_DIR, set(CONFIG.get("plugins_disabled") or []))
+
+
+@app.get("/api/plugins")
+async def plugins_list():
+    """설치된 플러그인 — 캔버스 주소·확장 JS·기여 지점·못 읽은 까닭·켜짐. 화면의 플러그인 모드가 읽는다."""
+    return {"dir": str(PLUGINS_DIR), "items": [p.info() for p in PLUGINS]}
+
+
+class PluginEnabled(BaseModel):
+    enabled: bool
+
+
+@app.post("/api/plugins/{pid}/enabled")
+async def plugins_set_enabled(pid: str, body: PluginEnabled):
+    """켜기/끄기 — 설정에 적고 목록의 표시만 바꾼다. 실제로 붙이고 떼는 것은 다음에 켤 때다 (설치·삭제와 같다)."""
+    if not plugins_mod.ID_RE.match(pid):
+        raise HTTPException(400, "잘못된 id")
+    off = [x for x in (CONFIG.get("plugins_disabled") or []) if x != pid]
+    if not body.enabled:
+        off.append(pid)
+    CONFIG["plugins_disabled"] = off
+    save_config(CONFIG)
+    for p in PLUGINS:
+        if p.id == pid:
+            p.enabled = body.enabled
+    return {"ok": True, "id": pid, "enabled": body.enabled}
+
+
+@app.get("/api/plugins/registry")
+async def plugins_registry():
+    """받을 수 있는 것 — 번들(공식) + 원격 목록. `installed` 는 지금 `plugins/` 에 있는 판."""
+    return await plugins_mod.registry(PLUGINS_DIR, str(CONFIG.get("plugin_registry") or PLUGIN_REGISTRY))
+
+
+class PluginInstall(BaseModel):
+    #: 번들·원격 목록의 id, 또는
+    id: str = ""
+    #: zip 주소 (직접 넣은 것)
+    zip: str = ""
+    sha256: str = ""
+
+
+@app.post("/api/plugins/install")
+async def plugins_install(body: PluginInstall):
+    """★사용자가 누를 때만 돈다. 파일만 놓는다 — 붙는 것은 다음에 켤 때다 (답의 `restart`)."""
+    r = await plugins_mod.install(PLUGINS_DIR, sys.executable, id=body.id.strip(), zip=body.zip.strip(),
+                                  sha256=body.sha256.strip(), url=str(CONFIG.get("plugin_registry") or PLUGIN_REGISTRY))
+    if not r.get("ok"):
+        raise HTTPException(400, r.get("error", "설치 실패") + (f"\n{r['pip'][-600:]}" if r.get("pip") else ""))
+    return r
+
+
+@app.delete("/api/plugins/{pid}")
+async def plugins_remove(pid: str):
+    r = plugins_mod.remove(PLUGINS_DIR, pid)
+    if not r.get("ok"):
+        raise HTTPException(400, r.get("error", "삭제 실패"))
+    return r
+
+
+#: 실제로 잡을 포트를 껍데기에 알리는 줄의 머리. `src-tauri/src/backend.rs` 의 `PORT_MARK` 와 같아야 한다
+PORT_MARK = "[backend] port = "
+
+
+def pick_port(want: int, fallback: bool) -> int:
+    """이번에 잡을 포트를 **여기서** 고른다 (사용자 제보 2026-09-29: 개발본이 「백엔드가 안 떴다」로 멈춤).
+
+    ★★껍데기가 고르면 두 앱이 몇 초 차이로 켜질 때 둘 다 8770 을 고른다. 껍데기는 비어 있는지만 보고
+      곧바로 놓는데, 파이썬이 실제로 잡는 것은 모듈을 다 읽은 뒤(수 초 뒤)라서 그 사이에 먼저 켠 쪽의
+      파이썬이 잡는다 (실측: 설치본을 켜고 7초 뒤 켠 개발본이 WinError 10013 으로 멈췄다).
+      여기서 고르면 고르는 것과 잡는 것 사이는 uvicorn 이 뜨는 잠깐뿐이다.
+    ★기본 옵션 그대로 bind 해 본다. 남이 듣고 있으면 10048 로 막히고, 닫힌 연결(TIME_WAIT)은
+      막지 않는다 (둘 다 실측).
+    ★`fallback` 이 없으면 `want` 를 그대로 돌려준다. 못 잡으면 uvicorn 이 눈에 보이게 실패한다
+      (QA 가 정해 둔 8771 · 판정이 띄운 서버가 그렇다)."""
+    import socket
+
+    for p in ((want, 0) if fallback else (want,)):
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            s.bind(("127.0.0.1", p))
+            return s.getsockname()[1]
+        except OSError:
+            continue
+        finally:
+            s.close()
+    return want
+
+
 def main():
     import uvicorn
 
@@ -3241,27 +4079,46 @@ def main():
 
     ap = argparse.ArgumentParser()
     ap.add_argument("--port", type=int, default=8770)
+    # ★껍데기가 넣는다. `--port` 가 차 있으면 빈 포트로 옮겨 간다 (`pick_port`)
+    ap.add_argument("--port-fallback", action="store_true")
     args = ap.parse_args()
-    CURRENT_PORT = args.port
+    CURRENT_PORT = pick_port(args.port, args.port_fallback)
+    # ★★껍데기가 이 줄을 기다렸다가 화면에 주소를 알려 준다. 파이프라서 바로 흘려 보내야 한다
+    print(f"{PORT_MARK}{CURRENT_PORT}", flush=True)
     # ★**여기부터가 진짜 서비스다** — 주소 파일은 이 표식이 있을 때만 쓰인다 (위 ★★주).
     #   리로드 워커는 환경을 물려받으므로 그쪽에서도 켜져 있다.
     os.environ["PEROPIX_SERVING"] = "1"
     # ★개발 중에는 **파이썬을 고치면 알아서 다시 뜬다** (사용자 지시 2026-08-08).
     #   예전엔 사이드카가 앱과 함께만 떠서, 백엔드를 고치면 앱을 통째로 재실행해야 했다.
-    #   ★보는 곳은 `backend/` **하나뿐**이다 — 작업 폴더를 보게 두면 그림이 한 장 생길
-    #     때마다 서버가 다시 뜬다.
+    #   ★보는 곳은 `backend/` 와 `plugins/` 뿐이다 — 작업 폴더를 보게 두면 그림이 한 장 생길
+    #     때마다 서버가 다시 뜬다. 감시는 `*.py` 만 보므로 색인·`_data` 는 건드려도 안 뜬다.
+    #   ★★플러그인을 넣은 까닭 (사용자 지시 2026-09-12): 플러그인의 `engine.py`·`server.py` 를 고쳐도
+    #     백엔드가 옛 판을 물고 있어, 화면만 새로 읽으면 **서버가 내려주는 값이 옛것 그대로**였다
+    #     (굴리기의 신체·복장 스위치가 꺼진 채 눌러도 안 바뀌었다 — 슬롯 응답에 구역이 없었다).
     #   ★켜지는 것은 `PEROPIX_DEV_RELOAD` 가 있을 때뿐이다 (dev.bat · qa\host.cmd 가 넣는다).
     if os.environ.get("PEROPIX_DEV_RELOAD"):
         here = str(Path(__file__).resolve().parent)
-        os.environ["PEROPIX_BACKEND_PORT"] = str(args.port)  # 워커가 읽는다
-        print(f"[backend] dev reload on - watching {here}")
-        uvicorn.run("server:app", host="127.0.0.1", port=args.port, log_level="info",
-                    reload=True, reload_dirs=[here], app_dir=here)
+        watch = [here]
+        if PLUGINS_DIR.is_dir():
+            watch.append(str(PLUGINS_DIR))
+            # ★★**정션으로 붙인 플러그인은 실제 자리도 넣는다** (2026-09-12 실측: watchfiles 1.1.1 은
+            #   링크 너머의 변경을 못 본다 — 링크를 지나는 경로로 건드려도 이벤트가 없고, 실제 폴더는 잡힌다).
+            #   개발 중에는 `plugins/<id>` 를 제작자 저장소로 잇는 일이 흔하므로, 이게 없으면 감시가 절반만 돈다.
+            for sub in PLUGINS_DIR.iterdir():
+                if not sub.is_dir():
+                    continue
+                real = sub.resolve()
+                if real != sub.absolute() and real.is_dir():
+                    watch.append(str(real))
+        os.environ["PEROPIX_BACKEND_PORT"] = str(CURRENT_PORT)  # 워커가 읽는다
+        print(f"[backend] dev reload on - watching {' · '.join(watch)}")
+        uvicorn.run("server:app", host="127.0.0.1", port=CURRENT_PORT, log_level="info",
+                    reload=True, reload_dirs=watch, app_dir=here)
     else:
         # ★★접근 로그는 끈다 — 주소 앞머리에 **이번 실행의 열쇠**가 들어 있어 매 요청마다
         #   로그에 남고(제보로 오가는 파일이다), 썸네일 요청까지 전부 찍혀 정작 봐야 할
         #   오류가 묻힌다. 의미 있는 일은 우리가 `say()` 로 적는다.
-        uvicorn.run(app, host="127.0.0.1", port=args.port, log_level="info", access_log=False)
+        uvicorn.run(app, host="127.0.0.1", port=CURRENT_PORT, log_level="info", access_log=False)
 
 
 if __name__ == "__main__":

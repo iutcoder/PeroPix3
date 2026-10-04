@@ -23,5 +23,7 @@ export function keepScroll(selector: string, run: () => void) {
   requestAnimationFrame(put);
 }
 
-/** 좌측 패널의 스크롤러 (`app/Shell.tsx` 가 다는 표식) */
-export const LEFT_SCROLL = "[data-left-scroll]";
+/** 좌측 패널에서 실제로 구르는 칸 (`panels/PromptPanel.tsx` 가 다는 표식).
+ *  ★Shell 의 패널 칸이 아니다 — 그 칸은 프롬프트 패널이 높이를 꽉 채워 구를 일이 없다.
+ *    한동안 그쪽을 재서 되돌리는 것이 아무 일도 안 했다 (실측 2026-09-28: 내용 높이와 보이는 높이 둘 다 492px). */
+export const LEFT_SCROLL = "[data-prompt-scroll]";

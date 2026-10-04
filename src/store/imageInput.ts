@@ -4,8 +4,9 @@ import { canFocus, defaultRect, focusedPlan, wholeRectMask } from "../lib/focuse
 import { sizeForBase } from "../lib/baseSize";
 import { toast } from "./toast";
 import { t } from "../i18n";
-import { useGen } from "./gen";
+import { SIZE_PRESETS, modelCaps, useGen } from "./gen";
 import { api } from "../lib/backend";
+import { INFERENCE_MODEL, INFER_AUX, fitPlan, type FittedPlan } from "../lib/inference";
 
 /** 이미지 입력 — Vibe Transfer · Precise Reference · 베이스 이미지(i2i·인페인트).
  *
@@ -20,6 +21,10 @@ import { api } from "../lib/backend";
 export type Vibe = {
   /** 원본 그림 (base64, 접두어 없음) */
   image: string;
+  /** ★★**이 한 장을 쓰나** (사용자 지시 2026-09-21: 프롬프트 블록처럼 하나씩 켜고 끈다).
+   *  ★**없으면 켜진 것**이다 — 심어 둔 그림의 메타데이터·NAI 바이브 파일·캐시에서 되살릴 때는
+   *    이 칸이 없다. 그것들을 꺼진 것으로 보면 넣었는데 안 나가는 상태가 된다. */
+  on?: boolean;
   name: string;
   /** 0.01~1. ★바뀌면 인코딩을 다시 구워야 한다 (유료) — `vibe.reuse_ok` 가 판정한다 */
   info_extracted: number;
@@ -33,6 +38,8 @@ export type Vibe = {
 export type PreciseRef = {
   /** ★캔버스로 이미 다듬은 그림 (1472² · 1536×1024 · 1024×1536 중 하나, 검은 레터박스) */
   image: string;
+  /** 이 한 장을 쓰나 — 바이브와 같은 규칙이다 (없으면 켜진 것) */
+  on?: boolean;
   /** 미리보기용 원본 */
   preview: string;
   name: string;
@@ -44,6 +51,14 @@ export type PreciseRef = {
 
 export type BaseMode = "img2img" | "inpaint";
 
+/** 인퍼런스 참조 한 장 (`lib/inference.ts`). ★넣은 그림 **전체**를 쓰고, 영역을 고르는 칸은 없다 (설계 문서 3번) */
+export type InferRef = {
+  image: string;
+  name: string;
+  /** 그림 크기. 재는 동안은 null 이고, 그동안은 배치를 못 정하므로 안 실린다 */
+  size: { w: number; h: number } | null;
+};
+
 type S = {
   vibeOn: boolean;
   vibes: Vibe[];
@@ -53,6 +68,12 @@ type S = {
   normalizeVibe: boolean;
   refOn: boolean;
   refs: PreciseRef[];
+  /** ★★인퍼런스 (설계 `docs/inference-design.md`). V5 Full 에서만 실린다.
+   *  실리는 동안은 **베이스 이미지가 안 나간다.** 둘 다 인페인트 경로를 쓴다 (`payload`) */
+  inferOn: boolean;
+  infer: InferRef | null;
+  /** 보조 프롬프트(`lib/inference` 의 `INFER_AUX`)를 싣나. 처음은 켜짐 */
+  inferAux: boolean;
 
   /** 베이스 이미지 (base64). 있으면 i2i, 마스크까지 있으면 인페인트 */
   baseImage: string;
@@ -101,6 +122,14 @@ type S = {
   patchRef: (i: number, p: Partial<PreciseRef>) => void;
   removeRef: (i: number) => void;
 
+  setInferOn: (v: boolean) => void;
+  setInferAux: (v: boolean) => void;
+  /** 참조를 넣고 켠다. 크기는 여기서 한 번 잰다 */
+  setInfer: (image: string, name: string) => void;
+  clearInfer: () => void;
+  /** ★★**지금 실리는 인퍼런스의 배치**. 없으면 null. 요금·결과 크기 표시·보내는 것이 전부 이것을 본다 */
+  inferPlan: () => FittedPlan | null;
+
   setBase: (image: string, name: string) => void;
   setTileRect: (r: { x: number; y: number; w: number; h: number } | null) => void;
   setFocused: (v: boolean) => void;
@@ -114,18 +143,42 @@ type S = {
   resetAll: () => void;
   patchBase: (p: Partial<Pick<S, "baseMode" | "baseStrength" | "baseInpaintStrength" | "baseNoise" | "baseMask">>) => void;
 
+  /** ★★**지금 걸려 있는 것 한 벌** — 탭을 떠날 때 담는다 (`store/gen` 의 탭 전환).
+   *  프롬프트와 같은 양식이다 (`usePrompt.snapshot`·`load`). */
+  snapshot: () => ImageSnap;
+  /** ★★**그 탭 것으로 갈아 끼운다.** `null` 이면 아무것도 안 걸린 상태로.
+   *  ★바이브는 갈아 끼운 **뒤에 캐시를 물어본다** (사용자 지시 2026-09-21: *"바이브는 한번
+   *    인코딩하면 갤러리의 바이브쪽에 저장되니까 나중에 같은걸 넣으면 그걸 다시 불러와야함"*).
+   *    화면에도 같은 물음이 있지만(`ImageInputPanel`), 그 섹션은 **접히면 언마운트돼** 안 돈다 —
+   *    그러면 구워 둔 인코딩을 못 찾아 요금이 다시 드는 것처럼 보인다. */
+  load: (s: ImageSnap | null) => void;
+
+  /** ★★**지금 생성에 실제로 실리는 것** — 앱에서 이 물음에 답하는 자리는 여기 하나다.
+   *
+   *  거르는 것이 셋이다: **모델 능력**(V5 는 바이브도 레퍼런스도 없다) · **묶음 스위치**
+   *  (`vibeOn`·`refOn`) · **낱장 스위치**(`on`). 셋 중 하나만 빠져도 화면과 실제가 갈린다.
+   *  ★보내는 쪽(`payload`) · 값을 매기는 쪽(`lib/costNow`·`GenerateFooter`) ·
+   *    알리는 쪽(`ImageInputBadge`)이 전부 이것을 부른다. */
+  riding: () => { vibes: Vibe[]; refs: PreciseRef[]; infer: InferRef | null };
   /** ★생성 요청에 실을 조각. **단발·큐 두 경로가 같은 것을 쓴다** (하나의 정보에는 하나의 창구) */
   payload: () => Record<string, unknown>;
 };
 
+/** 한 탭이 들고 있는 이미지 입력 한 벌.
+ *  ★`editing`(마스크를 칠하는 중인가)은 **안 담는다** — 그것은 화면 상태다. */
+export type ImageSnap = Pick<
+  S,
+  | "vibeOn" | "vibes" | "normalizeVibe" | "refOn" | "refs" | "inferOn" | "infer" | "inferAux"
+  | "baseImage" | "baseName" | "baseMode" | "baseStrength" | "baseInpaintStrength"
+  | "baseNoise" | "baseMask" | "baseSize" | "focused" | "tileRect"
+>;
+
+/** 인퍼런스가 해상도 칸 값으로 못 쓸 때 대신 고르는 후보 (`lib/inference` 의 `fitPlan`).
+ *  ★쓸 때 읽는다. `gen.ts` 와 서로를 가져오므로 모듈이 뜰 때 읽으면 순서에 따라 아직 없다 */
+const presetSizes = (): [number, number][] => SIZE_PRESETS.flatMap((g) => g.items.map(([w, h]) => [w, h] as [number, number]));
+
 /** v2 제한 그대로 (index.html:18376) */
 export const MAX_VIBES = 16;
-
-/** 베이스 그림 크기를 재는 중인 약속. `startEdit` 이 그 뒤에 자동 켜기를 판단한다 */
-let measuring: Promise<void> | null = null;
-
-/** 캐시 조회 회차. 늦게 온 답이 새 목록을 덮지 않게 한다 */
-let syncSeq = 0;
 
 /** ★★**마스크가 실제로 나가는가** — 값을 매기는 쪽과 보내는 쪽이 이 하나를 본다.
  *
@@ -136,6 +189,11 @@ let syncSeq = 0;
 const maskRides = (s: S) =>
   s.baseMode === "inpaint" && !!s.baseImage && (!!s.baseMask || (s.focused && !!s.tileRect));
 
+/** ★★**한 장이 켜져 있나** — 바이브·레퍼런스가 같은 규칙을 쓴다.
+ *  ★보내는 자리(`payload`)와 요금을 세는 자리(`lib/costNow`·생성 푸터)가 **같은 판정**을 써야
+ *    한다 — 갈리면 화면은 공짜라고 하는데 실제로는 Anlas 가 나간다. */
+export const inputOn = (x: { on?: boolean }) => x.on !== false;
+
 /** ★조각만 잘라 보내는가 (Focused Inpainting). **서버가 자르는 조건과 같은 식**이어야 한다
  *  (`server.py`: `if body.inpaint_rect and req.base_image`).
  *  ★★**그림의 출처를 따지지 않는다** (사용자 지적 2026-08-20). 예전에는 워크스페이스
@@ -144,12 +202,24 @@ const maskRides = (s: S) =>
  *    자르므로 경로가 필요 없다. */
 const focusingNow = (s: S) => s.baseMode === "inpaint" && s.focused && !!s.tileRect;
 
-export const useImageInput = create<S>((set, get) => ({
+/** 이미지 입력 한 벌을 만든다. `modelOf` 는 **이 한 벌이 따르는 모델**이다. 바이브 기본값·캐시 조회·모델 능력이 그것을 본다.
+ *  ★두 벌이다: 생성 모드(`useImageInput`, 생성 옵션의 모델)와 만화 캔버스(`editor/cutGen` 의 `useComicInput`, 캔버스의 모델).
+ *    만화 캔버스는 참조 그림을 캔버스마다 따로 든다 (사용자 결정 2026-09-28). 부품(`ImageInputPanel`)은 둘 다 같은 것을 쓴다.
+ *  ★베이스 그림 갈래(`setFocused`·`costSize`)는 생성 모드의 해상도 칸을 본다. 만화 캔버스는 베이스 그림을 안 쓴다 (컷 인페인트가 그 자리다) */
+export function makeImageInput(modelOf: () => string) {
+  /** 베이스 그림 크기를 재는 중인 약속. `startEdit` 이 그 뒤에 자동 켜기를 판단한다 */
+  let measuring: Promise<void> | null = null;
+  /** 캐시 조회 회차. 늦게 온 답이 새 목록을 덮지 않게 한다 */
+  let syncSeq = 0;
+  return create<S>((set, get) => ({
   vibeOn: false,
   vibes: [],
   normalizeVibe: true,
   refOn: false,
   refs: [],
+  inferOn: false,
+  infer: null,
+  inferAux: true,
   baseImage: "",
   baseName: "",
   baseMode: "img2img",
@@ -174,7 +244,7 @@ export const useImageInput = create<S>((set, get) => ({
             vibes: [
               ...s.vibes,
               (() => {
-                const d = vibeDefaults(useGen.getState().params.model);
+                const d = vibeDefaults(modelOf());
                 return { image, name, info_extracted: d.infoExtracted, strength: d.strength };
               })(),
             ],
@@ -192,7 +262,7 @@ export const useImageInput = create<S>((set, get) => ({
     //   큰 인코딩은 올리지 않고 "들고 있는가 + 어느 모델·info 로 구웠나"만 보낸다.
     const items = get().vibes;
     if (!items.length) return;
-    const model = useGen.getState().params.model;
+    const model = modelOf();
     const tag = ++syncSeq;
     try {
       const r = await api<{ items: { keep: boolean; encoded?: string | null;
@@ -239,6 +309,8 @@ export const useImageInput = create<S>((set, get) => ({
   costStrength() {
     // ★`y = mask ? (inpaintImg2ImgStrength ?? 1) : (image ? strength : 1)` (9절)
     const s = get();
+    // ★인퍼런스는 인페인트 강도 1 로 나간다 (`payload`)
+    if (s.inferPlan()) return 1;
     if (maskRides(s)) return s.baseInpaintStrength;
     return s.baseImage ? s.baseStrength : 1;
   },
@@ -246,7 +318,7 @@ export const useImageInput = create<S>((set, get) => ({
   costInpaint() {
     // ★`costStrength` 의 인페인트 갈래와 **같은 조건**이다 — 마스크가 실리는 때가 곧
     //   인페인트다. 갈라 적으면 강도는 인페인트로 세면서 바이브는 아닌 것으로 세는 상태가 생긴다
-    return maskRides(get());
+    return !!get().inferPlan() || maskRides(get());
   },
 
   costSize() {
@@ -256,6 +328,9 @@ export const useImageInput = create<S>((set, get) => ({
     //   고칠 때 80 Anlas 라고 떠 놓고 실제로는 0 이 나간다.
     const s = get();
     const p = useGen.getState().params;
+    // ★★인퍼런스는 **캔버스 전체**로 센다 (설계 문서 3번 「요금」). 해상도 칸의 값은 비율과 예산일 뿐이다
+    const plan = s.inferPlan();
+    if (plan) return { width: plan.canvas.w, height: plan.canvas.h };
     if (maskRides(s) && focusingNow(s)) return focusedPlan(s.tileRect!).req;
     return { width: p.width, height: p.height };
   },
@@ -264,6 +339,26 @@ export const useImageInput = create<S>((set, get) => ({
   addRef: (r) => set((s) => ({ refs: [...s.refs, r] })),
   patchRef: (i, p) => set((s) => ({ refs: s.refs.map((r, k) => (k === i ? { ...r, ...p } : r)) })),
   removeRef: (i) => set((s) => ({ refs: s.refs.filter((_, k) => k !== i) })),
+
+  setInferOn: (v) => set({ inferOn: v }),
+  setInferAux: (v) => set({ inferAux: v }),
+  setInfer: (image, name) => {
+    set({ infer: { image, name, size: null }, inferOn: true });
+    // ★크기는 **여기서 한 번만** 잰다 (`setBase` 와 같다). 배치가 전부 이 값을 본다
+    const im = new Image();
+    im.onload = () => {
+      const cur = get().infer;
+      if (cur?.image === image) set({ infer: { ...cur, size: { w: im.naturalWidth, h: im.naturalHeight } } });
+    };
+    im.src = "data:image/png;base64," + image;
+  },
+  clearInfer: () => set({ infer: null, inferOn: false }),
+  inferPlan() {
+    const on = get().riding().infer;
+    if (!on?.size) return null;
+    const p = useGen.getState().params;
+    return fitPlan(on.size.w, on.size.h, p.width, p.height, presetSizes());
+  },
 
   setBase: (image, name) => {
     set({ baseImage: image, baseName: name, baseMask: "",
@@ -287,7 +382,27 @@ export const useImageInput = create<S>((set, get) => ({
     set({ baseImage: "", baseName: "", baseMask: "", baseMode: "img2img",
           baseStrength: 0.7, baseInpaintStrength: 1, baseNoise: 0,
           baseSize: null, tileRect: null, focused: false, editing: false,
-          vibeOn: false, vibes: [], normalizeVibe: true, refOn: false, refs: [] }),
+          vibeOn: false, vibes: [], normalizeVibe: true, refOn: false, refs: [],
+          inferOn: false, infer: null, inferAux: true }),
+
+  snapshot() {
+    const s = get();
+    return {
+      vibeOn: s.vibeOn, vibes: s.vibes, normalizeVibe: s.normalizeVibe,
+      refOn: s.refOn, refs: s.refs, inferOn: s.inferOn, infer: s.infer, inferAux: s.inferAux,
+      baseImage: s.baseImage, baseName: s.baseName, baseMode: s.baseMode,
+      baseStrength: s.baseStrength, baseInpaintStrength: s.baseInpaintStrength,
+      baseNoise: s.baseNoise, baseMask: s.baseMask, baseSize: s.baseSize,
+      focused: s.focused, tileRect: s.tileRect,
+    };
+  },
+  load(snap) {
+    if (!snap) return get().resetAll();
+    // ★`editing` 은 담지 않은 값이라 여기서 끈다 — 칠하던 중에 탭을 옮겼어도 새 탭은 평소 화면이다
+    // ★보조 프롬프트 스위치가 생기기 전에 담은 한 벌에는 이 값이 없다. 처음 값(켜짐)으로 읽는다
+    set({ ...snap, inferAux: snap.inferAux ?? true, editing: false });
+    if (snap.vibes.length) void get().syncVibeCache();
+  },
   setTileRect: (r) => set({ tileRect: r }),
 
   setFocused: (v) => {
@@ -333,6 +448,18 @@ export const useImageInput = create<S>((set, get) => ({
     set(p);
   },
 
+  riding() {
+    const s = get();
+    // ★능력표는 **백엔드와 같은 것**을 본다 (`backend/nai.py` 의 `caps`) — 거기서 지우는 것을
+    //   여기서 세면 "보낸다고 해 놓고 안 나가는" 상태가 된다
+    const cap = modelCaps(modelOf());
+    return {
+      vibes: cap.vibe && s.vibeOn ? s.vibes.filter(inputOn) : [],
+      refs: cap.char_ref && s.refOn ? s.refs.filter(inputOn) : [],
+      infer: modelOf() === INFERENCE_MODEL && s.inferOn ? s.infer : null,
+    };
+  },
+
   payload() {
     // ★★인페인트는 **i2i 와 같은 베이스 옵션**이다 (사용자 지시 2026-08-19).
     //   예전에는 "칠하는 동안에만" 실었고, 그래서 편집에서 나오면 베이스가 통째로
@@ -345,11 +472,47 @@ export const useImageInput = create<S>((set, get) => ({
       focusing && !s.baseMask && s.baseSize
         ? wholeRectMask(s.tileRect!, s.baseSize.w, s.baseSize.h)
         : s.baseMask;
+    // ★★거르는 규칙은 **`riding` 하나**다 (꺼 둔 한 장 · 묶음 스위치 · 모델 능력).
+    //   여기서 다시 적으면 화면의 요금·딱지와 실제로 나가는 것이 갈린다
+    const ride = get().riding();
+    const plan = get().inferPlan();
+    if (plan && ride.infer) {
+      // ★★인퍼런스는 **베이스 이미지 대신** 나간다. 둘 다 인페인트 경로다. 캔버스와 마스크는
+      //   서버가 이 숫자대로 그린다 (`server._inference_canvas`). 크기는 **캔버스**로 나간다
+      const r = (x: { x: number; y: number; w: number; h: number }) => [x.x, x.y, x.w, x.h];
+      return {
+        vibe_transfer: ride.vibes,
+        precise_references: [],
+        normalize_reference_strength: s.normalizeVibe,
+        base_image: "",
+        base_mode: "inpaint",
+        // ★실험과 같은 값이다 (설계 문서 6번). 인페인트 강도가 1 이라 칠한 자리를 통째로 새로 그린다
+        base_strength: 0.7,
+        base_inpaint_strength: 1,
+        base_noise: 0,
+        base_mask: "",
+        inpaint_rect: null,
+        width: plan.canvas.w,
+        height: plan.canvas.h,
+        inference: {
+          image: ride.infer.image,
+          name: ride.infer.name,
+          // 이 배치를 낸 해상도 값. 「설정 불러오기」가 이것으로 해상도 칸을 되돌린다 (캔버스 크기가 아니다)
+          pick: plan.pick,
+          canvas: [plan.canvas.w, plan.canvas.h],
+          ref: r(plan.ref),
+          keep: r(plan.keep),
+          crop: r(plan.crop),
+          // 보조 프롬프트. 서버가 베이스 프롬프트 맨 앞에 넣는다 (`server._apply_inference`). 끄면 안 싣는다
+          ...(s.inferAux ? { aux: INFER_AUX } : null),
+        },
+      };
+    }
     return {
-      vibe_transfer: s.vibeOn ? s.vibes : [],
-      precise_references: s.refOn ? s.refs.map((r) => ({
+      vibe_transfer: ride.vibes,
+      precise_references: ride.refs.map((r) => ({
         image: r.image, mode: r.mode, strength: r.strength, fidelity: r.fidelity,
-      })) : [],
+      })),
       // ★사용자 토글이다 (8절). 꺼 두면 합이 1을 넘어도 값을 그대로 보낸다
       normalize_reference_strength: s.normalizeVibe,
       base_image: s.baseImage,
@@ -363,20 +526,25 @@ export const useImageInput = create<S>((set, get) => ({
       inpaint_rect: focusing ? s.tileRect : null,
     };
   },
-}));
+  }));
+}
+
+/** 생성 모드의 이미지 입력. 생성 옵션의 모델을 따른다 */
+export const useImageInput = makeImageInput(() => useGen.getState().params.model);
+export type ImageInputStore = typeof useImageInput;
 
 /** 바이브 한 장을 목록 끝에 **값까지 갖춘 채로** 붙인다.
  *
  *  ★`addVibe` 는 꽉 차면 조용히 아무것도 안 한다. 그 뒤에 「길이 − 1」을 고치면 엉뚱한
  *    항목이 바뀌므로 여기서 먼저 막고 결과를 돌려준다. 캐시 뷰어와 `.naiv4vibe` 임포트가
- *    같은 길을 쓴다 — 넣는 창구가 여럿이 되면 켬/끔 처리가 갈린다. */
-export function pushVibe(v: Vibe): boolean {
-  const s = useImageInput.getState();
+ *    같은 경로를 쓴다 — 넣는 창구가 여럿이 되면 켬/끔 처리가 갈린다. */
+export function pushVibe(v: Vibe, store: ImageInputStore = useImageInput): boolean {
+  const s = store.getState();
   if (s.vibes.length >= MAX_VIBES) return false;
   // ★Vibe 와 Precise Reference 는 함께 못 쓴다 — 켜면 다른 쪽이 꺼진다 (v2 와 같다)
   s.setVibeOn(true);
   s.addVibe(v.image, v.name);
-  const i = useImageInput.getState().vibes.length - 1;
+  const i = store.getState().vibes.length - 1;
   s.patchVibe(i, {
     strength: v.strength,
     info_extracted: v.info_extracted,

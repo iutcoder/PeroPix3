@@ -5,7 +5,7 @@ import { usePrompt } from "./prompt";
 import { allCells, allScenes, onBeforeWsSwitch, useWs } from "./workspace";
 import { useQueue } from "./queue";
 import { currentAccountId } from "./accounts";
-import { useImageInput } from "./imageInput";
+import { useImageInput, type ImageSnap } from "./imageInput";
 import { useUi } from "./ui";
 import { sizeForBase } from "../lib/baseSize";
 import { toast } from "./toast";
@@ -73,6 +73,10 @@ export type GenParams = {
    *    (`panels/CharPositioner`). 공홈 `sk()` 와 같은 규칙이다. */
   use_coords: boolean;
 };
+
+/** 생성 옵션을 **어느 값에서 읽고 어디에 쓰나**. 옵션 부품(`OptionsPanel`·`PromptOptsBar`·`SeedRow`)이 받고, 없으면 생성 모드(`useGen`)다.
+ *  ★만화 캔버스는 자기 값을 준다 (사용자 결정 2026-09-28: 생성 옵션은 캔버스마다 따로, `editor/cutGen` 의 `cutParams`) */
+export type ParamsHost = { params: GenParams; set: <K extends keyof GenParams>(k: K, v: GenParams[K]) => void };
 
 /** 모델 목록·능력표는 **`lib/naiModels.ts` 하나**다 (그 파일 머리 주석).
  *  화면이 「이 모델에서 되는 것만」 보이게 하는 근거라, 여기 사본을 두지 않는다. */
@@ -254,84 +258,103 @@ export const useGen = create<S>((set, get) => ({
     /** 씬 번호(1부터) — ★카드를 가로질러 **탭 안에서** 센다. 파일 이름 앞에 붙는 번호라
      *  카드마다 1로 되돌아가면 탐색기에서 같은 번호가 여럿이 된다. */
     const order = allCells(tab);
+    /* ★★**순차 생성 모드** (사용자 결정 2026-09-15). 켜면 켜 둔 인물을 한 장에 모으지 않고
+       **한 명씩** 뽑는다 — 규칙은 「슬롯을 하나씩만 켠 것처럼」 하나다.
+       ★인물이 **가장 바깥**이다: A 의 씬·바퀴를 다 돌고 나서 B 로 넘어간다 (사용자 설명).
+       ★시드는 인물마다 `rounds` 를 새로 태우므로 **첫 바퀴가 서로 같은 시드**다 —
+         같은 조건에서 사람만 갈아 끼워 견줄 수 있다.
+       ★인물이 없으면(캐릭터 칸이 없거나 전부 꺼짐) 켜져 있어도 평소와 같이 한 판이다. */
+    const seq = usePrompt.getState().seqChars && raw.chars.length > 0;
+    const parties = seq ? raw.chars.map((c) => [c]) : [raw.chars];
     // ★큐로 보낸다 — 한 장씩 await 하면 중간에 앱을 닫거나 새로고침하면 나머지가 사라진다.
     //   큐는 백엔드가 들고 있어 재연결로 복원된다 (store/queue.ts).
-    await useQueue.getState().enqueue(
-      {
-        ...get().params,
-        ...useImageInput.getState().payload(),
-        workspace: ws.current,
-        // ★★**이 워크스페이스의 계정**으로 — 큐는 이 값으로 차선을 가른다 (`store/accounts`)
-        account: currentAccountId(),
-        tab: ws.activeTabOf()?.name ?? null,
-        scene_group: tab.name,
-        scene_group_id: tab.id,
-        negative_prompt: uc,
-        characters: withCoords(chars, get().params.use_coords),
-      },
-      // ★**바퀴를 여기서 편다** (2026-08-11). 예전에는 씬 목록만 보내고 장 수는 서버가
-      //   펼쳤는데(`qb.count`), 그러면 "한 바퀴에 시드 하나"를 표현할 수가 없다.
-      //   여기서 펴면 순서와 시드가 둘 다 정확해진다.
-      rounds(Math.max(1, useUi.getState().perSlot), get().params, live, ({ cell: c }, seed) => {
-        // ★씬 프롬프트가 **payload 의 어디로** 들어가나 — 탭의 선택 하나가 정한다.
-        //   `base` 면 top-level prompt 에, 캐릭터 id 면 그 사람의 `characterPrompts[]` 에 붙는다.
-        //   ★고른 캐릭터가 목록에 없으면(꺼짐·삭제) base 로 떨어진다 — 조용히 사라지지 않게.
-        const scene = compileBlocks(c.blocks);
-        // ★목적지는 **셋**이다 — base · 캐릭터 한 명 · **캐릭터 전원**(`"all"`).
-        //   「전원」은 v2 의 `promptTarget === "char"` 이다 (`backend.py:2803-2833`): 그쪽은
-        //   씬 태그를 **켜진 캐릭터 전부**의 프롬프트에 이어 붙였다.
-        //   ★켜진 캐릭터가 **둘 이상일 때만** 뜻이 있다 (한 명이면 그 사람을 고르는 것과 같다) —
-        //     화면도 그때만 선택지를 낸다(`SceneLane`). 조건이 깨지면 base 로 떨어진다.
-        const dest =
-          tab.sceneDest === "all" && raw.chars.length > 1
-            ? "all"
-            : raw.chars.some((ch) => ch.id === tab.sceneDest)
-              ? tab.sceneDest
-              : "base";
-        const toChar = dest !== "base";
-        // ★★**이 장의 추첨**이다. 회차마다·씬마다 따로 뽑히며, 이 한 줄이 와일드카드의
-        //   존재 이유다 (`docs/v2-feature-catalog.md:477`: 한 번만 풀면 전 이미지가 굳는다).
-        //   ★푸는 것은 **이어 붙인 뒤**다. `#이름` 은 나타날 때마다 따로 뽑히므로 결과가 같고,
-        //     접두·캐릭터·씬을 따로 풀던 v2 보다 자리가 하나로 모인다.
-        const shot = resolveShot(pools, {
-          // 베이스 + 이 씬의 블록들 순서로 잇는다.
-          // ★씬도 블록이라 **켜진 블록만** 들어간다 — 프롬프트 쪽과 같은 규칙이다
-          // ★카드 공통 접두는 걷었다 (2026-08-21) — 같은 것을 붙이려면 베이스 블록을 쓴다
-          prompt: [raw.prompt, toChar ? "" : scene].filter(Boolean).join(", "),
-          uc: raw.uc,
-          chars: toChar
-            ? raw.chars.map((ch) =>
-                (dest === "all" || ch.id === dest) && scene
-                  ? { ...ch, prompt: [ch.prompt, scene].filter(Boolean).join(", ") }
-                  : ch,
-              )
-            : raw.chars,
-        });
-        return {
-          cell: c.name,
-          cell_id: c.id,
-          // ★씬 번호(1부터) — 파일 이름 앞에 붙어 탐색기에서 순서를 만든다.
-          //   ★잠긴 씬을 뺀 뒤의 순번이 아니라 **탭에서의 자리**여야 번호가 안 흔들린다
-          cell_no: order.findIndex((x) => x.id === c.id) + 1,
-          seed,
-          prompt: shot.prompt,
-          negative_prompt: shot.uc,
-          characters: withCoords(shot.chars, get().params.use_coords),
-          // ★★**이 장을 뽑는 화면 구조를 그대로 남긴다** (사용자 지시 2026-08-19).
-          //   「새 탭으로 복제」가 이것으로 환경을 되살린다 — PNG 메타데이터에는 **합쳐진
-          //   문자열**만 남아 스타일 카드·블록 나눔·캐릭터 카드를 못 되살리기 때문이다.
-          //   ★남겨 두면 나중에 그 탭을 고치거나 지워도 **그때 환경 그대로** 복제된다.
-          //   ★여기 담는 것은 **`generateAll` 이 읽는 것 전부**여야 한다 (회귀 `cloneEnv.test.ts`).
-          //     그림 바이트는 안 담는다 — 구조뿐이라 작다.
-          env: {
-            prompt: usePrompt.getState().snapshot(),
-            sceneDest: tab.sceneDest,
-            cell: { name: c.name, blocks: c.blocks },
-          },
-        };
-      }),
-      1,
-    );
+    // ★★**큐가 거절하면 생성 푸터에 남긴다** (사용자 제보 2026-09-30: *"2장 생성했는데 다 씬에 뜨지 않음"*).
+    //   받아 주는 자리가 없어서 대기 칸만 잠깐 섰다 사라지고 아무 말이 없었다 (`useGen.error` → `GenerateFooter`).
+    set({ error: "" });
+    try {
+      await useQueue.getState().enqueue(
+        {
+          ...get().params,
+          ...useImageInput.getState().payload(),
+          workspace: ws.current,
+          // ★★**이 워크스페이스의 계정**으로 — 큐는 이 값으로 차선을 가른다 (`store/accounts`)
+          account: currentAccountId(),
+          tab: ws.activeTabOf()?.name ?? null,
+          scene_group: tab.name,
+          scene_group_id: tab.id,
+          negative_prompt: uc,
+          characters: withCoords(chars, get().params.use_coords),
+        },
+        // ★**바퀴를 여기서 편다** (2026-08-11). 예전에는 씬 목록만 보내고 장 수는 서버가
+        //   펼쳤는데(`qb.count`), 그러면 "한 바퀴에 시드 하나"를 표현할 수가 없다.
+        //   여기서 펴면 순서와 시드가 둘 다 정확해진다.
+        parties.flatMap((party) =>
+        rounds(Math.max(1, useUi.getState().perSlot), get().params, live, ({ cell: c }, seed) => {
+          // ★씬 프롬프트가 **payload 의 어디로** 들어가나 — 탭의 선택 하나가 정한다.
+          //   `base` 면 top-level prompt 에, 캐릭터 id 면 그 사람의 `characterPrompts[]` 에 붙는다.
+          //   ★고른 캐릭터가 목록에 없으면(꺼짐·삭제) base 로 떨어진다 — 조용히 사라지지 않게.
+          const scene = compileBlocks(c.blocks);
+          // ★목적지는 **셋**이다 — base · 캐릭터 한 명 · **캐릭터 전원**(`"all"`).
+          //   「전원」은 v2 의 `promptTarget === "char"` 이다 (`backend.py:2803-2833`): 그쪽은
+          //   씬 태그를 **켜진 캐릭터 전부**의 프롬프트에 이어 붙였다.
+          //   ★켜진 캐릭터가 **둘 이상일 때만** 뜻이 있다 (한 명이면 그 사람을 고르는 것과 같다) —
+          //     화면도 그때만 선택지를 낸다(`SceneLane`). 조건이 깨지면 base 로 떨어진다.
+          //   ★순차 모드에서는 그 장에 **한 명뿐**이라 「전원」이 곧 그 사람이다.
+          const dest =
+            tab.sceneDest === "all" && (party.length > 1 || seq)
+              ? "all"
+              : party.some((ch) => ch.id === tab.sceneDest)
+                ? tab.sceneDest
+                : "base";
+          const toChar = dest !== "base";
+          // ★★**이 장의 추첨**이다. 회차마다·씬마다 따로 뽑히며, 이 한 줄이 와일드카드의
+          //   존재 이유다 (`docs/v2-feature-catalog.md:477`: 한 번만 풀면 전 이미지가 굳는다).
+          //   ★푸는 것은 **이어 붙인 뒤**다. `#이름` 은 나타날 때마다 따로 뽑히므로 결과가 같고,
+          //     접두·캐릭터·씬을 따로 풀던 v2 보다 자리가 하나로 모인다.
+          const shot = resolveShot(pools, {
+            // 베이스 + 이 씬의 블록들 순서로 잇는다.
+            // ★씬도 블록이라 **켜진 블록만** 들어간다 — 프롬프트 쪽과 같은 규칙이다
+            // ★카드 공통 접두는 걷었다 (2026-08-21) — 같은 것을 붙이려면 베이스 블록을 쓴다
+            prompt: [raw.prompt, toChar ? "" : scene].filter(Boolean).join(", "),
+            uc: raw.uc,
+            chars: toChar
+              ? party.map((ch) =>
+                  (dest === "all" || ch.id === dest) && scene
+                    ? { ...ch, prompt: [ch.prompt, scene].filter(Boolean).join(", ") }
+                    : ch,
+                )
+              : party,
+          });
+          return {
+            cell: c.name,
+            cell_id: c.id,
+            // ★씬 번호(1부터) — 파일 이름 앞에 붙어 탐색기에서 순서를 만든다.
+            //   ★잠긴 씬을 뺀 뒤의 순번이 아니라 **탭에서의 자리**여야 번호가 안 흔들린다
+            cell_no: order.findIndex((x) => x.id === c.id) + 1,
+            seed,
+            prompt: shot.prompt,
+            negative_prompt: shot.uc,
+            characters: withCoords(shot.chars, get().params.use_coords),
+            // ★★**이 장을 뽑는 화면 구조를 그대로 남긴다** (사용자 지시 2026-08-19).
+            //   「새 탭으로 복제」가 이것으로 환경을 되살린다 — PNG 메타데이터에는 **합쳐진
+            //   문자열**만 남아 스타일 카드·블록 나눔·캐릭터 카드를 못 되살리기 때문이다.
+            //   ★남겨 두면 나중에 그 탭을 고치거나 지워도 **그때 환경 그대로** 복제된다.
+            //   ★여기 담는 것은 **`generateAll` 이 읽는 것 전부**여야 한다 (회귀 `cloneEnv.test.ts`).
+            //     그림 바이트는 안 담는다 — 구조뿐이라 작다.
+            env: {
+              prompt: usePrompt.getState().snapshot(),
+              sceneDest: tab.sceneDest,
+              cell: { name: c.name, blocks: c.blocks },
+            },
+          };
+        }),
+        ),
+        1,
+      );
+    } catch (e) {
+      set({ error: String(e) });
+      return;
+    }
     if (get().params.seed_mode !== "fixed") get().set("seed", randomSeed());
   },
 }));
@@ -348,9 +371,14 @@ export const useGen = create<S>((set, get) => ({
  */
 export const charLimit = () => capsOf(useGen.getState().params.model).max_characters;
 
+/** ★★**순차 생성 모드에서는 상한이 안 걸린다** (2026-09-15). 그 모드는 한 장에 한 명만
+ *  실으므로 (`generateAll` 의 `parties`), 켜 둔 인물이 몇이든 NAI 가 받는 수를 안 넘는다.
+ *  ★모델 상한은 **한 장에 몇 명인가**의 값이지 「칸이 몇 개인가」가 아니다. */
+const capped = () => !usePrompt.getState().seqChars;
+
 /** 지금 하나 더 켤 수 있나 */
 export const canEnableChar = () =>
-  usePrompt.getState().chars.filter((c) => c.on).length < charLimit();
+  !capped() || usePrompt.getState().chars.filter((c) => c.on).length < charLimit();
 
 /** 켜기 — 상한에 닿으면 켜지 않고 알린다. 끄기는 언제나 된다. */
 export function toggleCharCapped(id: string) {
@@ -366,6 +394,8 @@ export function toggleCharCapped(id: string) {
 /** ★상한이 **줄어드는 순간**(모델 전환)에 넘은 것을 뒤에서부터 끈다.
  *  넘은 상태 자체를 두지 않으므로 「초과분은 무시됩니다」 같은 경고가 필요 없다. */
 export function clampCharsToModel() {
+  // ★순차 모드에서는 넘을 일이 없다 (한 장에 한 명) — 모델을 바꿔도 끄지 않는다
+  if (!capped()) return 0;
   const limit = charLimit();
   const over = usePrompt.getState().chars.filter((c) => c.on).slice(limit);
   if (!over.length) return 0;
@@ -400,6 +430,18 @@ let saveTimer: ReturnType<typeof setTimeout> | undefined;
  *  ★localStorage 는 **새 탭의 출발값**으로 남는다 (마지막으로 쓰던 값). */
 let watching = false;
 let lastSpot: string | null = null;
+/** ★★**이미지 입력도 탭마다 따로다** (사용자 결정 2026-09-21).
+ *
+ *  사용자 신고: 탭 A 에서 베이스 그림을 걸어 둔 채 탭 A 를 지우고 탭 B 에서 생성을 눌렀더니
+ *  **탭 B 의 프롬프트에 탭 A 의 그림**으로 i2i 가 나갔다. 베이스 그림은 켜고 끄는 스위치도
+ *  없고 걸려 있다는 표시도 없어서(「이미지 입력」 섹션은 접히면 언마운트된다) 조용히 나갔다.
+ *  생성 옵션(`tab.gen`)·프롬프트(`tab.prompt`)는 이미 탭이 들고 있었는데 이것만 전역이었다.
+ *
+ *  ★★**파일에 안 적는다.** 여기 드는 것은 그림 바이트(base64)라, 워크스페이스 파일에 담으면
+ *    자동 저장마다 수 MB 를 다시 쓴다. 지금도 이 값들은 어디에도 안 남으므로(앱을 다시 켜면
+ *    비어 있다) **메모리에만** 둔다 — 오래가는 정도는 전과 같고 탭 사이만 갈린다.
+ *  ★워크스페이스를 옮기면 통째로 버린다 (전과 같은 규칙). */
+const tabImages = new Map<string, ImageSnap>();
 function watchTabParams() {
   if (watching) return;
   watching = true;
@@ -423,7 +465,10 @@ function watchTabParams() {
     lastSpot = spot;
     const sameWs = !!prev && prev.split("::")[0] === (s.current ?? "");
     if (sameWs) {
-      useWs.getState().stashGen(prev.split("::").slice(1).join("::"), useGen.getState().params);
+      const from = prev.split("::").slice(1).join("::");
+      useWs.getState().stashGen(from, useGen.getState().params);
+      // ★생성 옵션과 **같은 자리에서** 담는다 — 규칙이 둘로 갈리지 않게
+      tabImages.set(from, useImageInput.getState().snapshot());
     }
     const tab = spec?.tabs?.find((c) => c.id === id);
     if (tab?.gen) {
@@ -439,7 +484,16 @@ function watchTabParams() {
     }
     if (!sameWs) {
       // ★베이스 그림·바이브·레퍼런스도 워크스페이스를 안 넘는다 (같은 이유)
+      tabImages.clear();
       useImageInput.getState().resetAll();
+    } else if (id) {
+      /* ★★**탭 것으로 갈아 끼운다.** 담아 둔 것이 없는 탭(새 탭·처음 가 보는 탭)은
+         **아무것도 안 걸린 상태**로 시작한다 — 앞 탭의 그림이 따라가지 않는 것이 이 변경의 요점이다.
+         ★바이브는 `load` 가 캐시를 다시 물어본다 (`store/imageInput` 의 ★★주). */
+      useImageInput.getState().load(tabImages.get(id) ?? null);
+      // 지운 탭이 담아 둔 것은 버린다 (그림 바이트라 들고 있을 이유가 없다)
+      const live = new Set((spec?.tabs ?? []).map((c) => c.id));
+      for (const k of [...tabImages.keys()]) if (!live.has(k)) tabImages.delete(k);
     }
   });
 }

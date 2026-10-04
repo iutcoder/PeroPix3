@@ -1,13 +1,17 @@
 import { composing } from "../lib/ime";
-import { useRef, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import { useI18n } from "../i18n";
 import { useWs } from "../store/workspace";
 import { ALL, useGallery } from "../store/gallery";
 import { dragSourceStyle, useDrag, useDragSource, useDropZone } from "../cards/dragStore";
+import { useRename } from "../components/useRename";
 import { ask } from "../store/ask";
 import { toast } from "../store/toast";
 import { Icon } from "../components/Icon";
 import { FolderOpenButton } from "../components/FolderOpenButton";
+import { filterTags, normTag } from "../lib/tagSearch";
+import { COLOR_HEX } from "../lib/blocks";
+import { useUi } from "../store/ui";
 
 /** 갤러리의 폴더 목록 — 좌 패널.
  *
@@ -20,7 +24,7 @@ export function GalleryFolders() {
   const ws = useWs((s) => s.current);
   // ★목록을 불러오는 것은 **중앙(Gallery)** 이다 — 이 패널은 접으면 언마운트되므로
   //   (Shell 이 접힌 쪽을 렌더하지 않는다) 여기서 불러오면 접었을 때 갤러리가 빈다.
-  const { folders, folder, items, setFolder, newFolder, dropFolder, moveFolder, reveal, moveTo, vibeMode, setVibeMode } =
+  const { folders, folder, items, setFolder, newFolder, dropFolder, moveFolder, renameFolder, reveal, moveTo, vibeMode, setVibeMode } =
     useGallery();
   /** 그림을 끌어다 놓으면 그 폴더로 옮긴다 (사용자 지시 2026-08-19) */
   const moveFiles = async (files: string[], dest: string) => {
@@ -45,6 +49,16 @@ export function GalleryFolders() {
     try {
       await moveFolder(ws, src, dest === ALL ? "" : dest);
       toast(t("gallery.folderMoved"));
+    } catch (e) {
+      toast(String(e), "warn");
+    }
+  };
+
+  /** ★줄을 두 번 눌러 이름을 고친다 (사용자 지시 2026-09-10). 자리는 그대로다 */
+  const renameFolderTo = async (path: string, next: string) => {
+    try {
+      await renameFolder(ws, path, next);
+      toast(t("gallery.folderRenamed"));
     } catch (e) {
       toast(String(e), "warn");
     }
@@ -123,6 +137,7 @@ export function GalleryFolders() {
             on={folder === f.path}
             onClick={() => void setFolder(ws, f.path)}
             onDelete={() => void removeFolder(f.path, f.count)}
+            onRename={(next) => void renameFolderTo(f.path, next)}
             onDropFiles={(files) => void moveFiles(files, f.path)}
             onDropFolder={(src) => void moveFolderTo(src, f.path)}
             dragPath={f.path}
@@ -216,6 +231,9 @@ export function GalleryFolders() {
         )}
       </div>
 
+      {/* ★스크롤 칸 **밖**이다 — 폴더 목록과 경계를 나눠 갖고, 그 경계를 끌어 높이를 정한다 */}
+      <ArtistFilter />
+
       <div
         style={{
           flexShrink: 0,
@@ -250,6 +268,7 @@ function Row({
   on,
   onClick,
   onDelete,
+  onRename,
   onDropFiles,
   onDropFolder,
   dragPath,
@@ -262,6 +281,8 @@ function Row({
   onClick: () => void;
   /** 없으면 지우는 단추가 안 뜬다 (전체 줄) */
   onDelete?: () => void;
+  /** 있으면 **줄을 두 번 눌러 이름을 고친다** (사용자 지시 2026-09-10). 뿌리 줄에는 없다 */
+  onRename?: (next: string) => void;
   /** ★그림을 끌어다 놓으면 **이 폴더로 옮긴다** (사용자 지시 2026-08-19).
    *  없으면 받지 않는다 (「전체」는 폴더가 아니라 보기라 받을 자리가 없다 — 뿌리로 옮기는
    *  것은 「전체」가 아니라 뿌리 폴더 줄이 받아야 뜻이 분명하다). */
@@ -275,7 +296,10 @@ function Row({
   const startDrag = useDragSource();
   /** ★앱의 포인터 끌기를 받는다 — HTML5 드롭은 Tauri 가 가로채 안 온다 (`cards/dragStore`) */
   const zone = useDropZone({
-    id: `keep-folder-${label}`,
+    /* ★★열쇠는 **전체 경로**여야 한다. 줄에 적는 이름(`label`)은 마지막 조각뿐이라
+       (2026-09-07 부터), 그것으로 열쇠를 만들면 상위가 다른 같은 이름의 폴더 둘이 **한 열쇠**를
+       나눠 갖는다 — 떨구면 `dragStore.end` 가 먼저 등록된 쪽을 찾아 **엉뚱한 폴더로 들어간다.** */
+    id: `keep-folder-${dragPath ?? ""}`,
     kind: "keep",
     prio: 10,
     onDrop: (d) => {
@@ -286,6 +310,19 @@ function Row({
   // 폴더는 `work/유나/포즈1` 처럼 계층이라, 마지막 조각을 굵게 두고 앞은 흐리게 둔다
   const parts = label.split("/");
   const leaf = parts.pop()!;
+  /** 이름 고치기 — ★규칙은 **앱에 하나**다 (`useRename`): Enter 저장 · Esc 취소 · 밖을 누르면 저장 */
+  const rename = useRename(leaf, (v) => onRename?.(v));
+  /** ★★**더블클릭을 직접 센다.** 이 줄은 끌기 출발점이라 pointerdown 에서 기본 동작을 막고,
+   *  그러면 브라우저의 click·dblclick 이 오지 않는다 (갤러리 칸과 같은 사정). 간격은 500ms. */
+  const lastTap = useRef(0);
+  const tap = () => {
+    if (!onRename) return onClick();
+    const now = Date.now();
+    const dbl = now - lastTap.current < 500;
+    lastTap.current = dbl ? 0 : now;
+    if (dbl) rename.toggle();
+    else onClick();
+  };
   return (
     <div
       // ★지우는 단추는 **커서를 올렸을 때만** 보인다 (globals.css `*:hover > .thumb-star` 와 같은 요령).
@@ -301,12 +338,31 @@ function Row({
         background: zone.over ? "var(--accent-bg)" : undefined,
       }}
     >
+    {rename.editing ? (
+      /* ★★**편집 중에는 줄을 통째로 입력칸으로 바꾼다.** `<button>` 안에 `<input>` 을 넣으면
+         단추가 누름을 먼저 가져가 글자를 못 친다 (HTML 이 금지하는 겹침이다). */
+      <input
+        data-keep-folder-rename={label}
+        {...rename.inputProps}
+        style={{
+          flex: 1,
+          minWidth: 0,
+          padding: "5px var(--sp-3)",
+          paddingLeft: `calc(var(--sp-3) + ${depth * 14}px)`,
+          borderRadius: "var(--r-2)",
+          border: "1px solid var(--accent)",
+          background: "var(--panel)",
+          color: "var(--ink)",
+          fontSize: "var(--text-xs)",
+        }}
+      />
+    ) : (
     <button
       /* ★끌 수 있는 줄은 **포인터 판**으로 시작한다 (`useDragSource`). pointerdown 의 preventDefault 가
          click 을 삼키므로 누르기는 onTap 으로 받는다 — 뿌리 줄은 끌지 않으니 onClick 그대로. */
       onClick={dragPath === undefined ? onClick : undefined}
       onPointerDown={dragPath === undefined ? undefined
-        : (e) => startDrag(e, { dir: "apply", kind: "keep", folder: dragPath }, undefined, onClick)}
+        : (e) => startDrag(e, { dir: "apply", kind: "keep", folder: dragPath }, undefined, tap)}
       data-tip={label}
       style={{
         ...(dragPath === undefined ? {} : dragSourceStyle),
@@ -341,6 +397,7 @@ function Row({
         {count}
       </span>
     </button>
+    )}
     {onDelete && (
       <button
         data-keep-folder-del={label}
@@ -356,3 +413,390 @@ function Row({
   );
 }
 
+/** 작가 목록에 한 번에 보여 주는 줄 수 — 나머지는 검색어로 좁힌다 */
+const SHOW_ARTISTS = 60;
+
+/** 작가 필터 — 폴더 목록 **아래 칸** (사용자 지시 2026-09-21: 갤러리에서 작가 태그로 찾고,
+ *  태그를 누르거나 검색어를 적어 그 작가가 든 그림만 본다).
+ *
+ *  ★「무엇을 골라 보나」가 이미 이 기둥에 있다 — 폴더와 같은 갈래라 같은 자리에 둔다.
+ *  ★작가 판정은 **`artist:` 접두가 있거나 사전이 작가로 아는 이름**이다 (`lib/tagSearch` 의 `isArtist`).
+ *  ★★**숫자는 지금 범위에서 센 값이다.** 「현재 폴더」로 좁혀 두고 전체 기준 숫자를 보여 주면
+ *    눌렀을 때 그보다 적게 나와 고장으로 보인다. 그래서 범위로 거른 뒤에 센다.
+ *  ★★**누를 때마다 켜고 끈다** (사용자 지시 2026-09-21). 여럿을 켜면 **하나라도 든 그림**을
+ *    보여 주고, 격자는 작가별로 모아 준다 (`store/gallery.artistItems`).
+ *  ★칸을 펼치는 순간 색인을 증분으로 훑는다 — 첫 훑기만 그림을 다 읽고 그 뒤로는 파일 정보뿐이다.
+ *  ★★**높이는 사람이 정한다** (사용자 지적 2026-09-21: 작가 목록이 길어 폴더 목록을 밀어냈다).
+ *    경계를 끌면 이 칸이 자라고 폴더 목록이 그만큼 줄어든다 (`useUi.artistH`). */
+function ArtistFilter() {
+  const t = useI18n((s) => s.t);
+  const { artistBusy, artistStatus, artistTags, artistQuery, artists, artistScope, artistIndex,
+          folder, focus, artistsByFile, setArtistQuery, toggleArtist, clearArtists,
+          setArtistScope, rescanArtists } = useGallery();
+  /** ★펼침은 **저장되는 화면 상태**다 (`useUi`) — 다시 켜도 펼친 채로 (사용자 지시 2026-09-21) */
+  const artistOpen = useUi((s) => s.artistOpen);
+  const setArtistOpen = useUi((s) => s.setArtistOpen);
+  const artistH = useUi((s) => s.artistH);
+  const setArtistH = useUi((s) => s.setArtistH);
+  /** 작가마다 칠해 둔 색 — 점을 누르면 다음 색으로 돌아간다 (블록 머리의 색 점과 같다) */
+  const artistColor = useUi((s) => s.artistColor);
+  const cycleArtistColor = useUi((s) => s.cycleArtistColor);
+  const artistAlways = useUi((s) => s.artistAlways);
+  const setArtistAlways = useUi((s) => s.setArtistAlways);
+  const [shown, setShown] = useState(SHOW_ARTISTS);
+  /** 경계를 잡은 자리 — 잡을 때의 커서 y 와 그때의 높이 */
+  const grip = useRef<{ y: number; h: number } | null>(null);
+
+  /** 지금 범위에서 센 작가들 — 한 장도 없는 작가는 뺀다 */
+  const hits = useMemo(() => {
+    const inHere = (rel: string) => {
+      if (artistScope === "all") return true;
+      const at = rel.lastIndexOf("/");
+      return (at < 0 ? "" : rel.slice(0, at)) === folder;
+    };
+    return filterTags(artistTags, artistQuery, true)
+      .map((h) => ({ t: h.t, n: h.files.filter((f) => f in artistIndex && inHere(f)).length }))
+      .filter((h) => h.n > 0)
+      .sort((a, b) => b.n - a.n || a.t.localeCompare(b.t));
+  }, [artistTags, artistQuery, artistScope, folder, artistIndex]);
+
+  /* ★★**고른 그림의 작가** — 격자에서 고르면 여기 뜬다 (사용자 지시 2026-09-21: 「역으로」).
+     ★대상은 **마지막에 누른 한 장**(`focus`)이다 — 오른쪽 그림 정보 패널이 보는 것과 같은 장이라,
+       두 패널이 서로 다른 그림을 말하지 않는다.
+     ★표는 저장소가 하나만 짓는다 (`artistsByFile`) — 격자 칸에 적히는 이름과 같은 것이다. */
+  const ofFocus = focus ? artistsByFile().get(focus) : undefined;
+  const copy = (text: string) =>
+    void navigator.clipboard?.writeText(text).then(() => toast(t("act.copied")));
+
+  const scopeBtn = (v: "all" | "folder", label: string) => (
+    <button
+      data-artist-scope={v}
+      data-on={artistScope === v ? "" : undefined}
+      onClick={() => setArtistScope(v)}
+      style={{
+        flex: 1,
+        padding: "3px 0",
+        borderRadius: "var(--r-1)",
+        border: `1px solid ${artistScope === v ? "var(--accent)" : "var(--line)"}`,
+        background: artistScope === v ? "var(--accent-bg)" : "transparent",
+        color: artistScope === v ? "var(--ink)" : "var(--ink-dim)",
+        fontSize: "var(--text-2xs)",
+      }}
+    >
+      {label}
+    </button>
+  );
+
+  return (
+    <div style={{ flexShrink: 0, display: "flex", flexDirection: "column", minHeight: 0 }}>
+      {/* ★경계를 끌어 이 칸의 높이를 정한다. 접혀 있으면 끌 것이 없다 */}
+      {artistOpen ? (
+        <div
+          data-artist-grip
+          onPointerDown={(e) => {
+            grip.current = { y: e.clientY, h: artistH };
+            (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+          }}
+          onPointerMove={(e) => {
+            if (grip.current) setArtistH(grip.current.h + (grip.current.y - e.clientY));
+          }}
+          onPointerUp={() => {
+            grip.current = null;
+            useUi.getState().commitLayout();
+          }}
+          onPointerCancel={() => {
+            grip.current = null;
+          }}
+          style={{ flexShrink: 0, height: 7, cursor: "row-resize", display: "grid", alignItems: "center" }}
+        >
+          <span style={{ height: 1, background: "var(--line)" }} />
+        </div>
+      ) : (
+        <span style={{ height: 1, background: "var(--line-soft)" }} />
+      )}
+
+      <div style={{ display: "flex", alignItems: "center", gap: 2, padding: "2px var(--sp-2)" }}>
+        <button
+          data-artist-toggle
+          data-on={artistOpen ? "" : undefined}
+          /* ★펼치는 순간 색인을 증분으로 훑는다 — 그 사이 늘어난 그림이 목록에 들어온다.
+             (켜 둔 채로 앱을 켠 경우는 중앙이 당긴다, `panels/Gallery` 의 그 effect) */
+          onClick={() => {
+            setArtistOpen(!artistOpen);
+            if (!artistOpen) void rescanArtists();
+          }}
+          style={{
+            flex: 1,
+            minWidth: 0,
+            display: "flex",
+            alignItems: "center",
+            gap: "var(--sp-2)",
+            padding: "4px var(--sp-1)",
+            borderRadius: "var(--r-2)",
+            color: artists.length ? "var(--accent)" : "var(--ink-soft)",
+            fontSize: "var(--text-xs)",
+            textAlign: "left",
+          }}
+        >
+          <span style={{ display: "grid", color: "var(--ink-faint)" }}>
+            {artistOpen ? Icon.chevronDown12 : Icon.chevronRight12}
+          </span>
+          {t("gallery.artists")}
+          {artists.length > 0 && (
+            <span style={{ flex: 1, minWidth: 0, fontSize: "var(--text-2xs)", opacity: 0.85,
+                           overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+              {t("gallery.artistOn", { n: artists.length })}
+            </span>
+          )}
+        </button>
+        {artistOpen && (
+          <button
+            data-artist-refresh
+            onClick={() => void rescanArtists()}
+            disabled={artistBusy}
+            data-tip={t("gallery.artistRefresh")}
+            style={{ display: "grid", padding: 3, borderRadius: "var(--r-1)",
+                     color: artistBusy ? "var(--ink-ghost)" : "var(--ink-faint)" }}
+          >
+            {Icon.refresh12}
+          </button>
+        )}
+      </div>
+
+      {/* ★★**고른 그림의 작가** (사용자 지시 2026-09-21). 목록이 길어도 안 밀리도록 **스크롤 칸 밖**에
+          둔다 — 고른 순간 보이지 않으면 없는 것과 같다. 고른 그림이 없으면 아예 안 그린다. */}
+      {artistOpen && focus && (
+        <div
+          data-artist-of={focus}
+          style={{ flexShrink: 0, display: "flex", flexDirection: "column", gap: 3,
+                   padding: "0 var(--sp-2) var(--sp-2)" }}
+        >
+          <div style={{ display: "flex", alignItems: "center", gap: "var(--sp-2)" }}>
+            <span style={{ flex: 1, minWidth: 0, fontSize: "var(--text-3xs)", color: "var(--ink-faint)",
+                           overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+              {t("gallery.artistOf")}
+            </span>
+            {ofFocus && ofFocus.length > 0 && (
+              <button
+                data-artist-copy-all
+                onClick={() => copy(ofFocus.join(", "))}
+                data-tip={t("gallery.artistCopyAll")}
+                style={{ display: "grid", padding: 2, borderRadius: "var(--r-1)", color: "var(--ink-faint)" }}
+              >
+                {Icon.copy}
+              </button>
+            )}
+          </div>
+          {!ofFocus || !ofFocus.length ? (
+            <span style={{ fontSize: "var(--text-2xs)", color: "var(--ink-ghost)" }}>
+              {t(artistIndex[focus] ? "gallery.artistOfNone" : "gallery.artistOfUnknown")}
+            </span>
+          ) : (
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 3, maxHeight: 92, overflowY: "auto" }}>
+              {ofFocus.map((tag) => {
+                const hex = artistColor[normTag(tag)] ? COLOR_HEX[artistColor[normTag(tag)]!] : null;
+                return (
+                  <button
+                    key={tag}
+                    data-artist-of-tag={tag}
+                    /* ★누르면 **그 하나만 복사**한다 — 거르는 것은 아래 목록의 일이다 */
+                    onClick={() => copy(tag)}
+                    data-tip={t("gallery.artistCopyOne")}
+                    style={{
+                      maxWidth: "100%",
+                      padding: "1px 6px",
+                      borderRadius: "var(--r-1)",
+                      border: `1px solid ${hex ?? "var(--line)"}`,
+                      background: hex ? `${hex}26` : "var(--bg)",
+                      color: hex ?? "var(--ink-soft)",
+                      fontSize: "var(--text-2xs)",
+                      overflow: "hidden",
+                      textOverflow: "ellipsis",
+                      whiteSpace: "nowrap",
+                    }}
+                  >
+                    {tag}
+                  </button>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      )}
+
+      {artistOpen && (
+        <div
+          data-artist-body
+          style={{ height: artistH, minHeight: 0, overflowY: "auto", display: "flex", flexDirection: "column",
+                   gap: "var(--sp-2)", padding: "0 var(--sp-2) var(--sp-2)" }}
+        >
+          {/* ★범위는 **전체 폴더가 기본**이다 (사용자 지시 2026-09-21) */}
+          <div style={{ display: "flex", gap: 2, flexShrink: 0 }}>
+            {scopeBtn("all", t("gallery.artistScopeAll"))}
+            {scopeBtn("folder", t("gallery.artistScopeFolder"))}
+          </div>
+
+          {/* ★★**작가를 안 골랐어도 칸마다 작가를 적는다** (사용자 지시 2026-09-21).
+              켜 두면 지금 보이는 그림 전부가 제 작가를 달고, 골라 둔 작가만 진하게 보인다. */}
+          <button
+            data-artist-always
+            data-on={artistAlways ? "" : undefined}
+            onClick={() => setArtistAlways(!artistAlways)}
+            data-tip={t("gallery.artistAlwaysTip")}
+            style={{
+              ...artistRow,
+              flexShrink: 0,
+              border: `1px solid ${artistAlways ? "var(--accent)" : "var(--line)"}`,
+              background: artistAlways ? "var(--accent-bg)" : "transparent",
+              color: artistAlways ? "var(--ink)" : "var(--ink-dim)",
+            }}
+          >
+            {/* 켜고 끄는 네모 — 드롭 가져오기 시트(`app/DropImport`)와 같은 모양이다 */}
+            <span
+              style={{
+                display: "grid",
+                placeItems: "center",
+                width: 14,
+                height: 14,
+                flexShrink: 0,
+                borderRadius: "var(--r-1)",
+                border: `1px solid ${artistAlways ? "var(--accent)" : "var(--line)"}`,
+                background: artistAlways ? "var(--accent)" : "transparent",
+                color: artistAlways ? "var(--accent-on)" : "transparent",
+              }}
+            >
+              {Icon.check}
+            </span>
+            {t("gallery.artistAlways")}
+          </button>
+
+          <input
+            data-artist-search
+            value={artistQuery}
+            placeholder={t("gallery.artistSearch")}
+            onChange={(e) => {
+              setArtistQuery(e.target.value);
+              setShown(SHOW_ARTISTS);
+            }}
+            style={{
+              flexShrink: 0,
+              width: "100%",
+              padding: "4px var(--sp-2)",
+              borderRadius: "var(--r-1)",
+              border: "1px solid var(--line)",
+              background: "var(--panel)",
+              color: "var(--ink)",
+              fontSize: "var(--text-2xs)",
+            }}
+          />
+
+          {/* 훑는 중이거나 실패했을 때만 한 줄 — 평소에는 아무 말도 안 한다 */}
+          {artistBusy && (
+            <div data-artist-indexing style={{ fontSize: "var(--text-2xs)", color: "var(--ink-dim)" }}>
+              {t("gallery.artistIndexing", { done: artistStatus?.done ?? 0, total: artistStatus?.total ?? 0 })}
+            </div>
+          )}
+          {!artistBusy && artistStatus?.error && (
+            <div style={{ fontSize: "var(--text-2xs)", color: "var(--err-ink)" }}>
+              {t("gallery.artistError", { msg: artistStatus.error })}
+            </div>
+          )}
+
+          {artists.length > 0 && (
+            <button
+              data-artist-clear
+              onClick={clearArtists}
+              style={{ ...artistRow, flexShrink: 0, color: "var(--accent)", border: "1px solid var(--accent)" }}
+            >
+              {Icon.close12}
+              {t("gallery.artistClear")}
+            </button>
+          )}
+
+          {!artistBusy && !artistTags.size ? (
+            <div style={{ fontSize: "var(--text-2xs)", color: "var(--ink-faint)", lineHeight: 1.5 }}>
+              {t("gallery.artistEmpty")}
+            </div>
+          ) : !hits.length ? (
+            <div style={{ fontSize: "var(--text-2xs)", color: "var(--ink-faint)" }}>{t("gallery.artistNoHit")}</div>
+          ) : (
+            <>
+              {hits.slice(0, shown).map((h) => {
+                const k = normTag(h.t);
+                const on = artists.includes(k);
+                /* ★색을 칠해 두면 **그 색이 줄의 배경과 글자**를 정한다 (사용자 지시 2026-09-21).
+                   배경은 옅게 깔고 글자는 색 그대로다 — 줄이 칠해져도 이름을 읽을 수 있어야 한다.
+                   ★고름 표시는 **테두리**가 계속 맡는다: 배경을 색이 가져가므로 그것까지 맡기면
+                     칠해 둔 작가는 골랐는지 안 골랐는지가 안 보인다. */
+                const hex = artistColor[k] ? COLOR_HEX[artistColor[k]!] : null;
+                return (
+                  <button
+                    key={h.t}
+                    data-artist={h.t}
+                    data-on={on ? "" : undefined}
+                    data-artist-hue={artistColor[k] ?? undefined}
+                    /* 누를 때마다 켜고 끈다 — 여럿을 켜면 하나라도 든 그림을 본다 */
+                    onClick={() => toggleArtist(h.t)}
+                    style={{
+                      ...artistRow,
+                      flexShrink: 0,
+                      border: `1px solid ${on ? "var(--accent)" : "transparent"}`,
+                      background: hex ? `${hex}26` : on ? "var(--accent-bg)" : "transparent",
+                      color: hex ?? (on ? "var(--ink)" : "var(--ink-soft)"),
+                    }}
+                  >
+                    {/* ★★블록 머리의 색 점과 **같은 장치**다 (`blocks/BlockRow` 의 `data-block-color`) —
+                        누를 때마다 다음 색으로 돌고, 한 바퀴 돌면 색이 없어진다.
+                        ★줄의 누름을 삼켜야 한다 — 안 그러면 색을 고르다 필터가 켜진다. */}
+                    <span
+                      data-artist-color={h.t}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        cycleArtistColor(h.t);
+                      }}
+                      data-tip={t("gallery.artistColor")}
+                      style={{
+                        width: 10,
+                        height: 10,
+                        flexShrink: 0,
+                        borderRadius: "50%",
+                        border: "1px solid var(--line)",
+                        background: hex ?? "transparent",
+                      }}
+                    />
+                    <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                      {h.t}
+                    </span>
+                    <span style={{ opacity: hex ? 0.75 : 1, color: hex ? undefined : "var(--ink-faint)" }}>
+                      {t("gallery.artistCount", { n: h.n })}
+                    </span>
+                  </button>
+                );
+              })}
+              {hits.length > shown && (
+                <button
+                  data-artist-more
+                  onClick={() => setShown((v) => v + SHOW_ARTISTS)}
+                  style={{ ...artistRow, flexShrink: 0, color: "var(--ink-faint)", justifyContent: "center" }}
+                >
+                  {t("gallery.artistMore", { n: hits.length - shown })}
+                </button>
+              )}
+            </>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+const artistRow: React.CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  gap: "var(--sp-2)",
+  width: "100%",
+  padding: "3px var(--sp-2)",
+  borderRadius: "var(--r-2)",
+  fontSize: "var(--text-2xs)",
+  textAlign: "left",
+};

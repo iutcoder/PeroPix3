@@ -23,9 +23,11 @@ import { useQueue } from "../store/queue";
 import { useUi } from "../store/ui";
 import { useGen } from "../store/gen";
 import { useLlm } from "../store/llm";
-import { usePrompt, thumbFromCard } from "../store/prompt";
+import { usePrompt } from "../store/prompt";
+import { MAX_VIBES, useImageInput } from "../store/imageInput";
 import { costNow, countNow } from "./costNow.ts";
 import { t } from "../i18n";
+import { addComicBackground, addComicPage, editComicCut, readComic } from "../editor/comicAgent";
 
 /* ── 삭제 ──────────────────────────────────────────────────────
    ★한 벌은 스토어에 있다 (`removeAt`) — 여기서는 **찾아 주고 말로 옮길** 뿐이다.
@@ -61,7 +63,7 @@ async function doRemove(target: DelTarget): Promise<ActionResult> {
   /* ★★**되돌릴 수 없다고 이력에 적는다** (2026-08-24). 삭제는 그 자리의 되돌리기를 빼므로
      되돌리기 로그를 비우므로 `undo_change` 로는 못 돌아온다 — 그렇게 적어 두지 않으면
      조수가 「되돌렸습니다」라고 말해 놓고 아무 일도 안 일어난다.
-     ★그림만은 휴지통에서 꺼낼 수 있다 (24시간) — 그 길을 까닭에 적어 조수가 안내하게 한다. */
+     ★그림만은 휴지통에서 꺼낼 수 있다 (24시간) — 그 방법을 까닭에 적어 조수가 안내하게 한다. */
   return {
     ok: true,
     did: `${p.name} 을(를) 지움${files}`,
@@ -287,6 +289,51 @@ defineAction({
   },
 });
 
+/* ── 순차 생성 모드 ──────────────────────────────────────────
+   ★★바로 위 `슬롯당 장수`와 **같은 이유로** 조수가 쥐어야 하는 값이다: 한 바퀴가 만드는 장 수에
+     켜진 캐릭터 수가 곱해지므로 (`lib/costNow` 의 `seqTimesNow`), 못 읽고 못 바꾸면
+     «세 명 각각 뽑아 줘» 를 사용자가 손으로 켜야 한다.
+   ★★값은 **탭의 것**이라 주소를 받는다 — `openAddress` 가 필요하면 탭을 옮겨 준다.
+     읽는 자리는 `get_workspace` 의 `prompt.seqChars` 다 (`backend/agent.py`) — 못 읽는 값은 못 고친다. */
+
+defineAction({
+  id: "set_seq_chars",
+  desc: "★**순차 생성 모드를 켜고 끈다** — 켜면 켜 둔 캐릭터를 한 장에 모으지 않고 **한 명씩** "
+    + "차례로 뽑는다. «인물마다 따로 뽑아 줘»·«한 장에 다 넣지 말고 하나씩» 이 이것이다. "
+    + "★장 수가 **켜진 캐릭터 수만큼 곱해진다**. 한 장에 한 명이라 모델의 캐릭터 수 상한도 안 걸린다. "
+    + "지금 값은 `get_workspace` 의 `prompt.seqChars` 다. 끄면 예전처럼 한 장에 모인다.",
+  args: {
+    on: { type: "boolean", desc: "켤지(true) 끌지(false)", required: true },
+    workspace: { type: "string", desc: "어느 워크스페이스 — 비우면 지금 열린 것 (다르면 거절한다)" },
+    tab: { type: "string", desc: "어느 탭 — id 가 정확하다 (이름도 받는다). 비우면 말을 건 때의 탭" },
+    sceneGroup: { type: "string", desc: "어느 씬 그룹 — **id 로** 줘라 (이름은 탭마다 겹친다). 비우면 말을 건 때의 씬 그룹" },
+  },
+  confirm: "none",
+  run: async (a) => {
+    if (typeof a.on !== "boolean")
+      return err("unknown_field", "on 은 true 또는 false 여야 합니다.", { given: String(a.on), retry: "safe" });
+    const { openAddress } = await import("./promptEdit.ts");
+    const o = openAddress(a);
+    if ("error" in o) return o;
+    const was = usePrompt.getState().seqChars;
+    usePrompt.getState().setSeqChars(a.on);
+    const n = usePrompt.getState().chars.filter((c) => c.on).length;
+    return {
+      ok: true,
+      did: a.on
+        ? `${o.where}의 순차 생성을 켬 — 켜 둔 캐릭터 ${n}명을 한 명씩 뽑는다`
+        : `${o.where}의 순차 생성을 끔 — 캐릭터를 한 장에 모은다`,
+      at: {
+        kind: "prompt",
+        workspace: useWs.getState().current ?? undefined,
+        tab: useWs.getState().spec?.activeTab,
+        sceneGroup: o.set.id,
+      },
+      before: { action: "set_seq_chars", args: { on: was } },
+    };
+  },
+});
+
 /* ── 생성 옵션 ────────────────────────────────────────────────
    ★값 하나하나에 액션을 만들지 않는다 — **범용 창구 하나**다 (목표 ①: 예외를 열거하면
      반드시 빠뜨린다). 대신 **허용 목록**으로 아무 이름이나 들어오는 것을 막는다. */
@@ -381,7 +428,7 @@ defineAction({
 /* ── 씬 자리 옮기기 ────────────────────────────────────────────
    ★★*"미소 씬이랑 슬픔 씬 위치를 바꿔줘"* 가 이것이다 (사용자 시나리오 2026-08-24).
      자리를 옮기면 **파일 이름의 씬 번호도 따라간다** (`renumberSet`) — 사람이 끌어다
-     놓았을 때와 **같은 길**이라 조수가 시켜도 자동으로 맞는다. */
+     놓았을 때와 **같은 경로**라 조수가 시켜도 자동으로 맞는다. */
 
 defineAction({
   id: "move_scene",
@@ -563,44 +610,6 @@ defineAction({
 });
 
 defineAction({
-  id: "stack_character",
-  title: "캐릭터 카드를 스택에 얹습니다",
-  desc: "★**덱의 캐릭터 카드를 어느 캐릭터 칸의 스택(순차 생성 대기줄)에 얹는다.** "
-    + "화면에서 카드를 칸 위에 끌어다 놓는 것과 같다 — 생성 한 장이 끝날 때마다 다음 카드로 "
-    + "돌아간다. «키키 다음에 미나도 번갈아» 가 이것이다. "
-    + "★새 칸을 만드는 것이 아니다 — 새 칸은 `apply_card`(덱에서) 또는 `add_character`(빈 카드) 다.",
-  args: {
-    character: { type: "string", desc: "얹을 캐릭터 칸 — **id** (`get_workspace` 의 `characters[].id`)", required: true },
-    card: { type: "string", desc: "덱의 캐릭터 카드 — 이름 또는 id (`list_cards`)", required: true },
-  },
-  confirm: "none",
-  run: async (a) => {
-    const f = pickChar(String(a.character ?? "").trim());
-    if ("error" in f) return f;
-    const { useCards } = await import("../store/cards");
-    const list = useCards.getState().characters as
-      { id: string; name: string; color: [string, string]; thumb?: unknown }[];
-    const key = String(a.card ?? "").trim();
-    const same = list.filter((c) => c.name === key);
-    if (!list.some((c) => c.id === key) && same.length > 1)
-      return err("ambiguous", `「${key}」 이름의 카드가 여럿입니다. id 로 골라 주세요.`, {
-        what: "characters", given: key, candidates: same.map((c) => `${c.name}#${c.id}`),
-      });
-    const card = list.find((c) => c.id === key) ?? same[0];
-    if (!card)
-      return err("not_found", `그런 캐릭터 카드가 없습니다: ${key}`, {
-        what: "characters", given: key, candidates: nearBy(key, list.map((c) => c.name)),
-      });
-    usePrompt.getState().stackChar(f.hit.id, { ref: card.id, name: card.name, color: card.color, thumb: thumbFromCard(card.thumb) });
-    return {
-      ok: true, did: `캐릭터 칸 「${f.hit.name}」 의 스택에 「${card.name}」 을 얹음`,
-      at: { kind: "prompt", workspace: useWs.getState().current ?? undefined },
-    };
-  },
-});
-
-/* ── 씬 카드 지우기 (사용자 지적 2026-08-30: 씬 칸은 지워도 카드는 못 지웠다) ────── */
-defineAction({
   id: "delete_scene_card",
   title: "씬 카드를 지웁니다",
   desc: "★**씬 카드(씬 칸 묶음)를 통째로 지운다** — 그 안의 씬과 **그림도 함께 휴지통으로** 간다. "
@@ -738,7 +747,9 @@ defineAction({
         return err(found.miss.code, found.miss.message, { what: "tab", given: key, candidates: found.miss.candidates });
       const hit = found.hit;
       const wasTab = { name: hit.name };
-      ws.renameTab(hit.id, String(patch.name));
+      // ★이름을 바꾸면 그림이 새 이름의 폴더로 옮겨진다 — 생성 중이면 거절된다 (`renamePlace`)
+      const why = await ws.renameTab(hit.id, String(patch.name));
+      if (why) return err("blocked", why, { retry: "never" });
       return { ok: true, did: `탭 「${hit.name}」 → ${done}`,
         at: { kind: "prompt", workspace: ws.current ?? undefined, tab: hit.id },
         before: undoApply("tab", hit.id, wasTab) };
@@ -750,7 +761,8 @@ defineAction({
       const { hit, miss } = findSet(key, String(a.tab ?? ""));
       if (!hit) return miss!;
       const wasSet = { name: hit.name };
-      ws.renameSceneGroup(hit.id, String(patch.name));
+      const why = await ws.renameSceneGroup(hit.id, String(patch.name));
+      if (why) return err("blocked", why, { retry: "never" });
       return { ok: true, did: `씬 그룹 「${hit.name}」 → ${done}`,
         at: { kind: "prompt", workspace: ws.current ?? undefined, sceneGroup: hit.id },
         before: undoApply("sceneGroup", hit.id, wasSet) };
@@ -1131,4 +1143,369 @@ defineAction({
       after: { id: saved.id, name: saved.name },
     };
   },
+});
+
+/* ── 이미지 입력 (베이스 그림 · 바이브 · 정밀 레퍼런스) ─────────────────────
+   ★사용자 지시 2026-09-21: *"mcp에 베이스 이미지, 레퍼런스, 바이브 등을 직접 넣고 빼는 기능."*
+   ★★그림을 가리키는 말은 **`lib/findImage` 하나**가 푼다 — 절대 경로(아무 폴더나)·`gallery:번호`·
+     `gallery:경로`·`output:경로`·보관함 이름. 못 찾거나 여럿이면 거기서 오류가 난다.
+   ★★**이 도구들은 안 묻는다** (`confirm: "none"`, 사용자 결정 2026-09-21) — 넣고 빼는 것 자체는
+     돈이 안 나가고 되돌릴 수 있다. 실제 지출은 생성 단계가 이미 묻는다.
+   ★★**지금 탭 것**이다 (2026-09-21: 이미지 입력은 탭마다 따로다, `store/gen` 의 `tabImages`). */
+
+/** 지금 걸려 있는 것 한 눈 — 넣고 빼는 도구가 답에 함께 싣는다 (조수가 다음 수를 고를 근거) */
+function imageInputs() {
+  const s = useImageInput.getState();
+  return {
+    base: s.baseImage ? { name: s.baseName, mode: s.baseMode, strength: s.baseStrength, noise: s.baseNoise } : null,
+    vibeOn: s.vibeOn,
+    vibes: s.vibes.map((v, i) => ({ index: i + 1, name: v.name, on: v.on !== false,
+                                    strength: v.strength, info_extracted: v.info_extracted, cached: !!v.encoded })),
+    refOn: s.refOn,
+    references: s.refs.map((r, i) => ({ index: i + 1, name: r.name, on: r.on !== false,
+                                        mode: r.mode, strength: r.strength, fidelity: r.fidelity })),
+    // ★인퍼런스 (V5 Full 전용). 실리는 동안에는 베이스 그림이 안 나간다 (`riding`)
+    inference: s.infer
+      ? (() => {
+          const plan = s.inferPlan();
+          return { name: s.infer.name, on: s.inferOn, riding: !!s.riding().infer,
+                   result: plan ? `${plan.crop.w}x${plan.crop.h}` : null };
+        })()
+      : null,
+  };
+}
+
+/** `which` 로 한 장을 집는다 — **번호(1부터)나 이름**. 못 찾거나 여럿이면 오류다 */
+function pickInput(kind: "vibe" | "reference", which: string) {
+  const s = useImageInput.getState();
+  const list: { name: string }[] = kind === "vibe" ? s.vibes : s.refs;
+  const names = list.map((x, i) => `${i + 1}: ${x.name}`);
+  const want = String(which ?? "").trim();
+  if (!list.length) return { at: -1, miss: err("not_found", `걸려 있는 ${kind === "vibe" ? "바이브" : "레퍼런스"}가 없습니다.`, { retry: "never" }) };
+  if (/^\d+$/.test(want)) {
+    const at = Number(want) - 1;
+    if (at < 0 || at >= list.length)
+      return { at: -1, miss: err("not_found", `${list.length}장뿐입니다 (${want}번은 없습니다).`, { given: want, candidates: names, retry: "never" }) };
+    return { at, miss: null };
+  }
+  const low = want.toLowerCase();
+  const hit = list.map((x, i) => ({ x, i })).filter((e) => e.x.name.toLowerCase().includes(low));
+  if (hit.length === 1) return { at: hit[0].i, miss: null };
+  if (hit.length > 1)
+    return { at: -1, miss: err("ambiguous", `「${want}」 에 여럿이 걸립니다. 번호로 집어 주세요.`, { given: want, candidates: names, retry: "never" }) };
+  return { at: -1, miss: err("not_found", `그런 것이 없습니다: ${want}`, { given: want, candidates: names, retry: "never" }) };
+}
+
+defineAction({
+  id: "set_base_image",
+  title: "베이스 그림을 겁니다",
+  desc: "★**i2i·인페인트의 베이스 그림을 건다** — «이 그림을 바탕으로»·«이어 그려» 가 이것이다. "
+    + "★`image` 로 그림을 가리킨다: 절대 경로(`D:\\사진\\a.png` — **아무 폴더나 된다**) · "
+    + "`gallery:1`(보관함에서 최신이 1번) · `gallery:작가/abc.png` · `output:output/탭/씬/001.png` · 보관함 파일 이름. "
+    + "★건 뒤에는 **해상도가 그 그림에 맞춰진다** (공홈과 같다). "
+    + "★★이것만으로는 그림이 안 나온다 — 실제 생성은 `generate` 다.",
+  args: {
+    image: { type: "string", desc: "어느 그림 — 절대 경로 · gallery:번호 · gallery:경로 · output:경로 · 보관함 이름", required: true },
+    mode: { type: "string", desc: '"img2img"(기본) · "inpaint"(마스크는 사용자가 칠한다)' },
+    strength: { type: "number", desc: "얼마나 바꾸나 0~1 (기본 0.7). 낮을수록 원본에 가깝다" },
+    noise: { type: "number", desc: "노이즈 0~1 (기본 0)" },
+  },
+  confirm: "none",
+  run: async (a) => {
+    const { findImage } = await import("./findImage.ts");
+    const got = await findImage(String(a.image ?? ""));
+    if ("error" in got) return got;
+    const { fitSizeToBase } = await import("../store/gen");
+    const s = useImageInput.getState();
+    s.setBase(got.data, got.name);
+    const mode = String(a.mode ?? "") === "inpaint" ? "inpaint" : "img2img";
+    const patch: Record<string, unknown> = { baseMode: mode };
+    if (typeof a.strength === "number") patch.baseStrength = Math.min(1, Math.max(0, a.strength));
+    if (typeof a.noise === "number") patch.baseNoise = Math.min(1, Math.max(0, a.noise));
+    s.patchBase(patch as never);
+    // ★해상도를 그림에 맞춘다 — 사람이 넣었을 때와 **같은 길**이다 (`panels/ImageActions`)
+    await fitSizeToBase(got.data);
+    return {
+      ok: true, did: `베이스 그림에 「${got.name}」 을 검 (${mode})`,
+      at: { kind: "imageInput", what: "base" }, image: got.from, inputs: imageInputs(),
+      before: { what: "base", had: false },
+    };
+  },
+});
+
+defineAction({
+  id: "clear_base_image",
+  title: "베이스 그림을 뺍니다",
+  desc: "★**걸어 둔 베이스 그림을 뺀다** — 마스크·Focused 사각형도 함께 빠진다. "
+    + "«이어 그리기 그만»·«그림 빼고 처음부터» 가 이것이다.",
+  args: {},
+  confirm: "none",
+  run: async () => {
+    const s = useImageInput.getState();
+    if (!s.baseImage) return { ok: true, did: "걸린 베이스 그림이 없었음", inputs: imageInputs() };
+    const name = s.baseName;
+    s.clearBase();
+    return { ok: true, did: `베이스 그림 「${name}」 을 뺌`, at: { kind: "imageInput", what: "base" },
+             inputs: imageInputs() };
+  },
+});
+
+defineAction({
+  id: "add_vibe",
+  title: "바이브를 더합니다",
+  desc: "★**Vibe Transfer 에 그림을 한 장 더한다** — «이 그림 분위기로»·«이 느낌 가져와» 가 이것이다. "
+    + "★`image` 를 가리키는 법은 `set_base_image` 와 같다. "
+    + "★★**인코딩은 Anlas 가 든다** (장당 2). 전에 구운 것이 있으면 그대로 쓴다 — 답의 `cached` 가 그것이다. "
+    + "★넣으면 Vibe 묶음이 켜진다 (정밀 레퍼런스와는 동시에 못 쓴다 — NAI 제약).",
+  args: {
+    image: { type: "string", desc: "어느 그림 — `set_base_image` 와 같은 꼴", required: true },
+    strength: { type: "number", desc: "Reference Strength 0~1 (비우면 모델 기본값)" },
+    info_extracted: { type: "number", desc: "Information Extracted 0.01~1 (비우면 모델 기본값). ★바꾸면 인코딩을 다시 굽는다(유료)" },
+  },
+  confirm: "none",
+  run: async (a) => {
+    const { findImage } = await import("./findImage.ts");
+    const got = await findImage(String(a.image ?? ""));
+    if ("error" in got) return got;
+    const s = useImageInput.getState();
+    if (s.vibes.length >= MAX_VIBES)
+      return err("blocked", `바이브는 ${MAX_VIBES}장까지입니다.`, { retry: "never" });
+    s.addVibe(got.data, got.name);
+    const at = useImageInput.getState().vibes.length - 1;
+    const patch: Record<string, unknown> = {};
+    if (typeof a.strength === "number") patch.strength = Math.min(1, Math.max(0, a.strength));
+    if (typeof a.info_extracted === "number") patch.info_extracted = Math.min(1, Math.max(0.01, a.info_extracted));
+    if (Object.keys(patch).length) s.patchVibe(at, patch as never);
+    s.setVibeOn(true);
+    // ★구워 둔 인코딩이 있으면 그대로 쓴다 — 돈이 안 나간다
+    await useImageInput.getState().syncVibeCache();
+    return {
+      ok: true, did: `바이브에 「${got.name}」 을 더함`, index: at + 1, image: got.from,
+      at: { kind: "imageInput", what: "vibe" }, inputs: imageInputs(),
+      before: { what: "vibe", added: at + 1 },
+    };
+  },
+});
+
+defineAction({
+  id: "add_reference",
+  title: "정밀 레퍼런스를 더합니다",
+  desc: "★**Precise Reference 에 그림을 한 장 더한다** — 인물·그림체를 그대로 옮길 때 쓴다. "
+    + "★`image` 를 가리키는 법은 `set_base_image` 와 같다. "
+    + "★넣으면 레퍼런스 묶음이 켜진다 (바이브와는 동시에 못 쓴다 — NAI 제약).",
+  args: {
+    image: { type: "string", desc: "어느 그림 — `set_base_image` 와 같은 꼴", required: true },
+    mode: { type: "string", desc: '"character&style"(기본) · "character" · "style"' },
+    strength: { type: "number", desc: "Reference Strength (기본 1)" },
+    fidelity: { type: "number", desc: "Fidelity 0~1 (기본 1)" },
+  },
+  confirm: "none",
+  run: async (a) => {
+    const { findImage } = await import("./findImage.ts");
+    const got = await findImage(String(a.image ?? ""));
+    if ("error" in got) return got;
+    const { processReference } = await import("../store/imageInput");
+    const mode = ["character&style", "character", "style"].includes(String(a.mode ?? ""))
+      ? (String(a.mode) as "character&style" | "character" | "style")
+      : "character&style";
+    const s = useImageInput.getState();
+    s.addRef({
+      image: await processReference(got.data),
+      preview: got.data,
+      name: got.name,
+      mode,
+      strength: typeof a.strength === "number" ? a.strength : 1,
+      fidelity: typeof a.fidelity === "number" ? Math.min(1, Math.max(0, a.fidelity)) : 1,
+    });
+    s.setRefOn(true);
+    const at = useImageInput.getState().refs.length;
+    return {
+      ok: true, did: `정밀 레퍼런스에 「${got.name}」 을 더함 (${mode})`, index: at, image: got.from,
+      at: { kind: "imageInput", what: "reference" }, inputs: imageInputs(),
+      before: { what: "reference", added: at },
+    };
+  },
+});
+
+defineAction({
+  id: "remove_image_input",
+  title: "바이브·레퍼런스를 뺍니다",
+  desc: "★**걸어 둔 바이브나 정밀 레퍼런스를 한 장 뺀다.** 베이스 그림은 `clear_base_image` 다. "
+    + "★`which` 는 **번호(1부터)나 이름**이다 — 무엇이 걸려 있는지는 `list_image_inputs` 로 본다.",
+  args: {
+    kind: { type: "string", desc: '"vibe" · "reference"', required: true },
+    which: { type: "string", desc: "몇 번째(1부터) 또는 이름", required: true },
+  },
+  confirm: "none",
+  run: async (a) => {
+    const kind = String(a.kind ?? "") === "reference" ? "reference" : "vibe";
+    const p = pickInput(kind, String(a.which ?? ""));
+    if (p.miss) return p.miss;
+    const s = useImageInput.getState();
+    const name = kind === "vibe" ? s.vibes[p.at].name : s.refs[p.at].name;
+    if (kind === "vibe") s.removeVibe(p.at);
+    else s.removeRef(p.at);
+    return {
+      ok: true, did: `${kind === "vibe" ? "바이브" : "레퍼런스"}에서 「${name}」 을 뺌`,
+      at: { kind: "imageInput", what: kind }, inputs: imageInputs(),
+    };
+  },
+});
+
+defineAction({
+  id: "toggle_image_input",
+  title: "바이브·레퍼런스를 켜고 끕니다",
+  desc: "★**걸어 둔 채로 이 한 장만 켜고 끈다** (사용자 지시 2026-09-21: 프롬프트 블록처럼). "
+    + "빼지 않고 잠시 빼 보고 싶을 때 쓴다 — 꺼 두면 생성에 안 실리고 요금에서도 빠진다. "
+    + "★묶음 전체를 끄는 것이 아니다. `which` 는 번호(1부터)나 이름이다.",
+  args: {
+    kind: { type: "string", desc: '"vibe" · "reference"', required: true },
+    which: { type: "string", desc: "몇 번째(1부터) 또는 이름", required: true },
+    on: { type: "boolean", desc: "켤까(true) 끌까(false). 비우면 뒤집는다" },
+  },
+  confirm: "none",
+  run: async (a) => {
+    const kind = String(a.kind ?? "") === "reference" ? "reference" : "vibe";
+    const p = pickInput(kind, String(a.which ?? ""));
+    if (p.miss) return p.miss;
+    const s = useImageInput.getState();
+    const item = kind === "vibe" ? s.vibes[p.at] : s.refs[p.at];
+    const next = typeof a.on === "boolean" ? a.on : item.on === false;
+    if (kind === "vibe") s.patchVibe(p.at, { on: next });
+    else s.patchRef(p.at, { on: next });
+    return {
+      ok: true, did: `${kind === "vibe" ? "바이브" : "레퍼런스"} 「${item.name}」 을 ${next ? "켬" : "끔"}`,
+      at: { kind: "imageInput", what: kind }, inputs: imageInputs(),
+      before: { what: kind, index: p.at + 1, on: item.on !== false },
+    };
+  },
+});
+
+defineAction({
+  id: "set_inference",
+  title: "인퍼런스 참조를 겁니다",
+  desc: "★**인퍼런스 참조 그림을 건다** (V5 Full 전용). 참조를 캔버스 한쪽에 붙이고 나머지를 인페인트해 같은 캐릭터를 그린다. "
+    + "«이 캐릭터로»·«이 캐릭터 일관성 유지» 가 이것이다. "
+    + "★`image` 를 가리키는 법은 `set_base_image` 와 같다. "
+    + "★건 동안에는 **베이스 그림이 안 나간다.** 결과 크기는 해상도 칸의 값으로 정해지고, 답의 `inputs.inference.result` 가 그 크기다. "
+    + "★캐릭터 외형 태그는 앱이 넣지 않는다. 프롬프트에 그 캐릭터의 외형 태그가 있어야 잘 맞는다. "
+    + "★★이것만으로는 그림이 안 나온다. 실제 생성은 `generate` 다.",
+  args: {
+    image: { type: "string", desc: "어느 그림 — `set_base_image` 와 같은 꼴", required: true },
+  },
+  confirm: "none",
+  run: async (a) => {
+    const { findImage } = await import("./findImage.ts");
+    const got = await findImage(String(a.image ?? ""));
+    if ("error" in got) return got;
+    const { INFERENCE_MODEL } = await import("./inference.ts");
+    if (useGen.getState().params.model !== INFERENCE_MODEL)
+      return err("blocked", "인퍼런스는 V5 Full 에서만 씁니다. 모델을 바꾼 뒤에 다시 거십시오.", { retry: "never" });
+    const s = useImageInput.getState();
+    s.setInfer(got.data, got.name);
+    return {
+      ok: true, did: `인퍼런스 참조에 「${got.name}」 을 검`,
+      at: { kind: "imageInput", what: "inference" }, image: got.from, inputs: imageInputs(),
+    };
+  },
+});
+
+defineAction({
+  id: "clear_inference",
+  title: "인퍼런스 참조를 뺍니다",
+  desc: "★**걸어 둔 인퍼런스 참조를 뺀다.** 빼면 베이스 그림이 걸려 있을 때 그것이 다시 실린다.",
+  args: {},
+  confirm: "none",
+  run: async () => {
+    const s = useImageInput.getState();
+    if (!s.infer) return { ok: true, did: "걸린 인퍼런스 참조가 없었음", inputs: imageInputs() };
+    const name = s.infer.name;
+    s.clearInfer();
+    return { ok: true, did: `인퍼런스 참조 「${name}」 을 뺌`, at: { kind: "imageInput", what: "inference" },
+             inputs: imageInputs() };
+  },
+});
+
+defineAction({
+  id: "list_image_inputs",
+  title: "걸려 있는 그림 입력을 봅니다",
+  desc: "★**지금 탭에 걸려 있는 베이스 그림·바이브·정밀 레퍼런스·인퍼런스**를 목록으로 준다. "
+    + "빼거나 켜고 끄기 전에 이것으로 번호를 확인한다. "
+    + "★이미지 입력은 **탭마다 따로**다 — 여기 나오는 것은 지금 보고 있는 탭 것이다.",
+  args: {},
+  confirm: "none",
+  run: async () => {
+    const v = imageInputs();
+    const n = (v.base ? 1 : 0) + v.vibes.length + v.references.length + (v.inference ? 1 : 0);
+    return { ok: true, did: n ? `걸려 있는 그림 입력 ${n}개` : "걸려 있는 그림 입력이 없음", inputs: v };
+  },
+});
+
+/* ── 만화 캔버스 (AI 콘티, 설계 `docs/comic-editor-design.md` 10번) ──────────────────
+   ★실행은 `editor/comicAgent` 가 한다.
+   ★공통의 화풍 · 외형은 **고치는 액션이 없다** (설계 10-3). 배경만 더할 수 있다.
+   ★되돌리기는 이미지 편집의 Ctrl+Z 다 — 조수의 `undo_change` 로는 못 돌린다 (그렇게 적어 돌려준다). */
+
+defineAction({
+  id: "read_comic",
+  gate: "comic",
+  title: "만화 캔버스를 읽습니다",
+  desc: "★**이미지 편집의 만화 캔버스**를 읽는다 — 공통(화풍 · 캐릭터 외형 · 배경), 페이지마다 컷(상자 · 장면 요약 · 배경 · 컷 태그 · 캐릭터 칸 · 든 그림 수)과 말풍선. "
+    + "★결과의 `guide` 가 만화 콘티를 짜는 규칙이다 — add_comic_page 전에 반드시 읽고 따른다. "
+    + "AI 콘티가 도는 중이면 그 캔버스, 아니면 지금 보고 있는 만화 캔버스를 읽는다.",
+  args: {},
+  confirm: "none",
+  run: async () => readComic(),
+});
+
+defineAction({
+  id: "add_comic_page",
+  gate: "comic",
+  title: "만화 페이지를 깝니다",
+  desc: "★**만화 캔버스의 마지막 페이지 뒤에 페이지 한 장을 깐다** (마지막 페이지가 비어 있으면 거기에). 컷 나누기 · 장면 요약 · 배경 · 컷 태그 · 캐릭터 칸 · 말풍선을 한 번에. "
+    + "cuts 는 읽는 차례대로 `{box:[x,y,w,h], summary, background, tags, cast:[{who, tags, x, y}]}` — box 는 페이지 기본 틀 안의 비율, "
+    + "who 는 read_comic 의 캐릭터 이름 · \"narration\" · \"bubble\", tags 는 그 컷에서만 붙는 태그(외형은 넣지 않는다), x·y 는 컷 안 비율. "
+    + "bubbles 는 `{cut(1부터), kind: speech|thought|shout|whisper|narration, text, x, y, tail:{x,y}}` (편집기가 얹는 말풍선). "
+    + "layout 을 주면 box 대신 템플릿 배치를 쓴다. 공통에 없는 배경은 new_backgrounds `[{name, tags}]` 로 함께 더한다. "
+    + "★먼저 read_comic 의 guide 를 따른다. 그림은 만들지 않는다 (생성은 사용자가 한다).",
+  args: {
+    cuts: { type: "array", items: { type: "object" }, desc: "컷 — 읽는 차례대로 {box, summary, background, tags, cast}", required: true },
+    bubbles: { type: "array", items: { type: "object" }, desc: "말풍선 — {cut, kind, text, x, y, tail}. 대사를 편집기 말풍선으로 넣을 때만" },
+    layout: { type: "string", desc: "템플릿 배치 이름 (single · two-rows · three-rows · four-grid · four-rows · hero-top · hero-bottom · six-grid · two-cols · tall-left · tall-right). 주면 box 대신 이 배치" },
+    new_backgrounds: { type: "array", items: { type: "object" }, desc: "공통에 더할 배경 — {name, tags}" },
+  },
+  confirm: "none",
+  run: async (a) => addComicPage(a),
+});
+
+defineAction({
+  id: "edit_comic_cut",
+  gate: "comic",
+  title: "만화 컷을 고칩니다",
+  desc: "★**만화 캔버스의 컷 하나를 고친다** — 장면 요약 · 배경 · 컷 태그 · 캐릭터 칸 (주는 것만 바뀐다). page · cut 은 1부터 (컷은 그 페이지의 읽는 차례). "
+    + "cast 를 주면 그 컷의 캐릭터 칸을 통째로 갈아 끼운다 ({who, tags, x, y}). 화풍과 캐릭터 외형은 고치지 않는다.",
+  args: {
+    page: { type: "number", desc: "페이지 번호 (1부터)", required: true },
+    cut: { type: "number", desc: "컷 번호 (그 페이지의 읽는 차례, 1부터)", required: true },
+    summary: { type: "string", desc: "장면 요약 (한국어 한 문장)" },
+    background: { type: "string", desc: "공통의 배경 이름 · 빈 값이면 배경 없음" },
+    tags: { type: "string", desc: "컷 태그 — 구도 · 소품 · 날씨 (쉼표로)" },
+    cast: { type: "array", items: { type: "object" }, desc: "캐릭터 칸 전부 — {who, tags, x, y}" },
+  },
+  confirm: "none",
+  run: async (a) => editComicCut(a),
+});
+
+defineAction({
+  id: "add_comic_background",
+  gate: "comic",
+  title: "만화 배경을 더합니다",
+  desc: "★**만화 캔버스의 공통에 배경 하나를 더한다** — 이야기에 필요한 장소가 공통에 없을 때만. name 은 한국어 이름, tags 는 장소 · 시간 · 조명 · 날씨 태그. "
+    + "이미 있는 이름이면 거절한다 (그 이름을 그대로 쓴다).",
+  args: {
+    name: { type: "string", desc: "배경 이름 (한국어)", required: true },
+    tags: { type: "string", desc: "장소 · 시간 · 조명 · 날씨 태그 (쉼표로)", required: true },
+  },
+  confirm: "none",
+  run: async (a) => addComicBackground(a),
 });

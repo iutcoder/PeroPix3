@@ -1,0 +1,234 @@
+/* 앱이 번들한 글꼴 — 플러그인 오리진에도 같은 파일을 둔다 (`scripts/sync-plug-fonts.mjs` 가 만든다) */
+@import "./fonts.css";
+
+/* PeroPix 플러그인 공통 스타일 — 한 줄 넣으면 앱과 같은 모양이 된다.
+ *
+ *     <link rel="stylesheet" href="/plug/_app/base.css">
+ *
+ * ★**클래스 없이도 어울린다** (사용자 지시 2026-09-10: *"comfy ui 커스텀 노드처럼 시각적 일관성"*).
+ *   `<button>`·`<input>`·`<table>` 을 그냥 쓰면 앱 모양으로 그려진다. 클래스는 몇 개만 두었다 (`.card`·`.row`·`.muted`…).
+ * ★**테마를 따라간다.** `color-scheme: dark light` 를 선언하므로 앱이 다크면 이 페이지도 다크로 그려지고, 앱에서 테마를
+ *   바꾸면 새로고침 없이 따라온다 (앱이 프레임의 color-scheme 을 바꾸면 `prefers-color-scheme` 이 그대로 바뀐다. 실측 2026-09-10).
+ * ★**바탕은 안 칠한다.** 프레임 뒤로 앱 캔버스 바탕이 비친다 — 콘텐츠만 `.card` 등으로 칠한다.
+ * ★색·크기 값은 앱의 `src/styles/tokens.css` 에서 옮겨 온 것이다. 그쪽을 고치면 여기도 맞춰야 한다
+ *   (플러그인 페이지는 다른 문서라 앱의 CSS 를 못 읽는다).
+ * ★글꼴은 **시스템 글꼴**이다. 앱이 번들한 Pretendard 는 다른 오리진에 있어 이 페이지가 못 받는다.
+ */
+
+:root {
+  color-scheme: dark light;
+
+  /* 면 */
+  /* ★색은 앱의 `src/styles/tokens.css` 에서 옮겨 온다 — 2026-09-12 에 라이트 바탕·글자와 다크 강조를 함께 고쳤다 */
+  --bg: #f5f7f9;
+  --panel: #ffffff;
+  --code-bg: #f4f6f8;
+  /* 선 */
+  --line: #e3e8ee;
+  --line-soft: #e8ecf1;
+  /* 글자 */
+  --ink: #333d49;
+  --ink-soft: #626d79;
+  --ink-dim: #78838f;
+  --ink-faint: #98a2ad;
+  /* 강조 */
+  --accent: #2f6fa8;
+  --accent-ink: #2f6fa8;
+  --accent-bg: #e3eef8;
+  --accent-on: #ffffff;
+  /* 뜻이 있는 색 */
+  --ok: #2d8a52;
+  --warn: #c07f18;
+  --err: #a8433b;
+
+  /* 글꼴 — 앱 번들 글꼴은 못 쓰므로 시스템 글꼴 (위 ★주) */
+  /* ★★**앱과 같은 글꼴이다** (사용자 지시 2026-09-11 *"모두 기본 폰트를 앱 설정에 적용된 폰트랑 동일하게"*).
+     앱이 번들한 것과 같은 파일을 플러그인 오리진에도 두고(`fonts.css`·`fonts/`), 앱 설정에서 고른 글꼴은
+     `peropix.js` 가 켤 때 이 값에 꽂는다 (앱에서 바꾸면 `font` 알림으로 따라온다).
+     여기 적힌 것은 **앱의 기본값(Pretendard)** 이라, JS 가 안 돌아도 같은 모양으로 뜬다.
+     ★`system-ui` 를 앞에 두지 않는다 — 윈도우에서 그것은 Segoe UI 라 한글이 Malgun Gothic 으로 떨어진다. */
+  --font-sans: "Pretendard Variable", Pretendard, "Segoe UI", "Malgun Gothic", sans-serif;
+  --font-mono: ui-monospace, Consolas, "D2Coding", monospace;
+
+  /* 글자 크기 — 앱과 같은 계단이고, **앱 설정의 글자 크기를 따라간다** (사용자 지시 2026-09-11).
+     `peropix.js` 가 켤 때 앱의 `--text-scale` 을 여기 꽂고, 설정에서 바꾸면 알림으로 따라온다.
+     ★앱의 `src/styles/tokens.css` 와 같은 셈이다 — 그쪽 계단을 고치면 여기도 맞춘다. */
+  --text-scale: 1;
+  --text-3xs: calc(11px * var(--text-scale));
+  --text-2xs: calc(12px * var(--text-scale));
+  --text-xs: calc(13px * var(--text-scale));
+  --text-md: calc(14px * var(--text-scale));
+  --text-lg: calc(15px * var(--text-scale));
+  --text-xl: calc(16px * var(--text-scale));
+  /* 굵기 — 한글은 굵으면 획이 뭉쳐 한 단씩 낮게 잡는다 */
+  --w-norm: 370;
+  --w-semi: 500;
+  --w-bold: 560;
+
+  /* 간격·모서리 */
+  --sp-1: 4px;
+  --sp-2: 6px;
+  --sp-3: 8px;
+  --sp-4: 10px;
+  --sp-5: 12px;
+  --sp-6: 14px;
+  --sp-7: 16px;
+  --sp-8: 20px;
+  --r-1: 5px;
+  --r-2: 7px;
+  --r-3: 9px;
+  --r-4: 12px;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #16161a;
+    --panel: #1e1e24;
+    --code-bg: #16161a;
+    --line: #2e2e36;
+    --line-soft: #26262e;
+    --ink: #ececf1;
+    --ink-soft: rgba(236, 236, 241, 0.72);
+    --ink-dim: rgba(236, 236, 241, 0.55);
+    --ink-faint: rgba(236, 236, 241, 0.42);
+    --accent: #3a7bb8;
+    --accent-ink: #8ec0e9;
+    --accent-bg: #1c2a38;
+    --accent-on: #ffffff;
+    --ok: #22c55e;
+    --warn: #fbbf24;
+    --err: #e05555;
+  }
+}
+
+/* ── 바탕 ── */
+* { box-sizing: border-box; }
+
+html { height: 100%; }
+
+body {
+  margin: 0;
+  padding: var(--sp-6);
+  background: transparent;   /* 앱 캔버스 바탕이 비친다 */
+  color: var(--ink);
+  font: var(--w-norm) var(--text-md) / 1.5 var(--font-sans);
+  /* ★★**글자 다듬기를 건드리지 않는다** (사용자 지적 2026-09-11: *"태그 굴리기 왜 모든 텍스트가 엄청 뿌옇게 나오지"*).
+     여기 `-webkit-font-smoothing: antialiased` 가 있었다 — 앱 본체는 같은 까닭으로 2026-08-25 에 이미 걷어 낸
+     **맥 관용구**인데(`src/styles/globals.css` 의 ★주), 플러그인 공통 CSS 에만 남아 있었다.
+     윈도우 크로미움(WebView2)에서는 뜻이 정반대다: 이 값이 **서브픽셀 다듬기(ClearType)를 끄고** 회색조로
+     떨어뜨려 작은 글자가 통째로 흐려진다. 플러그인 페이지는 한글이 Malgun Gothic 으로 떨어져 더 도드라졌다.
+     ★그래서 아무것도 지정하지 않는다. 「선명하게 하려고」 다시 넣지 말 것 — 반대로 간다. */
+}
+
+/* ── 스크롤바 — 앱과 같은 모양으로 (사용자 지시 2026-09-12).
+ *   값은 앱의 `src/styles/globals.css` 에서 옮겨 온 것이다. 그쪽을 고치면 여기도 맞춘다. */
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-thumb {
+  background: var(--line);
+  border-radius: 5px;
+  border: 2px solid transparent;   /* 바탕이 비치는 페이지라 앱의 `var(--bg)` 대신 투명으로 둔다 */
+  background-clip: padding-box;
+}
+::-webkit-scrollbar-thumb:hover { background: var(--ink-faint); background-clip: padding-box; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-corner { background: transparent; }
+
+/* ── 창 골격 — **문서가 아니라 작은 앱**이 되게 (사용자 지시 2026-09-10: *"박스 자체가 앱인 느낌"*) ──
+ *
+ *     <header>도구줄</header>  <main>본문</main>  <footer>상태줄</footer>
+ *
+ * ★창을 키우면 **본문(`main`)만** 커진다. 도구줄·상태줄의 두께는 그대로다 — 데스크톱 앱이 하는 그대로이고,
+ *   「어떤 건 고정이고 어떤 건 늘어나는」 어수선함이 사라진다. 넘치는 스크롤도 본문 안에서만 난다.
+ * ★`<main>` 을 쓴 페이지에만 걸린다 (`:has`). 안 쓰면 지금까지처럼 그냥 문서로 흐르므로 옛 플러그인이 안 깨진다. */
+body:has(> main) {
+  height: 100%;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-5);
+}
+body:has(> main) > header,
+body:has(> main) > footer { flex: 0 0 auto; display: flex; align-items: center; gap: var(--sp-3); flex-wrap: wrap; }
+body:has(> main) > footer { font-size: var(--text-2xs); color: var(--ink-dim); }
+body:has(> main) > main { flex: 1 1 auto; min-height: 0; overflow: auto; display: flex; flex-direction: column; gap: var(--sp-5); }
+
+/* 본문 안에서 **남는 자리를 채우되 비율을 지키는** 자리 — 그림판·미리보기가 여기 든다.
+ * ★안의 것은 `aspect-ratio` 만 주면 된다. 옆으로만 늘어나 찌그러지는 일이 없다. */
+.stage { flex: 1 1 auto; min-height: 0; overflow: hidden; display: grid; place-items: center; }
+.stage > * { max-width: 100%; max-height: 100%; }
+
+/* ── 글 ── */
+h1, h2, h3 { margin: 0 0 var(--sp-4); font-weight: var(--w-bold); line-height: 1.25; }
+h1 { font-size: var(--text-xl); }
+h2 { font-size: var(--text-lg); }
+h3 { font-size: var(--text-md); }
+p { margin: 0 0 var(--sp-4); }
+a { color: var(--accent-ink); text-decoration: none; }
+a:hover { text-decoration: underline; }
+small, .muted { color: var(--ink-dim); font-size: var(--text-2xs); }
+hr { border: none; border-top: 1px solid var(--line); margin: var(--sp-6) 0; }
+code, kbd, pre { font-family: var(--font-mono); font-size: var(--text-2xs); }
+pre, code { background: var(--code-bg); border: 1px solid var(--line); border-radius: var(--r-2); }
+code { padding: 1px 5px; }
+pre { margin: 0 0 var(--sp-4); padding: var(--sp-4) var(--sp-5); overflow: auto; white-space: pre-wrap; word-break: break-all; }
+pre code { background: none; border: none; padding: 0; }
+
+/* ── 단추 ── */
+button, .btn {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  min-height: 28px;
+  padding: 0 var(--sp-5);
+  font: var(--w-norm) var(--text-xs) / 1 var(--font-sans);
+  color: var(--ink-soft);
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--r-2);
+  cursor: pointer;
+}
+button:hover:not(:disabled), .btn:hover { border-color: var(--accent); color: var(--ink); }
+button:disabled { opacity: 0.5; cursor: default; }
+button.primary {
+  font-weight: var(--w-semi);
+  color: var(--accent-on);
+  background: var(--accent);
+  border-color: var(--accent);
+}
+button.primary:hover:not(:disabled) { color: var(--accent-on); filter: brightness(1.08); }
+button.ghost { background: none; border-color: transparent; }
+
+/* ── 입력 ── */
+input, select, textarea {
+  min-height: 28px;
+  padding: var(--sp-1) var(--sp-4);
+  font: var(--w-norm) var(--text-xs) / 1.4 var(--font-sans);
+  color: var(--ink);
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--r-2);
+}
+input:focus, select:focus, textarea:focus { outline: none; border-color: var(--accent); }
+input[type="checkbox"], input[type="range"] { min-height: 0; accent-color: var(--accent); }
+label { display: inline-flex; align-items: center; gap: var(--sp-2); font-size: var(--text-xs); color: var(--ink-soft); }
+fieldset { margin: 0 0 var(--sp-5); padding: var(--sp-5); border: 1px solid var(--line); border-radius: var(--r-3); }
+legend { padding: 0 var(--sp-2); font-size: var(--text-2xs); color: var(--ink-dim); }
+
+/* ── 표·목록 ── */
+table { width: 100%; border-collapse: collapse; font-size: var(--text-xs); }
+th, td { padding: var(--sp-3) var(--sp-4); text-align: left; border-bottom: 1px solid var(--line-soft); }
+th { font-weight: var(--w-semi); color: var(--ink-dim); font-size: var(--text-2xs); text-transform: uppercase; letter-spacing: 0.4px; }
+ul, ol { margin: 0 0 var(--sp-4); padding-left: var(--sp-8); }
+li { margin-bottom: var(--sp-2); }
+
+/* ── 자주 쓰는 몇 가지 ── */
+.card { padding: var(--sp-5); background: var(--panel); border: 1px solid var(--line); border-radius: var(--r-4); }
+.row { display: flex; align-items: center; gap: var(--sp-3); flex-wrap: wrap; }
+.col { display: flex; flex-direction: column; gap: var(--sp-3); }
+.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: var(--sp-3); }
+.spacer { flex: 1; }
+.pill { padding: 0 var(--sp-2); font-size: var(--text-3xs); line-height: 18px; border: 1px solid var(--line); border-radius: var(--r-2); color: var(--ink-dim); }
+.pill.on { border-color: var(--accent); background: var(--accent-bg); color: var(--accent-ink); }
+.ok { color: var(--ok); }
+.warn { color: var(--warn); }
+.err { color: var(--err); }

@@ -40,8 +40,14 @@ export function BlockRow({
   tagDrag,
   dragging,
   zone,
+  noToggle,
+  tag,
 }: {
   block: Block;
+  /** ★켜고끄기가 **뜻이 없는 자리** (만화 캔버스의 배경 — 켜는 것은 컷이 고른다). 버튼만 빠진다 */
+  noToggle?: boolean;
+  /** 이름 뒤에 붙는 작은 글 — 만화 캔버스의 배경은 그 배경을 쓰는 페이지·컷 (설계 8-1) */
+  tag?: React.ReactNode;
   /** ★**머리를 안 그린다** — 칸이 곧 블록인 자리(씬 칸)다. 몸통만 남는다.
    *  하나뿐인 블록에 켜고끄기·색은 뜻이 없고, 이름은 줄 머리에 이미 있다. */
   bare?: boolean;
@@ -207,6 +213,7 @@ export function BlockRow({
             {block.label}
           </b>
         )}
+        {tag && <span data-block-tag style={{ fontSize: "var(--text-2xs)", color: "var(--ink-faint)", whiteSpace: "nowrap", flexShrink: 0 }}>{tag}</span>}
 
         {/* 접힌 동안만 요약 — 펼치면 정보 중복이라 숨긴다 */}
         {!block.open ? (
@@ -239,7 +246,7 @@ export function BlockRow({
           {Icon.pencil}
         </button>
         {/* ★보기 전용에는 켜고끄기가 없다 — 저장소의 블록은 프롬프트에 안 들어가 있다 */}
-        {!readOnly && (
+        {!readOnly && !noToggle && (
         <button
           /* ★표식은 조작 테스트가 잡는 자리다 (아이콘뿐이라 글자로는 못 찾는다) */
           data-block-on={block.id}

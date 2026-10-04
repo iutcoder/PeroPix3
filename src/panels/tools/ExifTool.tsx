@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { Fragment, useEffect, useState } from "react";
 import { useI18n } from "../../i18n";
 import { api } from "../../lib/backend";
 import { useImageDrop, type Dropped } from "../../lib/dropImages";
@@ -228,17 +228,23 @@ export function ExifTool() {
             {/* ★구획을 나눠 보여 준다 (v2 index.html:25714-25752). 빈 것도 자리를 지킨다 —
                 「없다」는 것도 알아야 하는 정보다 */}
             <Prompt label={t("tools.pBase")} value={meta.prompt} empty={t("tools.exifEmpty")} />
-            <Prompt
-              label={t("tools.pChar")}
-              value={(meta.characters ?? []).map((c) => c.prompt).filter(Boolean).join("\n---\n")}
-              empty={t("tools.exifEmpty")}
-            />
-            {(meta.characters ?? []).some((c) => (c.negative || "").trim()) && (
-              <Prompt
-                label={t("tools.pCharNeg")}
-                value={(meta.characters ?? []).map((c) => c.negative || "").join("\n---\n")}
-                empty={t("tools.exifEmpty")}
-              />
+            {/* ★★캐릭터는 **한 명씩** 칸을 나눈다 (사용자 지적 2026-09-28: 여럿일 때 복사가
+                제대로 안 된다). `---` 로 이어 붙인 한 칸이면 복사 한 번에 전원이 섞여 나와
+                캐릭터 칸 하나에 붙여 넣을 수가 없다. 네거티브는 그 캐릭터 바로 아래에 둔다. */}
+            {(meta.characters ?? []).length ? (
+              (meta.characters ?? []).map((c, i, all) => {
+                const n = all.length > 1 ? ` ${i + 1}` : "";
+                return (
+                  <Fragment key={i}>
+                    <Prompt label={t("tools.pChar") + n} value={c.prompt} empty={t("tools.exifEmpty")} />
+                    {!!(c.negative || "").trim() && (
+                      <Prompt label={t("tools.pCharNeg") + n} value={c.negative} empty={t("tools.exifEmpty")} />
+                    )}
+                  </Fragment>
+                );
+              })
+            ) : (
+              <Prompt label={t("tools.pChar")} value="" empty={t("tools.exifEmpty")} />
             )}
             {!!meta.slot_prompt && <Prompt label={t("tools.pScene")} value={meta.slot_prompt} empty={t("tools.exifEmpty")} />}
             <Prompt label={t("tools.pNeg")} value={meta.negative} empty={t("tools.exifEmpty")} />

@@ -12,6 +12,7 @@ import {
   innerRect,
   type Rect,
 } from "../lib/focused";
+import { drawSize, fitScale } from "../lib/zoomView";
 
 /** 인페인트 마스크 에디터. **캔버스 자리를 대신한다** (모달이 아니다).
  *
@@ -53,6 +54,9 @@ export function MaskEditor() {
   /** 붓이 닿을 자리를 미리 보여 주는 판 (사용자 지시 2026-08-19) */
   const cursorRef = useRef<HTMLCanvasElement>(null);
   const [size, setSize] = useState({ w: 0, h: 0 });
+  /** 그림을 놓을 자리의 크기 (여백을 뺀 안쪽) — 패널·창 크기를 따라 바뀐다 */
+  const boxRef = useRef<HTMLDivElement>(null);
+  const [box, setBox] = useState({ w: 0, h: 0 });
   // ★붓 굵기는 ui 스토어에 저장된다 — 열 때마다 되돌아가지 않게 (`store/ui` 의 `maskBrush` ★주)
   const brush = useUi((s) => s.maskBrush);
   const setBrush = useUi((s) => s.setMaskBrush);
@@ -138,6 +142,19 @@ export function MaskEditor() {
     //   다시 그리면 칠하는 도중에 판이 갈아 끼워진다
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [image]);
+
+  // 자리 크기를 잰다 — `contentRect` 는 여백을 뺀 안쪽이다
+  useEffect(() => {
+    const el = boxRef.current;
+    if (!el) return;
+    const ro = new ResizeObserver(([e]) => setBox({ w: e.contentRect.width, h: e.contentRect.height }));
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+  /* ★★틀 크기는 **이미지 프리뷰와 같은 식**으로 정한다 (`lib/zoomView` 의 `fitScale`·`drawSize`, 사용자 지시 2026-09-29).
+       예전에는 `height: 100%` 에 `aspect-ratio` 와 `max-width` 를 걸었는데, 폭이 모자라면 `max-width` 가 폭만 줄이고
+       높이는 그대로라 **그림이 옆으로 눌렸다** (창이 좁아질 때). 테두리 1px 씩은 빼고 맞춘 뒤 도로 더한다. */
+  const view = size.w && box.w > 2 && box.h > 2 ? drawSize(size, fitScale({ w: box.w - 2, h: box.h - 2 }, size)) : null;
 
   /** 있는 마스크에서 칠한 칸을 되살린다 — 칸 **가운데 픽셀**로 판정한다 (v2 와 같다) */
   const syncPainted = (mx: CanvasRenderingContext2D, w: number, h: number) => {
@@ -435,7 +452,6 @@ export function MaskEditor() {
     commit();
   };
 
-  const ready = size.w > 0;
   const plan = rectNatural && focused ? focusedPlan(rectNatural) : null;
   const big = !!baseSize && canFocus(baseSize.w, baseSize.h);
 
@@ -496,7 +512,7 @@ export function MaskEditor() {
               : ""}
         </span>
         {/* ★실행 버튼은 여기 없다 — 「생성」이 한다 (사용자 지시 2026-08-19).
-            나가는 길은 둘이다: **취소**(들어올 때로 되돌리고 나간다) · **적용**(칠한 채로 나간다).
+            나가는 방법은 둘이다: **취소**(들어올 때로 되돌리고 나간다) · **적용**(칠한 채로 나간다).
             ★`×` 하나였을 때는 그것이 되돌리는 것인지 남기는 것인지 알 수 없었다. */}
         <button
           data-mask-cancel
@@ -527,15 +543,16 @@ export function MaskEditor() {
         </button>
       </div>
 
-      <div style={{ flex: 1, minHeight: 0, display: "grid", placeItems: "center", padding: "0 var(--sp-4) var(--sp-2)" }}>
+      <div
+        ref={boxRef}
+        style={{ flex: 1, minHeight: 0, minWidth: 0, overflow: "hidden", display: "grid", placeItems: "center", padding: "0 var(--sp-4) var(--sp-2)" }}
+      >
         <div
           style={{
             position: "relative",
-            // ★비율은 `aspect-ratio` 가 지킨다. 높이를 채우고 넘치면 max-width 가 줄인다
-            aspectRatio: ready ? `${size.w} / ${size.h}` : "1",
-            width: "auto",
-            height: "100%",
-            maxWidth: "100%",
+            // ★크기는 `view` 가 정한다 (위 ★★주). 재기 전에는 자리를 안 차지한다
+            width: view ? Math.floor(view.w) + 2 : 0,
+            height: view ? Math.floor(view.h) + 2 : 0,
             touchAction: "none",
             border: "1px solid var(--line)",
             borderRadius: "var(--r-2)",

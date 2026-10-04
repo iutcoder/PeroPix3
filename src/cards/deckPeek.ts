@@ -30,7 +30,7 @@ export function useDeckPeek(): boolean {
     }
     if (!peeked.current) return;
     peeked.current = false;
-    if (useDrag.getState().dropped) {
+    if (useDrag.getState().droppedOn !== null) {
       // 넣었다 — 편 채로 두고 그 상태를 적어 둔다
       useUi.getState().commitLayout();
     } else {

@@ -21,17 +21,28 @@ import { GenerateFooter } from "./panels/GenerateFooter";
 import { Settings } from "./app/Settings";
 import { TaggerStrip } from "./app/TaggerStrip";
 import { useHealth, type Health } from "./store/health";
+import { toast } from "./store/toast";
 import { sameApp } from "./lib/sameApp";
 import { Toasts } from "./app/Toasts";
 import { TipLayer } from "./components/Tip";
 import { BusyOverlay } from "./app/BusyOverlay";
 import { AskDialog } from "./app/AskDialog";
+import { StylePickDialog } from "./app/StylePickDialog";
 import { AiChat } from "./panels/AiChat";
 import { Canvas } from "./panels/Canvas";
 import { CanvasTabs } from "./panels/CanvasTabs";
 import { Gallery } from "./panels/Gallery";
 import { Censor } from "./panels/Censor";
 import { Tools } from "./panels/Tools";
+/* ★★이미지 편집도 **앱을 켤 때 싣는다** (사용자 지시 2026-09-29: 모드를 처음 쓸 때 받게 만들지 않는다).
+   2026-09-22 의 「이미지 편집이 크니까 분리」는 코드를 파일로 나누라는 것이었지 늦게 받으라는 것이 아니었다. */
+import Editor from "./editor/Editor";
+/* 만화 캔버스의 왼쪽 패널(공통 · 컷 편집)과 컷 생성 푸터 (설계 8-1) */
+import { ComicFooter, ComicLeft } from "./editor/ComicPanel";
+import { useEditor } from "./editor/store";
+import { Plugins } from "./panels/Plugins";
+import { PluginPanel } from "./panels/PluginPanel";
+import { usePlugins } from "./lib/pluginHost";
 import { GalleryFolders } from "./panels/GalleryFolders";
 import { GalleryMeta } from "./panels/GalleryMeta";
 import { DeckPanel } from "./cards/DeckPanel";
@@ -40,7 +51,6 @@ import { SaveDialog, type SaveAsk } from "./cards/SaveDialog";
 import { useSub } from "./store/sub";
 import { useAccounts } from "./store/accounts";
 import { BlockDrawer } from "./blocks/BlockDrawer";
-import { TagDrawer } from "./blocks/TagDrawer";
 import { WildcardModal } from "./panels/WildcardModal";
 import { DropImport } from "./app/DropImport";
 import { TranslatePanel } from "./panels/TranslatePanel";
@@ -56,7 +66,7 @@ import { setThumbAsker, type ThumbTarget } from "./cards/thumbAsk";
  *
  *  ★~~덱 안의 개별 카드는 여기서 못 바꾼다~~ (2026-08-19 사용자 결정으로 뒤집힘).
  *    예전에는 덱이 접힌 손패라 카드 한 장을 겨눌 자리가 없어서, 꺼내 고친 뒤 역드래그로
- *    덮어쓰는 것이 유일한 길이었다. 지금은 **덱이 오른쪽에 펼쳐져 있어** 카드가 그대로
+ *    덮어쓰는 것이 유일한 방법이었다. 지금은 **덱이 오른쪽에 펼쳐져 있어** 카드가 그대로
  *    노출되므로 거기 바로 떨군다 (사용자 원문: *"이제 다 펼쳐져 있어서 바로 드롭해도 될듯.
  *    대신 해당 카드가 받을 수 있게 노출된 상태일 때만"*).
  *  ★종류당 하나였던 **덱 커버**는 그리던 손패와 함께 통째로 걷었다 (2026-08-19). */
@@ -72,6 +82,8 @@ export function App() {
   const health = useHealth((s) => s.health);
   const dead = useHealth((s) => s.dead);
   const mode = useUi((s) => s.mode);
+  /** 이미지 편집에서 만화 캔버스를 보고 있나 — 그때만 왼쪽 패널(공통 · 컷 편집)이 선다 */
+  const comicLeft = useEditor((s) => !!s.docs.find((d) => d.id === s.cur)?.comic) && mode === "editor";
   // ★여기서 구독해야 언어를 바꿨을 때 패널 머리글이 따라 바뀐다 (tGlobal 은 구독이 아니다)
   const tr = useI18n((s) => s.t);
   const initGen = useGen((s) => s.init);
@@ -147,8 +159,17 @@ export function App() {
       watchErrors();
       await initGen();
       mark("껍데기주소");
-      // 사이드카가 뜨는 데 잠깐 걸리므로 재시도한다.
-      for (let i = 0; i < 25; i++) {
+      /* 사이드카가 뜨는 데 잠깐 걸리므로 재시도한다.
+         ★★**기다리는 시간을 늘리지 않는다** (사용자 지적 2026-09-17: *"실패하면 그냥 무조건
+           1분 기다려야 하는데"*). 늦게 뜨는 경우를 구제하려고 상한을 60초로 잡아 봤으나,
+           그것은 **정말로 안 뜨는 경우에 사용자를 1분 동안 빈 화면 앞에 세워 두는** 값이다.
+           늦게 뜨는 경우는 실패 화면의 「다시 시도」가 이미 받으므로, 여기서 더 기다릴 이유가 없다.
+         ★횟수(`25회 × 400ms`)가 아니라 시간으로 센다 — 한 번의 시도가 오래 걸리면 실제로
+           기다린 시간이 셈과 어긋나기 때문이다.
+         ★**15초.** 옛 값(10초)에서 조금만 늘렸다. 게스트 실측으로 백엔드가 붙기까지 **6.8초**가
+           걸린 적이 있어(Vite 개발 모드 + 샌드박스라 가장 느린 조건) 10초는 여유가 3초뿐이었다. */
+      const until = Date.now() + 15_000;
+      while (Date.now() < until) {
         try {
           const h = await api<Health>("/api/health");
           if (!alive) return;
@@ -161,6 +182,17 @@ export function App() {
           }
           mark("백엔드");
           useHealth.getState().set(h);
+          /* ★★부팅 때 옛 생성 기록을 옮기는 동안은 **기다린다** (사용자 결정 2026-09-30, `backend/server.py`
+             의 `_records_phase`). 백엔드는 그동안 상태 확인 말고는 전부 막는다 — 워크스페이스를 읽으러
+             가면 안 된다. 옮기지 못한 워크스페이스가 있으면 알린다 (다음 실행에서 다시 한다). */
+          if (h.records?.busy && !(await waitRecords(() => alive))) {
+            if (alive) useHealth.getState().setDead(true);
+            return;
+          }
+          const failed = useHealth.getState().health?.records?.failed ?? [];
+          if (failed.length) toast(tGlobal("boot.recordsFailed", { names: failed.join(", ") }), "warn");
+          const unlaid = useHealth.getState().health?.records?.layoutFailed ?? [];
+          if (unlaid.length) toast(tGlobal("boot.layoutFailed", { names: unlaid.join(", ") }), "warn");
           /* ★★**기다리지 않는다** (실측 2026-08-27: 이 한 줄이 **0.94초**였다).
              구독 정보는 NAI 공홈에 물어보는 것이라 인터넷 왕복이 통째로 부팅 사슬에 얹혔다.
              화면이 뜨는 데 필요한 값이 아니다 — 도착하면 그때 배지가 채워진다.
@@ -177,11 +209,15 @@ export function App() {
           });
           await initWs();
           mark("워크스페이스");
+          // ★이미지 편집의 남겨 둔 캔버스를 뒤에서 되살린다. 백엔드가 뜬 것을 확인한 뒤라야 한다 (못 읽으면 빈 상태로 덮어쓴다)
+          void useEditor.getState().hydrate();
           // ★큐는 앱 전체가 공유한다 — 워크스페이스를 고르기 전에 붙어 둔다
           void connectQueue();
           // 카드는 워크스페이스와 무관한 공용 저장소라 여기서 한 번만 읽는다
           await loadCards();
           mark("카드");
+          // ★플러그인 목록과 확장 JS — 기다리지 않는다. 플러그인이 터져도 앱은 뜬다 (`lib/pluginHost`)
+          void usePlugins.getState().load().catch((e) => console.error("[plugins]", e));
           void flushBootTime();
           // ★와일드카드 풀도 여기서 한 번 읽는다 (카드와 같은 공용 문서).
           //   ★**생성보다 먼저 준비돼야 한다.** 비어 있으면 `#이름` 이 그대로 프롬프트에
@@ -265,29 +301,24 @@ export function App() {
              고치는 것이 맞다 (사용자 지시 2026-08-19). 예전에는 여기서 사본을 편집했다. */
           mode === "gallery" ? tr("gallery.folders") : tr("panel.prompt")
         }
-        rightLabel={mode === "gallery" ? tr("gallery.meta") : tr("panel.deck")}
+        rightLabel={mode === "gallery" ? tr("gallery.meta") : mode === "plugins" ? tr("plugins.panel") : tr("panel.deck")}
         /* ★프롬프트·생성 옵션은 **생성 모드에만** (사용자 지적 2026-08-05).
            이미 만든 것을 다루는 화면에 뜨면 "여기서 고치면 뭐가 되나"가 흐려진다.
            갤러리는 기둥을 쓴다(폴더·그림 정보). 검열·보조 도구는 **레일도 안 남긴다** —
            열 것이 없는 레일은 막다른 길이다. */
-        hideLeft={mode !== "generate" && mode !== "gallery"}
-        hideRight={mode !== "generate" && mode !== "gallery"}
+        hideLeft={mode !== "generate" && mode !== "gallery" && !comicLeft}
+        hideRight={mode !== "generate" && mode !== "gallery" && mode !== "plugins"}
         left={
           mode === "gallery" ? (
             <GalleryFolders />
+          ) : comicLeft ? (
+            <ComicLeft />
           ) : (
             <LeftPanel onThumb={(section, img) => setThumbAsk({ type: "section", section, img })} />
           )
         }
         /* ★블록 저장소는 **프롬프트를 볼 때만** 뜻이 있다 — 갤러리에는 놓을 목록이 없다 */
-        leftDrawer={
-          mode === "generate" ? (
-            <>
-              <BlockDrawer />
-              <TagDrawer />
-            </>
-          ) : undefined
-        }
+        leftDrawer={mode === "generate" ? <BlockDrawer /> : undefined}
         /* 캐릭터 줄만 세 기둥 위에. 씬 세트 줄은 캔버스 위로 내려갔다 */
         /* ★워크스페이스 탭이 **위**, 캐릭터가 아래다. 검열·보조도구는 워크스페이스를
            안 쓰는 도구라 탭 줄을 감춘다 (사용자 지시 2026-08-08).
@@ -302,11 +333,15 @@ export function App() {
           ) : undefined
         }
         /* 최종 프롬프트 바로 아래, 패널 맨 밑에 **고정**. 접어도 버튼은 레일에 남는다 */
-        leftFooter={mode === "generate" ? <GenerateFooter /> : undefined}
-        leftFooterCompact={mode === "generate" ? <GenerateFooter compact /> : undefined}
+        leftFooter={mode === "generate" ? <GenerateFooter /> : comicLeft ? <ComicFooter /> : undefined}
+        leftFooterCompact={mode === "generate" ? <GenerateFooter compact /> : comicLeft ? <ComicFooter compact /> : undefined}
         right={
           mode === "gallery" ? (
             <GalleryMeta />
+          ) : mode === "plugins" ? (
+            /* ★플러그인 모드의 오른쪽은 카드덱 자리에 「플러그인」 패널 — 꺼내기 (사용자 지시 2026-09-08, 간략판 2026-09-09).
+               관리 전환은 캔버스 우상단의 떠 있는 단추가 맡는다 (사용자 지시 2026-09-11) */
+            <PluginPanel />
           ) : (
             <DeckPanel
               onAsk={setAsk}
@@ -331,12 +366,18 @@ export function App() {
             <Gallery />
           ) : mode === "censor" ? (
             <Censor />
+          ) : mode === "editor" ? (
+            <Editor />
           ) : mode === "utility" ? (
             <Tools />
-          ) : (
+          ) : mode === "plugins" ? null : (
             <Placeholder mode={mode} />
           )
         }
+        /* ★플러그인 모드는 **떼지 않고 숨긴다** (사용자 지시 2026-09-08: 다른 화면에 갔다 와도 마지막 상태 유지).
+           떼면 캔버스 iframe 이 다시 만들어져 플러그인 페이지의 상태(돌려 놓은 인물·입력값)가 사라지고, 찾기·거르기도
+           초기화된다. `hidden` 이면 display:none 이라 자리도 안 차지하고 iframe 은 살아 있다. */
+        centerKeep={<Plugins hidden={mode !== "plugins"} />}
       />
       {gate && <WorkspaceGate onClose={() => setGate(false)} />}
       <SaveDialog
@@ -461,6 +502,7 @@ export function App() {
           (`ExifTool` 의 `wide`), 여기까지 두면 한 번 떨군 것을 둘이 잡는다
           (v2 도 같은 자리에서 갈랐다: `!isInCensorMode() && !isInUtilityMode()`). */}
       {(mode === "generate" || mode === "gallery") && <DropImport />}
+      <StylePickDialog />
       <AskDialog />
       <Toasts />
       {/* 툴팁 층 — 화면 아무 데나 `data-tip` 을 달면 여기서 뜬다 (`components/Tip`) */}
@@ -575,11 +617,54 @@ function ThemeButton() {
  *  107개를 하나씩 주느라 2.6초가 더 붙지만, **1.7초는 정식 빌드에서도 그대로 남는다** —
  *  그래서 표시가 필요하다.
  *  ★기다리는 것이 무엇인지 말한다. "로딩 중"만 뜨면 멈춘 것과 구분이 안 된다. */
+/** 부팅 때 옛 생성 기록을 옮기는 동안 기다린다 (`backend/server.py` 의 `_records_phase`). 끝나면 true.
+ *  ★진행이 이어지는 동안은 **한도 없이** 기다린다. 걸리는 시간은 기록 크기에 달렸다 (5GB 에 49초 실측).
+ *  ★백엔드가 15초 동안 한 번도 답하지 않으면 그만둔다 — 부팅 대기와 같은 한도다.
+ *  ★받은 상태를 그대로 스토어에 넣는다 — 부팅 화면(`Booting`)이 그것으로 진행을 그린다. */
+async function waitRecords(alive: () => boolean): Promise<boolean> {
+  let heard = Date.now();
+  while (alive()) {
+    await new Promise((r) => setTimeout(r, 300));
+    try {
+      const h = await api<Health>("/api/health");
+      heard = Date.now();
+      useHealth.getState().set(h);
+      if (!h.records?.busy) return true;
+    } catch {
+      if (Date.now() - heard > 15_000) return false;
+    }
+  }
+  return false;
+}
+
 function Booting({ ready, dead }: { ready: boolean; dead: boolean }) {
   const t = useI18n((s) => s.t);
+  const [retrying, setRetrying] = useState(false);
+  // ★옮길 것이 있을 때만 따로 보인다. 휴지통만 비우는 짧은 순간(`total` 0)은 평소 문구 그대로다
+  const rec = useHealth((s) => s.health?.records);
+  const moving = !dead && !!rec?.busy && rec.total > 0;
+
+  /** ★★**막다른 길을 만들지 않는다** (사용자 제보 2026-09-16). 지금까지 이 화면에는 로그
+   *  파일의 이름만 있었고, 사용자가 할 수 있는 일은 앱을 껐다 켜는 것뿐이었다. 제보자가 겪은
+   *  것처럼 원인이 일시적이면(껍데기가 거대한 로그를 자르는 동안 백엔드가 늦게 떴다) 여기서
+   *  한 번 더 붙기만 하면 되는데, 그 길이 화면에 없었다.
+   *  ★하는 일은 `Plugins` 의 「다시 붙이기」와 같다 — 껍데기가 **백엔드만** 다시 띄우고
+   *    (`restart_backend`) 화면을 새로 읽는다. 앱을 통째로 다시 띄우지 않는다.
+   *  ★껍데기가 없으면(브라우저로 연 개발 화면) 그냥 새로 읽는다. */
+  const retry = async () => {
+    setRetrying(true);
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      await invoke("restart_backend");
+    } catch {
+      /* 껍데기가 없거나 다시 띄우지 못했다 — 그래도 화면은 새로 읽어 본다 */
+    }
+    location.reload();
+  };
+
   return (
     <div
-      data-booting={dead ? "dead" : ready ? "workspace" : "backend"}
+      data-booting={dead ? "dead" : moving ? "records" : ready ? "workspace" : "backend"}
       style={{ display: "grid", justifyItems: "center", gap: "var(--sp-5)", padding: "var(--sp-8)" }}
     >
       <div
@@ -597,16 +682,56 @@ function Booting({ ready, dead }: { ready: boolean; dead: boolean }) {
       >
         P
       </div>
-      {/* 남은 시간을 알 수 없으므로 왕복만 한다 — 가짜 퍼센트를 그리지 않는다 */}
-      <div style={{ width: 132, height: 2, borderRadius: 1, background: "var(--line)", overflow: "hidden" }}>
-        {!dead && <div className="boot-bar" style={{ width: "34%", height: "100%", background: "var(--accent)" }} />}
-      </div>
+      {/* 남은 시간을 알 수 없으므로 왕복만 한다 — 가짜 퍼센트를 그리지 않는다.
+          ★기록을 옮기는 동안만은 **진짜 진행**(옮긴 바이트)을 그린다.
+          ★**실패했으면 트랙도 그리지 않는다** (사용자 결정 2026-09-17). 빈 트랙만 남으면
+            아직 무언가 진행 중인 것으로 읽히는데, 기다리기를 그만둔 자리다. */}
+      {!dead && (
+        <div style={{ width: 132, height: 2, borderRadius: 1, background: "var(--line)", overflow: "hidden" }}>
+          {moving ? (
+            <div
+              style={{
+                width: `${Math.min(100, (rec!.done / rec!.total) * 100)}%`,
+                height: "100%",
+                background: "var(--accent)",
+                transition: "width 0.3s",
+              }}
+            />
+          ) : (
+            <div className="boot-bar" style={{ width: "34%", height: "100%", background: "var(--accent)" }} />
+          )}
+        </div>
+      )}
       <div style={{ fontSize: "var(--text-2xs)", color: "var(--ink-dim)", textAlign: "center", lineHeight: 1.6 }}>
-        {dead ? t("boot.failed") : ready ? t("boot.workspace") : t("boot.backend")}
+        {dead
+          ? t("boot.failed")
+          : moving
+            ? t(rec!.stage === "layout" ? "boot.layout" : "boot.records", { n: rec!.ws, m: rec!.wsTotal })
+            : ready
+              ? t("boot.workspace")
+              : t("boot.backend")}
         {dead && (
           <>
             <br />
             <span style={{ color: "var(--ink-faint)", fontFamily: "var(--font-mono)" }}>logs/peropix.log</span>
+            <div style={{ marginTop: "var(--sp-5)" }}>
+              <button
+                data-boot-retry
+                onClick={retry}
+                disabled={retrying}
+                style={{
+                  border: "1px solid var(--accent)",
+                  borderRadius: "var(--r-2)",
+                  background: "var(--accent)",
+                  color: "var(--accent-on)",
+                  padding: "var(--sp-2) var(--sp-5)",
+                  fontSize: "var(--text-xs)",
+                  opacity: retrying ? 0.6 : 1,
+                }}
+              >
+                {retrying ? t("boot.retrying") : t("boot.retry")}
+              </button>
+            </div>
           </>
         )}
       </div>

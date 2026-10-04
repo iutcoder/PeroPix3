@@ -170,64 +170,19 @@ def restore(root: Path, entries: list[dict]) -> dict:
     return trash.restore_at(root, entries)
 
 
-def _to_front(folder: Path) -> None:
-    """열려 있는 탐색기 창을 **앞으로**. 못 찾으면 조용히 넘어간다.
+def _shell_open(p: Path) -> bool:
+    """셸에 **경로로** 부탁해 탐색기를 연다. 됐으면 True.
 
-    ★★COM(`Shell.Application`)으로 훑지 않는다 (사용자 지적 2026-08-19: 느렸다) —
-      `EnumWindows` 로 **최상위 창만** 훑는다. 창 목록은 수십 개라 눈 깜짝할 새다.
-    ★탐색기 창의 제목은 **폴더 이름**이다 (클래스 `CabinetWClass`). 이름만 맞으면 앞으로 낸다.
-    ★포커스 제한은 `AttachThreadInput` 으로 넘는다 (v2 와 같은 수법, 다만 창 찾기가 싸다)."""
-    if sys.platform != "win32":
-        return
-    try:
-        import ctypes
-        from ctypes import wintypes
-
-        u = ctypes.windll.user32
-        want = folder.name or str(folder)
-        found = []
-
-        @ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, wintypes.LPARAM)
-        def each(hwnd, _):
-            cls = ctypes.create_unicode_buffer(64)
-            u.GetClassNameW(hwnd, cls, 64)
-            if cls.value != "CabinetWClass":
-                return True
-            n = u.GetWindowTextLengthW(hwnd)
-            buf = ctypes.create_unicode_buffer(n + 1)
-            u.GetWindowTextW(hwnd, buf, n + 1)
-            if buf.value == want:
-                found.append(hwnd)
-                return False
-            return True
-
-        u.EnumWindows(each, 0)
-        if not found:
-            return
-        hwnd = found[0]
-        if u.IsIconic(hwnd):
-            u.ShowWindow(hwnd, 9)  # SW_RESTORE
-        fore = u.GetForegroundWindow()
-        mine = u.GetWindowThreadProcessId(hwnd, None)
-        other = u.GetWindowThreadProcessId(fore, None)
-        if mine != other:
-            u.AttachThreadInput(mine, other, True)
-            u.BringWindowToTop(hwnd)
-            u.SetForegroundWindow(hwnd)
-            u.AttachThreadInput(mine, other, False)
-        else:
-            u.BringWindowToTop(hwnd)
-            u.SetForegroundWindow(hwnd)
-    except Exception as e:  # 앞으로 못 내도 창은 열려 있다
-        print(f"[reveal] 앞으로 가져오지 못했습니다 ({e})")
-
-
-def _select_in_explorer(f: Path) -> bool:
-    """그 파일을 **고른 채로** 폴더를 연다. 됐으면 True.
-
-    ★★`explorer /select,` 를 쓰지 않는다 (사용자 지적 2026-08-19: 느렸다) — 그것은
-      **탐색기 프로세스를 새로 띄우고 창도 새로 만든다.** `SHOpenFolderAndSelectItems` 는
-      셸에 직접 부탁하는 것이라 **열려 있는 창을 다시 쓰고** 곧바로 뜬다.
+    ★★`explorer /select,` 와 `os.startfile` 을 쓰지 않는다 (사용자 지적 2026-08-19: 느렸다). 그것은 탐색기
+      프로세스와 창을 새로 띄운다. `SHOpenFolderAndSelectItems` 는 셸에 직접 부탁하는 것이라 **이미 열려 있는 창을
+      다시 쓰고 앞으로 낸다.**
+    ★★폴더는 **빈 자식 pidl 하나**를 고를 것으로 넘긴다 (사용자 지적 2026-09-22). 문서대로 `cidl=0` 에 폴더 pidl 을
+      주면 **부모**를 열고 그 폴더를 고른다. 빈 자식 하나를 주면 그 폴더 자체가 열리고, 같은 이름의 다른 폴더가
+      열려 있어도 **경로**로 창을 찾는다 (게스트 실측: B/same 이 떠 있는 채 A/same 을 열면 A/same 이 앞에 오고,
+      한 번 더 열면 새 창 없이 그 창이 다시 앞에 온다).
+      예전에는 `os.startfile` 로 열고 창 **제목**(= 폴더 이름)으로 찾아 앞으로 냈는데, 같은 이름의 다른 폴더 창이
+      먼저 걸리면 그 창이 앞으로 왔다.
+    ★파일은 그 파일 pidl 하나를 `cidl=0` 으로 — 부모 폴더가 열리고 그 파일이 고른 채가 된다.
     ★COM 은 **이 스레드에서** 열고 닫는다 (요청은 워커 스레드에서 돈다, `server.files_reveal`)."""
     if sys.platform != "win32":
         return False
@@ -239,28 +194,31 @@ def _select_in_explorer(f: Path) -> bool:
         ole32.CoInitialize(None)
         try:
             shell32.ILCreateFromPathW.restype = ctypes.c_void_p
-            pidl = shell32.ILCreateFromPathW(ctypes.c_wchar_p(str(f)))
+            pidl = shell32.ILCreateFromPathW(ctypes.c_wchar_p(str(p)))
             if not pidl:
                 return False
             try:
-                # (폴더 pidl, 고를 것 수, 고를 것들, 플래그) — 파일 하나면 그 파일의 pidl 로 족하다
-                shell32.SHOpenFolderAndSelectItems(ctypes.c_void_p(pidl), 0, None, 0)
+                if p.is_dir():
+                    empty = ctypes.create_string_buffer(2)  # 길이 0 의 ITEMIDLIST (끝 표식만)
+                    arr = (ctypes.c_void_p * 1)(ctypes.addressof(empty))
+                    hr = shell32.SHOpenFolderAndSelectItems(ctypes.c_void_p(pidl), 1, arr, 0)
+                else:
+                    hr = shell32.SHOpenFolderAndSelectItems(ctypes.c_void_p(pidl), 0, None, 0)
             finally:
                 shell32.ILFree(ctypes.c_void_p(pidl))
         finally:
             ole32.CoUninitialize()
-        return True
-    except Exception as e:  # 안 되면 폴더만 여는 길로 떨어진다
-        print(f"[reveal] 파일을 고른 채로 열지 못했습니다 ({e})")
+        return int(hr) == 0
+    except Exception as e:  # 안 되면 `os.startfile` 로 떨어진다
+        print(f"[reveal] 셸로 열지 못했습니다 ({e})")
         return False
 
 
 def _open(p: Path, select: bool) -> None:
-    """탐색기에서 그 자리를 연다. `select` 면 **그 파일을 고른 채로**.
+    """탐색기에서 그 자리를 연다. `select` 면 **그 파일을 고른 채로**, 아니면 그 폴더(파일이면 그 부모)를.
 
-    ★★`explorer /select,` 는 안 쓴다 — 프로세스와 창을 새로 띄워 눈에 띄게 느렸다
-      (`_select_in_explorer` 주석). 셸 API 로 부탁하면 열려 있는 창을 다시 쓴다.
-    ★연 뒤 **앞으로 낸다** — 그냥 열면 뒤에서 열린다 (`_to_front`)."""
+    ★셸 API 가 창을 찾아 앞으로 내므로 따로 앞으로 낼 것이 없다 (`_shell_open`). 그것이 안 될 때만
+      `os.startfile` 로 떨어지는데, 그때는 창이 뒤에서 열릴 수 있다."""
     target = p if p.is_dir() else p.parent
     if sys.platform == "win32":
         try:
@@ -269,9 +227,8 @@ def _open(p: Path, select: bool) -> None:
             ctypes.windll.user32.AllowSetForegroundWindow(-1)  # ASFW_ANY
         except Exception:
             pass
-        if not (select and p.is_file() and _select_in_explorer(p)):
+        if not _shell_open(p if (select and p.is_file()) else target):
             os.startfile(str(target))  # noqa: S606
-        _to_front(target)
     elif sys.platform == "darwin":
         subprocess.Popen(["open", "-R", str(p)] if select and p.is_file() else ["open", str(target)])
     else:
@@ -300,28 +257,106 @@ def open_dir(p: Path) -> None:
         _open(p, False)
 
 
+#: 폴더 찾기 창을 띄우는 **자식 프로세스의 본문** (`pick_dir` 의 ★★주).
+#
+#  ★★**tkinter 를 쓰지 않는다** (사용자 제보 2026-09-13: *"일괄변환하고 검열에서 저장 폴더를
+#    직접 지정하는 기능이 작동 안함"*). 앱과 함께 가는 파이썬은 **embeddable 판**(3.11.9,
+#    `python311._pth`)이라 **tkinter 가 처음부터 없다** — `_tkinter.pyd`·`Lib/tkinter`·`tcl/`
+#    어느 것도 안 들어 있어서 `import tkinter` 에서 곧바로 죽었다 (`scripts/slim_python.py` 가
+#    걷어낸 것이 아니다). 개발 트리는 시스템 파이썬을 쓰고 거기엔 tkinter 가 있어서,
+#    `dev.bat` 에서는 멀쩡하고 **설치본에서만** 안 됐다.
+#  ★그래서 **윈도우가 이미 들고 있는 창**을 연다 — `IFileDialog` 에 `FOS_PICKFOLDERS` 를 켠
+#    탐색기와 같은 폴더 고르기다. 덧붙는 것이 없고(ctypes 는 파이썬에 딸려 온다) 창 모양도 요즘 것이다.
+_PICK_DIR = r'''
+import sys, ctypes
+from ctypes import POINTER, byref, c_void_p, c_long, c_ulong, c_ushort, c_byte, c_wchar_p, c_int
+
+class GUID(ctypes.Structure):
+    _fields_ = [("a", c_ulong), ("b", c_ushort), ("c", c_ushort), ("d", c_byte * 8)]
+
+def guid(text):
+    g = GUID()
+    if ctypes.windll.ole32.CLSIDFromString(text, byref(g)):
+        raise OSError("GUID " + text)
+    return g
+
+def call(this, idx, argtypes, *args):
+    """COM 메서드 하나 — vtable 의 `idx` 번째. HRESULT 를 그대로 돌려준다 (0 이 성공)."""
+    vt = ctypes.cast(this, POINTER(POINTER(c_void_p)))[0]
+    return ctypes.WINFUNCTYPE(c_long, c_void_p, *argtypes)(vt[idx])(this, *args)
+
+# ★vtable 자리 — IUnknown 셋(0~2) 다음이 IModalWindow::Show 이고, 그 뒤가 IFileDialog 의 것이다
+RELEASE, SHOW, SET_OPTIONS, GET_OPTIONS, SET_FOLDER, GET_RESULT = 2, 3, 9, 10, 12, 20
+DISPLAY_NAME = 5                       # IShellItem::GetDisplayName
+FOS_PICKFOLDERS, FOS_FORCEFILESYSTEM = 0x20, 0x40
+SIGDN_FILESYSPATH = 0x80058000
+CANCELLED = 0x800704C7                 # 사용자가 닫았다 — 오류가 아니다
+
+ole32, shell32, user32 = ctypes.windll.ole32, ctypes.windll.shell32, ctypes.windll.user32
+ole32.CoInitialize(None)
+dlg = c_void_p()
+hr = ole32.CoCreateInstance(byref(guid("{DC1C5A9C-E88A-4DDE-A5A1-60F82A20AEF7}")), None, 1,
+                            byref(guid("{42F85136-DB7E-439C-85F1-E4075D135FC8}")), byref(dlg))
+if hr:
+    sys.exit("CoCreateInstance 0x%08x" % (hr & 0xFFFFFFFF))
+
+opt = c_ulong()
+call(dlg, GET_OPTIONS, [POINTER(c_ulong)], byref(opt))
+call(dlg, SET_OPTIONS, [c_ulong], opt.value | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM)
+
+# 맨 앞에 세울 자리 — 못 만들면 그냥 기본 자리에서 연다
+start = sys.argv[1] if len(sys.argv) > 1 else ""
+if start:
+    item = c_void_p()
+    if not shell32.SHCreateItemFromParsingName(
+            c_wchar_p(start), None, byref(guid("{43826D1E-E718-42EE-BC55-A1E261C37BFE}")), byref(item)):
+        call(dlg, SET_FOLDER, [c_void_p], item)
+        call(item, RELEASE, [])
+
+# ★★**앞으로 끌어낼 주인 창**이 있어야 한다. 없으면 대화상자가 앱 창 **뒤로** 열려 사용자에게는
+#   그냥 멈춘 것처럼 보인다 (tkinter 판의 `-topmost` 가 하던 일). 크기 0 의 숨은 창이면 된다.
+user32.CreateWindowExW.restype = c_void_p
+user32.CreateWindowExW.argtypes = [c_ulong, c_wchar_p, c_wchar_p, c_ulong,
+                                   c_int, c_int, c_int, c_int, c_void_p, c_void_p, c_void_p, c_void_p]
+owner = user32.CreateWindowExW(0x8 | 0x80, "STATIC", None, 0x80000000,  # TOPMOST·TOOLWINDOW·POPUP
+                               0, 0, 0, 0, None, None, None, None)
+
+hr = call(dlg, SHOW, [c_void_p], owner) & 0xFFFFFFFF
+if hr == CANCELLED:
+    sys.exit(0)                        # 취소 — 빈 손으로 끝낸다
+if hr:
+    sys.exit("Show 0x%08x" % hr)
+
+res = c_void_p()
+if call(dlg, GET_RESULT, [POINTER(c_void_p)], byref(res)):
+    sys.exit("GetResult")
+name = c_void_p()
+if call(res, DISPLAY_NAME, [c_ulong, POINTER(c_void_p)], SIGDN_FILESYSPATH, byref(name)):
+    sys.exit("GetDisplayName")
+sys.stdout.write(ctypes.wstring_at(name) if name else "")
+ole32.CoTaskMemFree(name)
+'''
+
+
 def pick_dir(start: str = "") -> str | None:
     """윈도우 **폴더 찾기** 창을 띄우고 고른 경로를 돌려준다. 취소하면 `None`.
 
-    ★★**자식 프로세스로 띄운다.** Tk 는 자기 루프를 돌고 메인 스레드를 요구해서, 서버 안에서
-      열면 창이 뜨는 동안 서버가 통째로 멈춘다 (그 사이 화면의 다른 요청이 전부 밀린다).
+    ★★**자식 프로세스로 띄운다.** 대화상자는 자기 메시지 루프를 돌므로, 서버 안에서 열면
+      창이 뜨는 동안 서버가 통째로 멈춘다 (그 사이 화면의 다른 요청이 전부 밀린다).
     ★★고른 경로는 **아웃풋 루트 밖일 수 있다** — 그게 이 창을 두는 이유다 (사용자 지시
       2026-08-23: 드롭다운 말고 윈도우 폴더 찾기로). 그래서 `under()` 로 가두지 않는다.
-      대신 **사용자가 직접 고른 것만** 이 길로 들어온다 — 화면이 적어 보낸 문자열은 못 쓴다.
-    ★맨 앞에 세울 자리(`start`)는 부르는 쪽이 준다 (첫 그림이 있는 폴더)."""
-    code = "\n".join([
-        "import sys, tkinter as tk",
-        "from tkinter import filedialog",
-        # ★창 자체는 숨기고 대화상자만 띄운다. `-topmost` 가 없으면 앱 창 **뒤로** 열려
-        #   사용자에게는 그냥 멈춘 것처럼 보인다
-        "r = tk.Tk(); r.withdraw(); r.attributes('-topmost', True)",
-        "p = filedialog.askdirectory(initialdir=sys.argv[1] or None)",
-        "sys.stdout.write(p or '')",
-    ])
+      대신 **사용자가 직접 고른 것만** 이 경로로 들어온다 — 화면이 적어 보낸 문자열은 못 쓴다.
+    ★맨 앞에 세울 자리(`start`)는 부르는 쪽이 준다 (첫 그림이 있는 폴더).
+    ★★**못 띄우면 조용히 `None` 을 돌려주지 않는다** (같은 제보). 취소와 구분이 안 돼서,
+      창이 아예 안 뜨는 동안에도 화면은 아무 말이 없었다 — 부르는 쪽은 `null` 을 「취소」로
+      읽는다. 실패는 예외로 올려 보내 화면이 까닭을 띄우게 한다."""
     try:
-        r = subprocess.run([sys.executable, "-c", code, start or ""],
+        r = subprocess.run([sys.executable, "-c", _PICK_DIR, start or ""],
                            capture_output=True, text=True, timeout=300)
-    except Exception:
-        return None
+    except Exception as e:
+        raise OSError(f"폴더 찾기 창을 띄우지 못했습니다 ({e})") from e
+    if r.returncode:
+        why = (r.stderr or "").strip().splitlines()[-1:] or [""]
+        raise OSError(f"폴더 찾기 창을 띄우지 못했습니다 ({why[0][:200]})")
     out = (r.stdout or "").strip()
     return out or None

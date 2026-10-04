@@ -1,6 +1,7 @@
 import { create } from "zustand";
 import { api } from "../lib/backend";
 import { localTs, type Rec } from "../lib/takes";
+import type { Dropped } from "../lib/dropImages";
 
 /** **미저장 그림** — 「자동 저장」을 껐을 때 나온 결과 (v2 `auto_save` 이식 2026-08-18).
  *
@@ -26,7 +27,7 @@ export const isPreviewFile = (file: string) => file.startsWith(PREVIEW_PREFIX);
  *  화면이 저장 시점의 상태로 다시 만들면, 그 사이 씬 이름을 고쳤을 때 번호열이 갈린다
  *  (`workspace.file_lead` 는 이름마다 따로 센다). */
 type SaveHint = {
-  /** ★**탭 이름**이다 — 저장 경로의 한 칸(`output/멀티/<탭>/<세트>/`).
+  /** ★**탭 이름**이다 — 저장 경로의 한 칸(`output/<탭>/<세트>/`).
    *  2026-08-24 개명 뒤에도 옛 이름(`char`)으로 읽고 보내고 있었다. 서버는 `tab` 으로
    *  주고 `tab` 으로 받으므로 **늘 비어 있었고**, 「파일로 저장」이 탭 폴더를 빠뜨렸다. */
   tab: string | null;
@@ -45,6 +46,11 @@ export type PreviewTake = Rec & {
    *  ★이것이 없으면 나중에 저장한 그림에서 「설정 불러오기」를 눌렀을 때 캐릭터 카드가
    *    통째로 사라지고 `#1`·`#2` 로 다시 만들어진다 (사용자 지적 2026-08-24). */
   env?: Record<string, unknown> | null;
+  /** 인퍼런스였으면 그 참조와 배치. `env` 와 같은 이유로 들고 있다가 되돌린다 (설정 불러오기가 참조를 되살린다) */
+  inference?: Record<string, unknown> | null;
+  /** 별표 — 저장된 그림은 `selection.starred` 에 경로로 적히지만 이것에는 경로가 없어 여기 든다.
+   *  「저장」하면 `saveTake` 가 새 경로로 옮겨 적는다. */
+  starred?: boolean;
 };
 
 type S = {
@@ -53,6 +59,11 @@ type S = {
   add: (m: Record<string, any>) => PreviewTake;
   /** 미리보기를 버린다 (파일이 아니라 메모리에서 없어질 뿐이다) */
   drop: (file: string) => void;
+  /** 여러 장을 버리고 **도로 넣는 함수**를 돌려준다 — `Del`·삭제 버튼의 되돌리기가 부른다
+   *  (`lib/sceneTakes.removeTakes`). 저장된 그림이 휴지통을 거쳐 `Ctrl+Z` 로 돌아오는 것과 같게 한다. */
+  discard: (files: string[]) => () => void;
+  /** 여러 장의 별표를 켜고 끄고 **도로 되돌리는 함수**를 돌려준다 (`workspace.setStars` 의 되돌리기) */
+  star: (files: string[], on: boolean) => () => void;
   /** **파일로 저장** — 보통 생성과 같은 이름 규칙을 쓴다 (`/api/save-preview`).
    *  성공하면 그 미리보기는 목록에서 빠지고, 진짜 레코드가 그 자리를 잇는다. */
   save: (file: string) => Promise<Rec>;
@@ -77,6 +88,7 @@ export const usePreviews = create<S>((set, get) => ({
       ws: String(m.workspace ?? ""),
       preview: { b64: String(m.b64 ?? ""), fmt: String(m.fmt ?? "png") },
       env: (m.env as Record<string, unknown>) ?? null,
+      inference: (m.inference as Record<string, unknown>) ?? null,
       save: {
         tab: (m.tab as string) ?? null,
         cell_no: m.cell_no == null ? null : Number(m.cell_no),
@@ -89,6 +101,24 @@ export const usePreviews = create<S>((set, get) => ({
 
   drop(file) {
     set({ items: get().items.filter((x) => x.file !== file) });
+  },
+
+  discard(files) {
+    const gone = new Set(files);
+    const taken = get().items.filter((x) => gone.has(x.file));
+    set({ items: get().items.filter((x) => !gone.has(x.file)) });
+    return () => {
+      // ★그 사이 같은 것이 돌아와 있으면 두 번 넣지 않는다
+      const have = new Set(get().items.map((x) => x.file));
+      set({ items: [...get().items, ...taken.filter((x) => !have.has(x.file))] });
+    };
+  },
+
+  star(files, on) {
+    const touched = new Set(files);
+    const before = new Map(get().items.filter((x) => touched.has(x.file)).map((x) => [x.file, !!x.starred]));
+    set({ items: get().items.map((x) => (touched.has(x.file) ? { ...x, starred: on } : x)) });
+    return () => set({ items: get().items.map((x) => (before.has(x.file) ? { ...x, starred: before.get(x.file) } : x)) });
   },
 
   async save(file) {
@@ -112,6 +142,7 @@ export const usePreviews = create<S>((set, get) => ({
         seed: it.seed,
         // ★뽑을 때의 구조를 그대로 돌려보낸다 (위 `env` 의 ★주)
         env: it.env ?? null,
+        inference: it.inference ?? null,
       }),
     });
     // ★파일이 된 **뒤에** 미리보기를 버린다. 먼저 버리면 저장이 실패했을 때 그림이 사라진다
@@ -119,6 +150,23 @@ export const usePreviews = create<S>((set, get) => ({
     return r.record;
   },
 }));
+
+/** 그 미저장 그림 (파일이면 없다) */
+export const previewOf = (file: string): PreviewTake | undefined =>
+  isPreviewFile(file) ? usePreviews.getState().items.find((x) => x.file === file) : undefined;
+
+/** 미저장 그림을 밖으로 보낼 때 붙이는 이름 — 보관함·보조도구 목록에 이 이름으로 뜬다 */
+export const previewName = (p: PreviewTake): string => `${p.cell || "image"}_${p.seed}.${p.preview.fmt}`;
+
+/** ★★보조도구(Tagger·검열·일괄 변환·이미지 편집)로 보낼 한 장 — 파일이면 경로, **미저장이면 데이터**를 싣는다
+ *  (사용자 지시 2026-09-30: 저장하지 않고 되는 기능은 다 켠다 · 저장 버튼 말고는 어디서도 저장하지 않는다).
+ *  ★받는 쪽은 밖에서 떨군 그림과 같은 갈래로 읽는다 (`Dropped.data`, 서버 `tools._read`). */
+export function droppedOf(ws: string, file: string): Dropped {
+  const pv = previewOf(file);
+  return pv
+    ? { name: previewName(pv), data: `data:image/${pv.preview.fmt};base64,${pv.preview.b64}` }
+    : { name: file.split("/").pop() ?? file, rel: `${ws}/${file}` };
+}
 
 /** 저장된 결과 + 미저장 그림을 **한 목록으로** 만든다.
  *
