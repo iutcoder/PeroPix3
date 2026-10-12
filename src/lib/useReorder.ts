@@ -60,13 +60,34 @@ export function useReorder(
   /** 포인터가 어느 틈(0..count)에 있는지 — 가로 줄이면 x 로 본다 */
   const gapAt = useCallback(
     (x: number, y: number) => {
-      const at = axis === "x" ? x : y;
+      /* ★★가로 줄이 **여러 줄로 접히면**(`flexWrap`) 먼저 포인터가 있는 **줄**을 고른다 (사용자 지적 2026-10-12:
+         탭이 두 줄 이상이면 첫 줄 안에서만 자리를 고를 수 있었다). x 만 보면 둘째 줄의 탭도 첫 줄의 같은 x 에
+         걸린다. 줄은 세로 자리(top)로 묶고, 포인터가 어느 줄의 높이 안에도 없으면 가장 가까운 줄이다. */
+      if (axis === "x") {
+        const items = rows.current
+          .map((el, i) => (el ? { i, r: el.getBoundingClientRect() } : null))
+          .filter((v): v is { i: number; r: DOMRect } => !!v);
+        if (!items.length) return 0;
+        const lines: { top: number; bottom: number; items: typeof items }[] = [];
+        for (const it of items) {
+          const line = lines.find((l) => Math.abs(l.top - it.r.top) < it.r.height / 2);
+          if (line) {
+            line.items.push(it);
+            line.bottom = Math.max(line.bottom, it.r.bottom);
+          } else lines.push({ top: it.r.top, bottom: it.r.bottom, items: [it] });
+        }
+        const dist = (l: (typeof lines)[number]) => (y < l.top ? l.top - y : y > l.bottom ? y - l.bottom : 0);
+        const line = lines.reduce((a, b) => (dist(b) < dist(a) ? b : a));
+        for (const it of line.items) if (x < it.r.left + it.r.width / 2) return it.i;
+        return line.items[line.items.length - 1].i + 1;
+      }
+      const at = y;
       let gap = 0;
       for (let i = 0; i < rows.current.length; i++) {
         const el = rows.current[i];
         if (!el) continue;
         const r = el.getBoundingClientRect();
-        const [head, size] = axis === "x" ? [r.left, r.width] : [r.top, r.height];
+        const [head, size] = [r.top, r.height];
         gap = at < head + size / 2 ? i : i + 1;
         if (at < head + size) break;
       }
