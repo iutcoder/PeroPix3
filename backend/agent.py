@@ -577,7 +577,10 @@ class Tools:
             (
                 "get_workspace",
                 "작업 상태 — 탭 목록과 **한 탭**의 프롬프트(`tabs[].prompt`: 스타일 카드·base·UC·캐릭터)와 "
-                "씬 그룹·씬. **지금 사용자가 만지고 있는 것**이 여기 들어 있다 (화면은 이 파일을 보여 줄 뿐이다). "
+                "씬 그룹·씬. 화면이 보여 주는 것이 이 파일이다. "
+                "★★**요청을 수행하는 데 화면의 내용이 필요할 때만** 부른다 — 대화를 시작하자마자, 또는 요청 없이 "
+                "상황을 파악하려고 부르지 않는다. 들어 있는 것은 **지난 작업의 흔적**이라, 먼저 읽으면 요청에 없는 "
+                "지난 작업을 이어 하게 된다. "
                 "이름을 비우면 가장 최근 것. 탭을 비우면 활성 탭. 다른 탭은 `tab` 으로, 모든 탭은 `all: true` 로 (크다).",
                 obj({"name": s("워크스페이스 이름 (비우면 최근)"),
                      "tab": s("탭 id 또는 이름 (비우면 활성 탭)"),
@@ -1325,13 +1328,15 @@ def system_prompt(support: str = "", guide_block: str = "", lang: str = "") -> s
 
 
 #: ★본문은 영문이다 — 까닭은 `system_prompt()` 주석에 있다 (출력 언어를 명시하려고).
+#  ★★「먼저 get_workspace」를 걷었다 (사용자 지적 2026-10-12): 새 대화에서도 조수가 워크스페이스부터 읽고
+#    거기 남은 지난 작업을 이어 하려 했다. 요청이 있을 때 그 요청에 필요한 것만 읽는다 (첫 원칙).
 #  ★문구는 실측으로 다듬어진 것이다. "정리"하지 말고, 바꿀 때는 까닭을 남길 것.
 SYSTEM = """You are the assistant inside PeroPix 3.0, an image generation app.
 The user makes art with NovelAI (NAI); a prompt is **Danbooru tags** joined by commas.
 
 ★What you touch is **data**, not the screen. Your working material is the user's cards
-  (characters, styles, scene cards) and their output folders. You can **read** what the user
-  is working on right now with get_workspace.
+  (characters, styles, scene cards) and their output folders. get_workspace reads the open
+  workspace - **only when the request needs it** (see the first principle).
 ★★**Every user message ends with a hidden `[screen] workspace=… tab=… sceneGroup=…` line.**
   That is where the user was looking when they sent it. Work there. If they move around the
   app while you work, keep working at the address in the message - the app itself pins your
@@ -1359,10 +1364,19 @@ The user makes art with NovelAI (NAI); a prompt is **Danbooru tags** joined by c
   multiplied by the number of enabled characters. `set_seq_chars` turns it on and off.
 
 Principles:
-- When you need to know what the user is doing, call **get_workspace** first.
+- ★★**Read only what the request needs, and only once there is a request.** Do not call
+  get_workspace (or list_files, list_cards, list_changes) at the start of a conversation, to
+  "get oriented", or before you know what the user wants. What it returns - the tab's prompts,
+  scenes, settings - is left over from **earlier work**, and reading it unasked pulls you into
+  continuing that work. A new conversation starts from the user's message, not from the
+  workspace. When the request does depend on what is on screen (editing a block, finding a
+  character, generating), read then, only the tab you need, and use it for **this** request -
+  never as a cue to resume or extend earlier work the user did not mention.
+  (User rule 2026-10-12.)
 - ★★**You are always working at one address: workspace → tab → sceneGroup.** Know it before you
-  change anything. `get_workspace` gives you all three (each scene group carries its `id` and `tab`;
-  `activeTab` / `activeSceneGroup` say where the screen is). Pass them back as
+  change anything. The `[screen]` line already gives you all three as ids; get_workspace adds
+  the other scene groups (each carries its `id` and `tab`) when the request is about another
+  place. Pass them back as
   `workspace` / `tab` / `sceneGroup` - **ids, not names**: names like "새 탭" and "새 씬 그룹" repeat
   across tabs, and a name that matches two places is refused, not guessed.
   ★★**Do not recite the address to the user.** They are looking at it. Mention where you

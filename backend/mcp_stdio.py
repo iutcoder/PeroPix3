@@ -134,7 +134,7 @@ def _system_prompt() -> str:
         return _req("/api/agent/system?lang=ko")["system"]
     except Exception as e:
         log("[peropix-mcp] 지침을 못 받았습니다:", e)
-        return "PeroPix 3.0 의 화면을 직접 만지는 도구들입니다. 고치기 전에 get_workspace 로 지금 상태를 확인하세요."
+        return "PeroPix 3.0 의 화면을 직접 만지는 도구들입니다. get_workspace 는 요청을 수행하는 데 화면의 내용이 필요할 때만 부르세요. 요청 없이 먼저 읽지 마세요."
 
 
 def handle(msg: dict) -> None:
