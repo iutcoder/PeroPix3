@@ -38,6 +38,11 @@ export type ModelCaps = {
   opus_usage_limit: boolean;
   /** Anlas 배율 — ★V5 는 같은 해상도·스텝에서 V4.5 의 1.5배다 */
   anlas_multiplier: number;
+  /** 요금 식의 **스텝 항에만** 곱하는 계수 — V5 Full Medium 이 `1/1.06521739` 다 (공홈 번들 `b0f9d00`) */
+  anlas_step_factor: number;
+  /** 보내기 직전에 덮는 설정 (공홈 `fixedSettings`) — 있으면 스텝·샘플러·UC 프리셋이 고정이고
+   *  사용자 UC·캐릭터 UC 가 나가지 않는다. 화면은 그 칸을 숨긴다. 덮는 것은 서버다 (`backend/nai.py` `build_payload`) */
+  fixed: { steps: number; sampler: string; uc_preset_id: string } | null;
   /** 고를 수 있는 퀄리티 프리셋 id — **순서가 곧 드롭다운 순서**이고 마지막은 언제나 none.
    *  ★본문(접미사)은 서버 표에만 있다 (`backend/nai.py` `QUALITY_PRESETS`) —
    *    화면은 고를 목록만 알면 되고, 프롬프트를 만드는 것은 서버 한 곳이다. */
@@ -58,6 +63,8 @@ const V45: ModelCaps = {
   cfg_delay_sigma: 58,
   opus_usage_limit: false,
   anlas_multiplier: 1,
+  anlas_step_factor: 1,
+  fixed: null,
   quality_presets: ["standard", "none"],
 };
 
@@ -77,9 +84,19 @@ const V5: ModelCaps = {
   quality_presets: ["standard", "light", "none"],
 };
 
+/** ★★V5 Full **Medium** (공홈 「Effort: Medium」, 번들 `b0f9d00` 2026-10-12 대조). V5 Full 과 같고 CFG Rescale 만 없으며
+ *  스텝 14 · `k_euler_ancestral` · UC 프리셋 heavy 로 고정된다. 사용자 UC 와 캐릭터 UC 는 나가지 않는다. */
+const V5_MEDIUM: ModelCaps = {
+  ...V5,
+  cfg_rescale: false,
+  anlas_step_factor: 1 / 1.06521739,
+  fixed: { steps: 14, sampler: "k_euler_ancestral", uc_preset_id: "heavy" },
+};
+
 /** 인페인트 모델 → 원본 (표 조회용). ★`INPAINT_MODEL` 을 뒤집어 쓰면 안 된다 — 일대일이 아니다 */
 const BASE_MODEL: Record<string, string> = {
   "nai-diffusion-5-full-inpainting": "nai-diffusion-5-full",
+  "nai-diffusion-5-full-medium-inpainting": "nai-diffusion-5-full-medium",
   "nai-diffusion-5-curated-inpainting": "nai-diffusion-5-curated",
   "nai-diffusion-4-5-full-inpainting": "nai-diffusion-4-5-full",
   "nai-diffusion-4-5-curated-inpainting": "nai-diffusion-4-5-curated",
@@ -89,6 +106,7 @@ const BASE_MODEL: Record<string, string> = {
 
 export const MODEL_CAPS: Record<string, ModelCaps> = {
   "nai-diffusion-5-full": V5,
+  "nai-diffusion-5-full-medium": V5_MEDIUM,
   "nai-diffusion-5-curated": V5,
   "nai-diffusion-4-5-full": V45,
   "nai-diffusion-4-5-curated": V45,
@@ -119,3 +137,21 @@ export const MODELS: [string, string][] = [
   ["nai-diffusion-4-5-full", "V4.5 Full"],
   ["nai-diffusion-4-5-curated", "V4.5 Curated"],
 ];
+
+/** ★★Effort 짝 — **High 모델 → Medium 모델** (공홈 `u()`·`h()`). 모델 칸에는 High 쪽이 보이고,
+ *  짝이 있는 모델일 때만 그 옆에 Effort 토글이 선다 (공홈과 같은 자리). Medium 은 목록(`MODELS`)에 없다. */
+const MEDIUM_OF: Record<string, string> = { "nai-diffusion-5-full": "nai-diffusion-5-full-medium" };
+const HIGH_OF: Record<string, string> = Object.fromEntries(Object.entries(MEDIUM_OF).map(([h, m]) => [m, h]));
+
+/** 모델 칸에 보일 값 — Medium 이면 그 High 쪽 */
+export const highModel = (model: string): string => HIGH_OF[model] ?? model;
+/** 그 모델의 Effort — 짝이 없으면 null (토글을 안 낸다) */
+export const effortOf = (model: string): "medium" | "high" | null =>
+  HIGH_OF[model] ? "medium" : MEDIUM_OF[model] ? "high" : null;
+/** Effort 를 바꾼 모델 id */
+export const withEffort = (model: string, effort: "medium" | "high"): string => {
+  const high = highModel(model);
+  return effort === "medium" ? (MEDIUM_OF[high] ?? model) : high;
+};
+/** ★목록에 없는 모델을 기본값으로 되돌리는 검사들이 쓴다 — Medium 도 아는 모델이다 */
+export const isKnownModel = (model: string): boolean => MODELS.some(([id]) => id === highModel(model));

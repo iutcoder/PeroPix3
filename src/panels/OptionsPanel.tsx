@@ -9,6 +9,7 @@ import { Help } from "../components/Tip";
 import { ImageInputPanel, INPUT_ZONE } from "./ImageInputPanel";
 import { useImageInput, type ImageInputStore } from "../store/imageInput";
 import { fitPlan, planFor } from "../lib/inference";
+import { effortOf, highModel, withEffort } from "../lib/naiModels";
 import { flashStyle, useFlash, useUi } from "../store/ui";
 import { useDrag } from "../cards/dragStore";
 
@@ -105,12 +106,42 @@ export function OptionsPanel({ only, host, refs }: {
               <Group label={t("options.model")}>
                 {/* ★옛 워크스페이스가 없어진 모델(V4.0)을 들고 있으면 목록에 없어 빈칸으로 보인다 —
                     기본값으로 되돌린다. 조용히 다른 표로 생성되는 것보다 낫다 */}
+                {/* ★Medium 은 목록에 없다 — 모델 칸에는 그 High 쪽이 보이고 Effort 는 아래 토글이 정한다 (`highModel`) */}
                 <Select
-                  value={MODELS.some(([id]) => id === p.model) ? p.model : DEFAULT_MODEL}
+                  value={MODELS.some(([id]) => id === highModel(p.model)) ? highModel(p.model) : DEFAULT_MODEL}
                   options={MODELS}
                   onChange={(v) => set("model", v)}
                 />
               </Group>
+              {/* ★★Effort (공홈 2026-10 신규) — 짝이 있는 모델(V5 Full)일 때만 모델 바로 아래에 선다 (공홈과 같은 자리).
+                  Medium 은 별도 모델 id 다 (`withEffort`). 고정되는 칸(스텝·샘플러·CFG Rescale)은 아래에서 숨는다 */}
+              {effortOf(p.model) && (
+                <Group label={t("options.effort")} help={t("options.effortHint")}>
+                  <div data-effort={effortOf(p.model)} style={{ display: "flex", border: "1px solid var(--line)", borderRadius: "var(--r-2)", overflow: "hidden", alignSelf: "flex-start" }}>
+                    {(["medium", "high"] as const).map((e, i) => {
+                      const on = effortOf(p.model) === e;
+                      return (
+                        <button
+                          key={e}
+                          data-effort-pick={e}
+                          onClick={() => !on && set("model", withEffort(p.model, e))}
+                          style={{
+                            padding: "var(--sp-1) var(--sp-4)",
+                            fontSize: "var(--text-xs)",
+                            border: "none",
+                            borderLeft: i ? "1px solid var(--line)" : "none",
+                            background: on ? "var(--accent)" : "transparent",
+                            color: on ? "var(--accent-on)" : "var(--ink-soft)",
+                            cursor: on ? "default" : "pointer",
+                          }}
+                        >
+                          {t(e === "medium" ? "options.effortMedium" : "options.effortHigh")}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </Group>
+              )}
 
               {/* ★★Variety+ 는 **모델 바로 아래**다 (사용자 지시 2026-08-26: *"모델에 따라
                   변하는 거니까 그쪽에 있어야함"*). V5 에는 이 기능 자체가 없어서
@@ -138,9 +169,12 @@ export function OptionsPanel({ only, host, refs }: {
                  결과를 바꾸지 않는 **보는 방식**이라, 큐 알림·소리와 같은 자리인
                  앱 설정의 「생성」 묶음으로 갔다 (`app/Settings`). 여기로 되돌리지 말 것 —
                  같은 값을 두 곳에서 만지게 된다. */}
+              {/* ★고정 설정 모델(Medium)은 스텝·샘플러를 서버가 덮는다 — 칸을 남기면 고른 값이 안 나가는데 화면만 그대로다 */}
+              {!cap.fixed && (
               <Group label={t("options.steps")} help={t("options.stepsHint")}>
                 <Num value={p.steps} min={1} max={NAI_MAX.steps} onChange={(v) => setUndo("steps", v, t("options.steps"))} />
               </Group>
+              )}
               <Group label={t("options.cfg")}>
                 <Num value={p.cfg} min={1} max={NAI_MAX.cfg} step={0.1} onChange={(v) => setUndo("cfg", v, t("options.cfg"))} />
               </Group>
@@ -149,9 +183,11 @@ export function OptionsPanel({ only, host, refs }: {
                   <Num value={p.cfg_rescale} min={0} max={1} step={0.02} onChange={(v) => setUndo("cfg_rescale", v, t("options.cfgRescale"))} />
                 </Group>
               )}
+              {!cap.fixed && (
               <Group label={t("options.sampler")}>
                 <Select value={p.sampler} options={SAMPLERS} onChange={(v) => set("sampler", v)} />
               </Group>
+              )}
               {/* ★★V5 는 스케줄러를 못 고른다 — 공홈 전송 구간이 **karras 로 덮어쓴다.**
                   칸을 남겨 두면 고른 값이 안 나가는데 화면만 그대로라 거짓말이 된다. */}
               {cap.noise_schedule && (

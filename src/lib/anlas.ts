@@ -111,13 +111,17 @@ export function anlasCost(i: CostInput): Cost {
   //     넣었다가 참조 하나에 25 가 되어 되돌렸다 (`anlas.test.ts` 에 판정이 있다).
   // ★★공홈 원문: `D = PE(model).opusUsageLimit && (usage?.isNegative ?? false)` 이고
   //   무료 차감이 `… && !D` 다. 퍼센트가 낮다고 미리 끄지 않는다 — **바닥났을 때만**이다.
-  const spent = !!i.opusExhausted && caps(i.model ?? "").opus_usage_limit;
-  const free = i.opus && !spent && px <= FREE_PIXELS && i.steps <= FREE_STEPS;
+  const cap = caps(i.model ?? "");
+  // ★고정 설정 모델(V5 Full Medium)은 화면의 스텝과 무관하게 **고정 스텝으로 나간다** (`ModelCaps.fixed`)
+  const steps = cap.fixed?.steps ?? i.steps;
+  const spent = !!i.opusExhausted && cap.opus_usage_limit;
+  const free = i.opus && !spent && px <= FREE_PIXELS && steps <= FREE_STEPS;
 
   // ★★모델 배율 — **V5 는 1.5배**다 (공홈 `Jg(model)===v5 && (M *= 1.5)`, 2026-08-21).
   //   식은 v4/v4.5/XL 과 같고 **곱하기 하나만** 다르다. 배율을 빼면 V5 표시가 실제의 2/3 가 된다.
-  const mult = caps(i.model ?? "").anlas_multiplier;
-  const perSample = Math.ceil(C_BASE * px + C_STEP * px * i.steps) * mult;
+  //   ★Medium 은 **스텝 항에만** `anlas_step_factor`(1/1.06521739)가 곱해진다 — ceil 안이다 (공홈 번들 `b0f9d00`).
+  const mult = cap.anlas_multiplier;
+  const perSample = Math.ceil(C_BASE * px + C_STEP * px * steps * cap.anlas_step_factor) * mult;
   // 강도 계수 — 베이스 그림이 있을 때만 걸린다. 바닥은 2 다
   const y = i.strength < 1 ? i.strength : 1;
   // ★공홈의 `I` — **언제나 계산한다.** 무료는 값을 0 으로 만드는 것이 아니라 장 수(`v`)에서

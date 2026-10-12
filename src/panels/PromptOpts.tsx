@@ -76,6 +76,8 @@ export function PromptOptsBar({ uc, target, host }: {
         <>
           {/* ★`None` 이면 퀄리티와 같이 **꺼진 얼굴**로 낸다 (사용자 지시 2026-08-23) —
               그 값일 때는 네거티브에 아무것도 안 붙는다 */}
+          {/* ★고정 설정 모델(Medium)은 UC 프리셋이 heavy 로 고정이다 — 고를 칸을 안 낸다 (`SectionBody` 가 한 줄로 알린다) */}
+          {!cap.fixed && (
           <Pick
             label={t("options.ucPreset")}
             dim={p.uc_preset === "None"}
@@ -83,6 +85,7 @@ export function PromptOptsBar({ uc, target, host }: {
             options={UC_PRESETS.map((v) => [v, v])}
             onChange={(v) => set("uc_preset", v)}
           />
+          )}
         </>
       ) : (
         <>

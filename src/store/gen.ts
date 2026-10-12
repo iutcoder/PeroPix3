@@ -82,7 +82,7 @@ export type ParamsHost = { params: GenParams; set: <K extends keyof GenParams>(k
  *  화면이 「이 모델에서 되는 것만」 보이게 하는 근거라, 여기 사본을 두지 않는다. */
 export { MODELS, caps as modelCaps, type ModelCaps } from "../lib/naiModels";
 // ★담아 둔 모델을 검사하려면 값이 **이 모듈 안**에도 있어야 한다 (re-export 만으로는 못 쓴다)
-import { MODELS as MODEL_LIST, caps as capsOf } from "../lib/naiModels";
+import { caps as capsOf, isKnownModel } from "../lib/naiModels";
 
 /** v2 의 Size 드롭다운 그대로. ✦ 는 NAI 가 기본 요금으로 처리하는 해상도 */
 /** 크기 프리셋 — ★**v2 목록 그대로**다 (`index.html` 의 `sizePreset`, 대조 2026-08-16).
@@ -196,7 +196,7 @@ function loadParams(): GenParams {
       }
     }
   } catch {}
-  if (!MODEL_LIST.some(([id]) => id === out.model)) out.model = DEFAULT_MODEL;
+  if (!isKnownModel(out.model)) out.model = DEFAULT_MODEL;
   return out;
 }
 
