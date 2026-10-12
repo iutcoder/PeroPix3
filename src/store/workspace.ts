@@ -719,6 +719,9 @@ async function runRenumber(
         selection: { ...sel, starred: (sel.starred ?? []).map((f) => moves.get(f) ?? f) },
       },
     });
+    /* ★★보던 장·고른 장도 경로로 적혀 있다 (사용자 지적 2026-10-12: 조수가 `apply` 로 씬 이름을 바꾸자
+         씬의 선택이 풀리고 휠이 멈췄다). 안 옮기면 옛 경로를 가리켜 줄에서 못 찾는다 (`renamePlace` 와 같다) */
+    useSceneFocus.getState().remap(Object.fromEntries(moves));
     queueSave(get);
   } catch {
     /* 이름만 옛것으로 남는다 — 자리 이동은 이미 됐다 */

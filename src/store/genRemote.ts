@@ -38,8 +38,10 @@ export async function queueToWorkspace(
      **절대 안 맞고 언제나 `tabs[0]`(첫 세트)으로 떨어졌다** — 세트 id 는 `tab_…`,
      탭 id 는 `ch_…` 라 겹칠 수가 없다. 조수가 「저쪽 워크스페이스에 넣어 줘」를 하면
      오류 없이 **엉뚱한 세트**에 쌓였다 (적대 검토 2026-08-24). */
+  /* ★★**id 가 먼저다** (2026-10-12 발견) — 도구 명세는 씬 그룹을 id 로 달라고 하는데 여기서 이름만 보고 있어
+       조수가 명세대로 `tab_1` 을 보내면 「'tab_1' 세트가 없습니다」로 생성이 통째로 안 됐다. 이름도 받아 준다. */
   const tab = setName
-    ? tabs.find((t) => t.name === setName)
+    ? tabs.find((t) => t.id === setName) ?? tabs.find((t) => t.name === setName)
     : (tabs.find((t) => t.id === spec!.activeSceneGroup) ?? tabs[0]);
   if (!tab) return { error: setName ? `'${setName}' 세트가 없습니다.` : "세트가 없습니다." };
 
