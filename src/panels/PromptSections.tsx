@@ -428,6 +428,8 @@ export function SectionBody({
         blocks={showUc ? uc : prompt}
         onChange={showUc ? onUc : onPrompt}
         libZone={`${id}-${showUc ? "uc" : "p"}`}
+        /* ★반대쪽 탭과 맞댄다 — Undesired Content 에 있는 태그를 Prompt 에 적으면 양쪽에 표시된다 (사용자 지시 2026-10-12) */
+        against={showUc ? prompt : uc}
       />
       {footer?.(showUc)}
     </>

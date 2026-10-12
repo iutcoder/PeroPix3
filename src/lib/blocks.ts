@@ -312,20 +312,20 @@ export function caretAfterTag(bl: Block, i: number): { at: number; text: string 
   return { at: head.length + 2, text: last ? `${head}, ` : serializeBlock(bl) };
 }
 
-/** 켜진 블록들에서 중복 태그를 찾는다 (계기판 — 고치지 않고 표시만 한다). */
-export function dupSet(blocks: Block[]): Set<string> {
+/** 켜진 블록들에서 중복 태그를 찾는다 (계기판 — 고치지 않고 표시만 한다).
+ *  ★★`against` 를 주면 **그 목록에도 있는 태그**까지 낸다 (사용자 지시 2026-10-12: 네거티브에 있는 태그를
+ *    포지티브에 적었을 때도 표시). 같은 섹션의 Prompt ↔ Undesired Content 를 서로 넘긴다 (`SectionBody`).
+ *    기준은 중복과 같다 — 켜진 블록만, 대소문자·앞뒤 공백 무시. */
+export function dupSet(blocks: Block[], against?: Block[]): Set<string> {
+  const keys = (bs: Block[]) =>
+    bs.filter((b) => b.on).flatMap((b) => b.tags.map((x) => x.t.trim().toLowerCase()).filter(Boolean));
   const seen = new Set<string>();
   const dup = new Set<string>();
-  blocks
-    .filter((b) => b.on)
-    .forEach((b) =>
-      b.tags.forEach((x) => {
-        const k = x.t.trim().toLowerCase();
-        if (!k) return;
-        if (seen.has(k)) dup.add(k);
-        else seen.add(k);
-      }),
-    );
+  for (const k of keys(blocks)) {
+    if (seen.has(k)) dup.add(k);
+    else seen.add(k);
+  }
+  if (against) for (const k of keys(against)) if (seen.has(k)) dup.add(k);
   return dup;
 }
 
