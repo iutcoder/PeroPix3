@@ -362,15 +362,23 @@ export const usePrompt = create<S>((set, get) => ({
     onEdit();
   },
 
-  compiled: () => ({
-    // ★스타일 카드를 뺐으면 **베이스도 UC 도 안 나간다** — 화면에 없는 것이 실려 나가면 안 된다
-    prompt: get().styleOn ? compileBlocks(get().base) : "",
-    uc: get().styleOn ? compileBlocks(get().baseUc) : "",
-    chars: get()
-      .chars.filter((c) => c.on)
-      .map((c) => ({ id: c.id, prompt: compileBlocks(c.prompt), uc: compileBlocks(c.uc), center: c.center })),
-  }),
+  compiled: () => compilePrompt(get()),
 }));
+
+/** 탭 프롬프트 한 벌을 보낼 문자열로 — ★규칙은 여기 하나다. 화면(`compiled`)과 보고 있지 않은 탭의 생성
+ *  (`gen.queueGroup` 을 부르는 `genRemote`)이 함께 쓴다. 두 벌이면 같은 탭인데 나가는 프롬프트가 갈린다. */
+export function compilePrompt(p: { base?: Block[]; baseUc?: Block[]; styleOn?: boolean; chars?: Char[] }) {
+  // ★스타일 카드를 뺐으면 **베이스도 UC 도 안 나간다** — 화면에 없는 것이 실려 나가면 안 된다
+  //   ★값이 없으면 켜진 것이다 (`load` 와 같은 규칙)
+  const on = p.styleOn !== false;
+  return {
+    prompt: on ? compileBlocks(p.base ?? []) : "",
+    uc: on ? compileBlocks(p.baseUc ?? []) : "",
+    chars: (p.chars ?? [])
+      .filter((c) => c.on)
+      .map((c) => ({ id: c.id, prompt: compileBlocks(c.prompt ?? []), uc: compileBlocks(c.uc ?? []), center: c.center })),
+  };
+}
 
 /** UC 에 실제 내용이 있는가 — 탭을 빨갛게 표시하는 판정 (v2.x 동작 계승) */
 export const ucHasContent = (blocks: Block[]) =>

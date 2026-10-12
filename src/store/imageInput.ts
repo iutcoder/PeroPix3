@@ -206,7 +206,11 @@ const focusingNow = (s: S) => s.baseMode === "inpaint" && s.focused && !!s.tileR
  *  ★두 벌이다: 생성 모드(`useImageInput`, 생성 옵션의 모델)와 만화 캔버스(`editor/cutGen` 의 `useComicInput`, 캔버스의 모델).
  *    만화 캔버스는 참조 그림을 캔버스마다 따로 든다 (사용자 결정 2026-09-28). 부품(`ImageInputPanel`)은 둘 다 같은 것을 쓴다.
  *  ★베이스 그림 갈래(`setFocused`·`costSize`)는 생성 모드의 해상도 칸을 본다. 만화 캔버스는 베이스 그림을 안 쓴다 (컷 인페인트가 그 자리다) */
-export function makeImageInput(modelOf: () => string) {
+export function makeImageInput(
+  modelOf: () => string,
+  /** 해상도를 읽는 자리 — 기본은 화면의 생성 옵션. 보고 있지 않은 탭의 생성은 그 탭의 옵션을 준다 (`payloadOfSnap`) */
+  paramsOf: () => { width: number; height: number } = () => useGen.getState().params,
+) {
   /** 베이스 그림 크기를 재는 중인 약속. `startEdit` 이 그 뒤에 자동 켜기를 판단한다 */
   let measuring: Promise<void> | null = null;
   /** 캐시 조회 회차. 늦게 온 답이 새 목록을 덮지 않게 한다 */
@@ -327,7 +331,7 @@ export function makeImageInput(modelOf: () => string) {
     //   화면의 해상도 칸은 **원본 크기**라(`setFocused`), 그 값으로 세면 2048² 짜리를
     //   고칠 때 80 Anlas 라고 떠 놓고 실제로는 0 이 나간다.
     const s = get();
-    const p = useGen.getState().params;
+    const p = paramsOf();
     // ★★인퍼런스는 **캔버스 전체**로 센다 (설계 문서 3번 「요금」). 해상도 칸의 값은 비율과 예산일 뿐이다
     const plan = s.inferPlan();
     if (plan) return { width: plan.canvas.w, height: plan.canvas.h };
@@ -356,7 +360,7 @@ export function makeImageInput(modelOf: () => string) {
   inferPlan() {
     const on = get().riding().infer;
     if (!on?.size) return null;
-    const p = useGen.getState().params;
+    const p = paramsOf();
     return fitPlan(on.size.w, on.size.h, p.width, p.height, presetSizes());
   },
 
@@ -531,6 +535,18 @@ export function makeImageInput(modelOf: () => string) {
 
 /** 생성 모드의 이미지 입력. 생성 옵션의 모델을 따른다 */
 export const useImageInput = makeImageInput(() => useGen.getState().params.model);
+
+/** ★담아 둔 한 벌(`snapshot`)로 **보낼 값**을 만든다 — 보고 있지 않은 탭의 생성(조수)이 쓴다.
+ *  화면과 같은 `payload` 를 거친다 (거르는 규칙·인퍼런스 배치가 한 곳이다). 한 벌이 없으면 아무것도 안 걸린 상태다.
+ *  ★`load` 를 안 부른다 — 바이브 캐시를 다시 묻는 일은 화면에 띄울 때의 것이다. */
+export function payloadOfSnap(
+  snap: ImageSnap | null,
+  params: { model: string; width: number; height: number },
+): Record<string, unknown> {
+  const tmp = makeImageInput(() => params.model, () => params);
+  if (snap) tmp.setState({ ...snap, inferAux: snap.inferAux ?? true });
+  return tmp.getState().payload();
+}
 export type ImageInputStore = typeof useImageInput;
 
 /** 바이브 한 장을 목록 끝에 **값까지 갖춘 채로** 붙인다.
