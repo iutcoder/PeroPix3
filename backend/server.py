@@ -1165,8 +1165,11 @@ class CliRun(BaseModel):
 
 @app.get("/api/cli/detect")
 async def cli_detect():
-    """PATH + 툴체인 폴더 스캔. **공짜다** — 켤 때마다 불러도 된다."""
-    return {"items": cliagent.detect(), "busy": bool(_sess and _sess.busy)}
+    """PATH + 툴체인 폴더 스캔. **공짜다** — 켤 때마다 불러도 된다.
+    ★클로드 코드는 처음 한 번 모델 목록을 저쪽에 묻는다(2~3초, 모델은 안 부른다 — `cliagent.claude_models`).
+      그 사이 다른 요청이 막히지 않게 스레드에서 돈다."""
+    items = await asyncio.to_thread(cliagent.detect)
+    return {"items": items, "busy": bool(_sess and _sess.busy)}
 
 
 @app.get("/api/cli/session/{sid}")

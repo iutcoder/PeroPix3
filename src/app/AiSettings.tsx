@@ -192,6 +192,9 @@ export function AiSettings() {
   // ★모델 목록은 **고른 CLI** 것이다 (`items` 가 실어 온다). 하나로 두면 코덱스를 골라 놓고
   //   `sonnet` 이 떠 있게 된다 — 코덱스가 못 받는 이름이다
   const cliModels = useCli((c) => c.models());
+  // ★별칭(`opus`)이 실제로 가리키는 모델 id 를 알면 그것을 보인다 (`CliItem.resolved`)
+  const resolved = useCli((c) => c.resolved());
+  const cliLabel = (m: string) => resolved[m] ?? m;
   const cliModel = useCli((c) => c.model);
   const cliEffort = useCli((c) => c.effort);
   const setCliModel = useCli((c) => c.setModel);
@@ -355,7 +358,7 @@ export function AiSettings() {
                   첫 항목을 보여 주면서 실제로 넘기는 값은 그대로라 둘이 어긋난다 */}
               {(cliModels.includes(cliModel) || !cliModel ? cliModels : [cliModel, ...cliModels]).map((m) => (
                 <option key={m} value={m}>
-                  {m}
+                  {cliLabel(m)}
                 </option>
               ))}
             </select>
