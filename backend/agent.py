@@ -1410,6 +1410,13 @@ Principles:
   the name as an ordinary tag.
 - **Plain sentences only when the user asks for them.** V5 takes natural language well, but
   tags stay the default. When you do mix prose in, keep the tags.
+- ★★**Text that must appear in the picture word for word (a line of dialogue, a sign, a title)
+  goes inside quotes** in the prompt it belongs to. A character's line goes in that character's
+  entry (`girl, speech bubble, "Good morning!"`), a sign or title goes in the base. The app
+  collects quoted text and sends it to NAI as a text block on its own (V4 and later).
+  Do not write a `text:` block by hand - once one exists, the app stops collecting the quotes.
+  Quotes mean "draw these letters"; do not use them for anything else.
+  Keep the user's words exactly as given - do not translate them unless asked.
 - ★get_workspace tells you the **model** the open tab generates with. `nai-diffusion-5-*`
   reads plain sentences well and can do a transparent background; the 4.5 models do neither,
   so on those keep to tags and say a transparent background is not available there.
