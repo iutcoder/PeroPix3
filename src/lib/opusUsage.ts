@@ -23,8 +23,13 @@ import type { OpusUsage } from "../store/sub";
 export const usagePercent = (u: OpusUsage): number => (u.isNegative ? 0 : Math.max(0, u.percent));
 
 
-/** 경고해야 하는 상태인가 — 바닥났거나 5% 미만 (공홈 `S3`) */
-export const usageLow = (u: OpusUsage): boolean => u.isNegative || u.percent < 5;
+/** ★★Extra Usage — Opus Usage Boost 로 산 몫 (%). 없으면 0 (공홈 `usagePurchasedPercent`, 2026-10-14 대조).
+ *  일반 잔량을 다 쓴 뒤에 쓰인다. ★무료 판정은 여전히 `isNegative` 하나다 — 서버가 이 몫까지 보고 정한다 */
+export const usagePurchased = (u: OpusUsage): number => Math.max(0, u.purchasedPercent ?? 0);
+
+/** 경고해야 하는 상태인가 — 바닥났거나 5% 미만, **그리고 Extra Usage 도 5% 미만** (공홈 `usageIsLow`).
+ *  ★Extra Usage 가 남아 있으면 일반 잔량이 0 이어도 계속 무료로 생성된다 — 경고하면 틀린 말이다 */
+export const usageLow = (u: OpusUsage): boolean => (u.isNegative || u.percent < 5) && usagePurchased(u) < 5;
 
 /** 시간당 회복 비율 (%/h, 소수 한 자리. 공홈 `$`) */
 export const usageRefillPerHour = (u: OpusUsage): number =>

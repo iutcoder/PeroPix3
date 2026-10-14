@@ -397,6 +397,8 @@ export const ko: Dict = {
     opusUsage: "Opus",
     opusUsageHint: "Opus 생성 잔량입니다. 다 쓰면 Anlas 를 씁니다 (V5 부터).",
     opusRefill: "시간당 {r}% 회복 · 100% 까지 {f}",
+    opusRefillPaused: "100% 이상에서는 회복이 멈춥니다.",
+    opusExtra: "Extra Usage {n}% (일반 잔량을 다 쓴 뒤에 씁니다)",
     anlasRefresh: "잔액 새로고침",
     /** 한 장 비용 상한을 넘으면 공홈처럼 생성을 막는다 */
     overLimit: "한 장 비용이 상한 {a} Anlas 를 넘습니다. 해상도나 steps 를 줄여 주세요.",

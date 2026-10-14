@@ -387,6 +387,8 @@ export const ja: Dict = {
     opusUsage: "Opus",
     opusUsageHint: "Opus の生成残量です。使い切ると Anlas を消費します（V5 以降）。",
     opusRefill: "毎時 {r}% 回復 ・ 100% まで {f}",
+    opusRefillPaused: "100% 以上では回復が止まります。",
+    opusExtra: "Extra Usage {n}%（通常の残量を使い切った後に使われます）",
     anlasRefresh: "残高を再取得",
     /** 1枚あたりの上限を超えると公式サイトと同じく生成を止める */
     overLimit: "1枚の費用が上限 {a} Anlas を超えています。解像度か steps を下げてください。",

@@ -388,6 +388,8 @@ export const en = {
     opusUsage: "Opus",
     opusUsageHint: "Opus generation allowance remaining. When it runs out, generations cost Anlas (V5+).",
     opusRefill: "Refilling {r}%/h - full in {f}",
+    opusRefillPaused: "Recovery is paused above 100%.",
+    opusExtra: "Extra Usage {n}% (used after the regular allowance runs out)",
     anlasRefresh: "Refresh balance",
     /** Over the per image cap, so generation is blocked just like the official site */
     overLimit: "One image costs more than the {a} Anlas cap. Lower the size or steps.",
