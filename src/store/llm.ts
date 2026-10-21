@@ -408,6 +408,9 @@ const NOT_RUN = { cancelled: true, reason: "사용자가 중단해서 실행하�
 const CUT = { stopped: true, reason: "사용자가 중단했습니다. 실행이 끝났는지는 모릅니다." };
 const newId = () => "chat_" + Date.now().toString(36);
 
+/** 지난 대화를 이미 되살렸나 — 앱이 켜진 동안 한 번뿐이다 (`restore` 의 ★★주) */
+let restoredOnce = false;
+
 export const useLlm = create<S>((set, get) => ({
   cfg: null,
   models: [],
@@ -506,6 +509,12 @@ export const useLlm = create<S>((set, get) => ({
   },
 
   async restore() {
+    /* ★★**앱을 켠 뒤 한 번만** 되살린다 (사용자 지적 2026-10-12: 「+」로 새 대화를 열었는데 앞 대화가 그대로 이어졌다).
+       패널은 접히면 언마운트되고 펼 때 `AiChat` 이 다시 이것을 부른다. 새 대화는 첫 말 전에는 저장되지 않아
+       비어 있으므로 아래 조건을 통과해 **지난 대화로 바뀌었다** — 그 상태로 말을 걸면 지난 대화에 이어 붙는다.
+       「껐다 켜도 이어진다」는 앱을 켤 때의 일이지 패널을 다시 펼 때의 일이 아니다.
+       ★사용자가 대화를 직접 열거나 새로 만들어도 끝난 것으로 친다 (`newChat`·`open` 이 깃발을 세운다). */
+    if (restoredOnce) return;
     // ★되살리는 동안 사용자가 먼저 움직였으면 **덮지 않는다.** 목록을 받아 오는 사이에
     //   「새 대화」를 누르거나 말을 걸면, 뒤늦게 도착한 옛 대화가 화면을 되살려 버렸다
     //   (실측 2026-08-08: 진짜 앱 테스트에서 지난 대화의 도구 줄이 통째로 되돌아왔다).
@@ -516,7 +525,10 @@ export const useLlm = create<S>((set, get) => ({
        (`lib/approve` 의 `openAi()`). 그런데 패널이 그때 처음 열리면 `AiChat` 이 마운트되며
        지난 대화를 되살리고(`open`), 그 경로가 `confirm` 을 지워 **카드가 눈앞에서 사라졌다.**
        도구는 600초를 기다리다 시간 초과로 끝나고, 사용자는 누를 것이 없다. */
-    if (get().id !== mine || get().wire.length || get().sending || get().confirm || get().ask) return;
+    /* ★카드·물음·도는 턴은 **잠깐의 상태**다 — 이때는 미루고 다음에 패널이 뜰 때 다시 본다 (깃발을 안 세운다) */
+    if (get().sending || get().confirm || get().ask) return;
+    restoredOnce = true;
+    if (get().id !== mine || get().wire.length) return;
     const last = get().list[0];
     if (last) await get().open(last.id);
   },
@@ -524,6 +536,7 @@ export const useLlm = create<S>((set, get) => ({
   async open(id) {
     // ★턴이 도는 중에는 안 연다 — 돌던 응답이 **그 대화에 붙는다**
     if (get().sending) return;
+    restoredOnce = true;   // ★사용자가 고른 대화다 — 뒤늦은 복구가 바꿔치지 않는다 (`restore` 의 ★★주)
     // ★★**가져오는 사이에 화면이 움직였으면 덮지 않는다.** 위의 검사는 **보내기 전**의
     //   상태일 뿐이라, 그 사이 사용자가 말을 걸면 늦게 도착한 옛 대화가 **진행 중인 턴을
     //   덮어 버린다** (실측 2026-08-15: 사용자 발화가 통째로 사라지고 그 자리에 사흘 전
@@ -579,6 +592,7 @@ export const useLlm = create<S>((set, get) => ({
   newChat() {
     // ★턴이 도는 중에는 안 바꾼다 — 돌던 응답이 **새 대화에 붙는다** (2026-08-08 확인)
     if (get().sending) return;
+    restoredOnce = true;   // ★사용자가 새로 연 대화다 — 지난 대화로 바꿔치지 않는다 (`restore` 의 ★★주)
     // ★CLI 세션도 함께 끊는다 — 안 그러면 새 대화인데 저쪽은 옛 맥락을 들고 있다
     // ★떠 있는 카드·물음은 남긴다 (위 `open` 의 ★★주와 같은 까닭 — 도구가 기다리고 있다)
     set({ id: newId(), title: "", wire: [], lines: [], error: "", cliSession: null,

@@ -12,7 +12,7 @@ import {
   type Thumb,
 } from "../store/prompt";
 import type { DragImage } from "../cards/dragStore";
-import { toggleCharCapped, useGen } from "../store/gen";
+import { modelCaps, toggleCharCapped, useGen } from "../store/gen";
 import { useUi } from "../store/ui";
 import { useDropZone, useDragSource, useDrag } from "../cards/dragStore";
 import { flashStyle, useFlashAt } from "../store/ui";
@@ -410,6 +410,7 @@ export function SectionBody({
   const tab = useUi((u) => u.view.tab[id] ?? "p");
   const setTab = (sec: string, v: "p" | "u") => useUi.getState().setView("tab", sec, v);
   const ucFull = ucHasContent(uc);
+  const fixedModel = useGen((g) => !!modelCaps(g.params.model).fixed);
   const showUc = tab === "u";
 
   return (
@@ -428,7 +429,16 @@ export function SectionBody({
         blocks={showUc ? uc : prompt}
         onChange={showUc ? onUc : onPrompt}
         libZone={`${id}-${showUc ? "uc" : "p"}`}
+        /* ★반대쪽 탭과 맞댄다 — Undesired Content 에 있는 태그를 Prompt 에 적으면 양쪽에 표시된다 (사용자 지시 2026-10-12) */
+        against={showUc ? prompt : uc}
       />
+      {/* ★★Medium(고정 설정 모델)에서는 Undesired Content 가 **나가지 않는다** (서버가 비운다, `backend/nai.py` `build_payload`).
+          적어 둔 것은 지우지 않고 그대로 두되, 안 나간다는 사실을 이 탭에 한 줄로 둔다 */}
+      {showUc && fixedModel && (
+        <div data-uc-unsent style={{ margin: "var(--sp-2) 0 0 10px", fontSize: "var(--text-2xs)", color: "var(--warn)" }}>
+          {t("prompt.ucUnsentMedium")}
+        </div>
+      )}
       {footer?.(showUc)}
     </>
   );

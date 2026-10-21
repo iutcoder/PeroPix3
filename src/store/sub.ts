@@ -20,6 +20,9 @@ export type OpusUsage = {
   timeUntilNextPercent: number;
   /** 다 쓰고 더 쓴 상태 — ★이러면 무료가 **꺼진다** */
   isNegative: boolean;
+  /** ★★Extra Usage — Opus Usage Boost 로 **산** 몫 (%, 최대 400. 2026-10-13 신설).
+   *  일반 잔량을 먼저 쓰고 다 쓴 뒤에 이것을 쓴다. 옛 응답에는 없다 */
+  purchasedPercent?: number;
 };
 
 export type Sub = { tier: number; anlas: number; usage?: OpusUsage | null };

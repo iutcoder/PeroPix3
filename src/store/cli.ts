@@ -17,8 +17,10 @@ export type CliItem = {
   installed: boolean;
   path: string | null;
   drivable: boolean;
-  /** 그 CLI 가 받는 모델 이름 — ★목록은 **백엔드가** 준다 (코덱스는 자기 캐시에서 읽는다) */
+  /** 그 CLI 가 받는 모델 이름 — ★목록은 **백엔드가** 준다 (클로드 코드는 저쪽에 묻고, 코덱스는 자기 캐시에서 읽는다) */
   models: string[];
+  /** 넘길 이름 → 실제 모델 id (`opus` → `claude-opus-5-5`). 화면은 이것을 보인다. 모르면 없다 */
+  resolved?: Record<string, string>;
 };
 
 const KEY = "peropix.engine";
@@ -69,6 +71,9 @@ type S = {
   model: string;
   /** 추론 강도 (언제나 넘긴다) */
   effort: string;
+  /** ★★넘길 이름 → 실제 모델 id — 화면에 별칭(`opus`)만 보여 정확한 모델을 알 수 없었다 (사용자 지적 2026-10-13).
+   *  고른 CLI 것이다 (`CliItem.resolved`). */
+  resolved: () => Record<string, string>;
   /** ★★**앱 밖 도구(파일·셸·웹) 허용** — 기본 켬 (사용자 결정 2026-09-07, 자유도 우선).
    *  끄면 예전 잠금이다: 우리 MCP 도구만 열고 나머지는 이름으로 닫는다 (`backend/cliagent.py`). */
   open: boolean;
@@ -106,6 +111,7 @@ const loadAgent = () => readStr(AGENT_KEY) || "claude-code";
 
 /** 아직 탐지 전이거나 모르는 CLI 일 때 돌려줄 빈 목록 — ★**하나를 돌려 써야 한다** (위 주석) */
 const NO_MODELS: string[] = [];
+const NO_RESOLVED: Record<string, string> = {};
 
 /** 고른 CLI 를 자리에 앉힌다 — 경로·id·모델이 **함께** 바뀌어야 한다.
  *
@@ -152,6 +158,7 @@ export const useCli = create<S>((set, get) => ({
   //   다른 것을 돌려주고, zustand v5 는 그것을 "바뀌었다"로 보아 **무한 렌더**에 빠진다
   //   (실측 2026-08-15: AI 탭을 여는 순간 화면이 통째로 사라졌다. CLAUDE.md 「잊기 쉬운 것」).
   models: () => get().items.find((x) => x.id === get().agent)?.models ?? NO_MODELS,
+  resolved: () => get().items.find((x) => x.id === get().agent)?.resolved ?? NO_RESOLVED,
 
   setEngine(e) {
     try {

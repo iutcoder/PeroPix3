@@ -540,7 +540,10 @@ function ModelChip({ onOpenSettings }: { onOpenSettings?: () => void }) {
 
   // ★"기본값"이라고만 적으면 그게 뭔지 알 수 없다 (사용자 지적 2026-08-08) —
   //   클로드 코드의 설정에서 읽어 온 실제 값을 괄호로 붙인다. 모르면 안 붙인다.
-  const name = cli ? cliModel : cfg?.model || "—";
+  // ★별칭(`opus`)이 실제로 가리키는 모델 id 를 알면 그것을 보인다 (`CliItem.resolved`)
+  const resolved = useCli((c) => c.resolved());
+  const cliLabel = (m: string) => resolved[m] ?? m;
+  const name = cli ? cliLabel(cliModel) : cfg?.model || "—";
   const eff = cli ? cliEffort : cfg?.effort;
   const picked = models.find((m) => m.id === cfg?.model);
   const efforts = cli ? CLI_EFFORTS : (picked?.efforts ?? []);
@@ -611,7 +614,7 @@ function ModelChip({ onOpenSettings }: { onOpenSettings?: () => void }) {
                     ? cliModels
                     : [cliModel, ...cliModels]
                   ).map((m) => (
-                    <option key={m} value={m}>{m}</option>
+                    <option key={m} value={m}>{cliLabel(m)}</option>
                   ))}
                 </select>
               ) : (

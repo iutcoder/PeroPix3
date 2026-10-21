@@ -1,8 +1,8 @@
 import { create } from "zustand";
 import { compileBlocks } from "../lib/blocks";
 import { backendUrl } from "../lib/backend";
-import { usePrompt } from "./prompt";
-import { allCells, allScenes, onBeforeWsSwitch, useWs } from "./workspace";
+import { compilePrompt, usePrompt } from "./prompt";
+import { allCells, allScenes, onBeforeWsSwitch, useWs, type SceneGroup } from "./workspace";
 import { useQueue } from "./queue";
 import { currentAccountId } from "./accounts";
 import { useImageInput, type ImageSnap } from "./imageInput";
@@ -82,7 +82,7 @@ export type ParamsHost = { params: GenParams; set: <K extends keyof GenParams>(k
  *  화면이 「이 모델에서 되는 것만」 보이게 하는 근거라, 여기 사본을 두지 않는다. */
 export { MODELS, caps as modelCaps, type ModelCaps } from "../lib/naiModels";
 // ★담아 둔 모델을 검사하려면 값이 **이 모듈 안**에도 있어야 한다 (re-export 만으로는 못 쓴다)
-import { MODELS as MODEL_LIST, caps as capsOf } from "../lib/naiModels";
+import { caps as capsOf, isKnownModel } from "../lib/naiModels";
 
 /** v2 의 Size 드롭다운 그대로. ✦ 는 NAI 가 기본 요금으로 처리하는 해상도 */
 /** 크기 프리셋 — ★**v2 목록 그대로**다 (`index.html` 의 `sizePreset`, 대조 2026-08-16).
@@ -196,7 +196,7 @@ function loadParams(): GenParams {
       }
     }
   } catch {}
-  if (!MODEL_LIST.some(([id]) => id === out.model)) out.model = DEFAULT_MODEL;
+  if (!isKnownModel(out.model)) out.model = DEFAULT_MODEL;
   return out;
 }
 
@@ -235,122 +235,32 @@ export const useGen = create<S>((set, get) => ({
     const ws = useWs.getState();
     const tab = ws.activeSceneGroup();
     if (!tab || tab.kind !== "sceneGroup") return;
-    // ★락은 **생성에서 뺀다** (v2 슬롯의 락). 지운 것이 아니라 이번에만 건너뛴다.
-    // ★공통 접두는 **카드마다 다르다** (2026-08-11) — 그래서 씬을 카드와 함께 편다.
-    const all = allScenes(tab);
-    const live = all.filter((x) => !x.cell.locked && !x.card.locked);
-    if (!live.length) {
-      /* ★눌렀는데 **조용히 아무 일도 안 일어나면** 고장으로 보인다 (v2 `index.html:15905`).
-         까닭이 둘이라 말도 둘이다:
-           · 씬은 있는데 **전부 잠김** — 잠금을 풀라고 한다.
-           · 씬이 **아예 없음** — 새 탭·새 워크스페이스의 기본값이 그렇다(2026-08-20).
-             예전에는 기본으로 씬 하나가 박혀 있어 이 경우가 드물었지만, 이제는 **처음 화면**
-             이라 아무 말도 없으면 생성 단추가 죽은 것으로 읽힌다. */
-      toast(t(all.length ? "gen.allLocked" : "gen.noScenes"), "warn");
-      return;
-    }
-
-    const raw = usePrompt.getState().compiled();
-    const pools = wildcardPools();
-    // ★요청 레벨은 **대표값(폴백)** 이다. 실제로 쓰이는 것은 항목마다 다시 뽑은 값이다
-    //   (v2 `index.html:16080`).
-    const { uc, chars } = resolveShot(pools, raw);
-    /** 씬 번호(1부터) — ★카드를 가로질러 **탭 안에서** 센다. 파일 이름 앞에 붙는 번호라
-     *  카드마다 1로 되돌아가면 탐색기에서 같은 번호가 여럿이 된다. */
-    const order = allCells(tab);
-    /* ★★**순차 생성 모드** (사용자 결정 2026-09-15). 켜면 켜 둔 인물을 한 장에 모으지 않고
-       **한 명씩** 뽑는다 — 규칙은 「슬롯을 하나씩만 켠 것처럼」 하나다.
-       ★인물이 **가장 바깥**이다: A 의 씬·바퀴를 다 돌고 나서 B 로 넘어간다 (사용자 설명).
-       ★시드는 인물마다 `rounds` 를 새로 태우므로 **첫 바퀴가 서로 같은 시드**다 —
-         같은 조건에서 사람만 갈아 끼워 견줄 수 있다.
-       ★인물이 없으면(캐릭터 칸이 없거나 전부 꺼짐) 켜져 있어도 평소와 같이 한 판이다. */
-    const seq = usePrompt.getState().seqChars && raw.chars.length > 0;
-    const parties = seq ? raw.chars.map((c) => [c]) : [raw.chars];
     // ★큐로 보낸다 — 한 장씩 await 하면 중간에 앱을 닫거나 새로고침하면 나머지가 사라진다.
     //   큐는 백엔드가 들고 있어 재연결로 복원된다 (store/queue.ts).
     // ★★**큐가 거절하면 생성 푸터에 남긴다** (사용자 제보 2026-09-30: *"2장 생성했는데 다 씬에 뜨지 않음"*).
     //   받아 주는 자리가 없어서 대기 칸만 잠깐 섰다 사라지고 아무 말이 없었다 (`useGen.error` → `GenerateFooter`).
     set({ error: "" });
     try {
-      await useQueue.getState().enqueue(
-        {
-          ...get().params,
-          ...useImageInput.getState().payload(),
-          workspace: ws.current,
-          // ★★**이 워크스페이스의 계정**으로 — 큐는 이 값으로 차선을 가른다 (`store/accounts`)
-          account: currentAccountId(),
-          tab: ws.activeTabOf()?.name ?? null,
-          scene_group: tab.name,
-          scene_group_id: tab.id,
-          negative_prompt: uc,
-          characters: withCoords(chars, get().params.use_coords),
-        },
-        // ★**바퀴를 여기서 편다** (2026-08-11). 예전에는 씬 목록만 보내고 장 수는 서버가
-        //   펼쳤는데(`qb.count`), 그러면 "한 바퀴에 시드 하나"를 표현할 수가 없다.
-        //   여기서 펴면 순서와 시드가 둘 다 정확해진다.
-        parties.flatMap((party) =>
-        rounds(Math.max(1, useUi.getState().perSlot), get().params, live, ({ cell: c }, seed) => {
-          // ★씬 프롬프트가 **payload 의 어디로** 들어가나 — 탭의 선택 하나가 정한다.
-          //   `base` 면 top-level prompt 에, 캐릭터 id 면 그 사람의 `characterPrompts[]` 에 붙는다.
-          //   ★고른 캐릭터가 목록에 없으면(꺼짐·삭제) base 로 떨어진다 — 조용히 사라지지 않게.
-          const scene = compileBlocks(c.blocks);
-          // ★목적지는 **셋**이다 — base · 캐릭터 한 명 · **캐릭터 전원**(`"all"`).
-          //   「전원」은 v2 의 `promptTarget === "char"` 이다 (`backend.py:2803-2833`): 그쪽은
-          //   씬 태그를 **켜진 캐릭터 전부**의 프롬프트에 이어 붙였다.
-          //   ★켜진 캐릭터가 **둘 이상일 때만** 뜻이 있다 (한 명이면 그 사람을 고르는 것과 같다) —
-          //     화면도 그때만 선택지를 낸다(`SceneLane`). 조건이 깨지면 base 로 떨어진다.
-          //   ★순차 모드에서는 그 장에 **한 명뿐**이라 「전원」이 곧 그 사람이다.
-          const dest =
-            tab.sceneDest === "all" && (party.length > 1 || seq)
-              ? "all"
-              : party.some((ch) => ch.id === tab.sceneDest)
-                ? tab.sceneDest
-                : "base";
-          const toChar = dest !== "base";
-          // ★★**이 장의 추첨**이다. 회차마다·씬마다 따로 뽑히며, 이 한 줄이 와일드카드의
-          //   존재 이유다 (`docs/v2-feature-catalog.md:477`: 한 번만 풀면 전 이미지가 굳는다).
-          //   ★푸는 것은 **이어 붙인 뒤**다. `#이름` 은 나타날 때마다 따로 뽑히므로 결과가 같고,
-          //     접두·캐릭터·씬을 따로 풀던 v2 보다 자리가 하나로 모인다.
-          const shot = resolveShot(pools, {
-            // 베이스 + 이 씬의 블록들 순서로 잇는다.
-            // ★씬도 블록이라 **켜진 블록만** 들어간다 — 프롬프트 쪽과 같은 규칙이다
-            // ★카드 공통 접두는 걷었다 (2026-08-21) — 같은 것을 붙이려면 베이스 블록을 쓴다
-            prompt: [raw.prompt, toChar ? "" : scene].filter(Boolean).join(", "),
-            uc: raw.uc,
-            chars: toChar
-              ? party.map((ch) =>
-                  (dest === "all" || ch.id === dest) && scene
-                    ? { ...ch, prompt: [ch.prompt, scene].filter(Boolean).join(", ") }
-                    : ch,
-                )
-              : party,
-          });
-          return {
-            cell: c.name,
-            cell_id: c.id,
-            // ★씬 번호(1부터) — 파일 이름 앞에 붙어 탐색기에서 순서를 만든다.
-            //   ★잠긴 씬을 뺀 뒤의 순번이 아니라 **탭에서의 자리**여야 번호가 안 흔들린다
-            cell_no: order.findIndex((x) => x.id === c.id) + 1,
-            seed,
-            prompt: shot.prompt,
-            negative_prompt: shot.uc,
-            characters: withCoords(shot.chars, get().params.use_coords),
-            // ★★**이 장을 뽑는 화면 구조를 그대로 남긴다** (사용자 지시 2026-08-19).
-            //   「새 탭으로 복제」가 이것으로 환경을 되살린다 — PNG 메타데이터에는 **합쳐진
-            //   문자열**만 남아 스타일 카드·블록 나눔·캐릭터 카드를 못 되살리기 때문이다.
-            //   ★남겨 두면 나중에 그 탭을 고치거나 지워도 **그때 환경 그대로** 복제된다.
-            //   ★여기 담는 것은 **`generateAll` 이 읽는 것 전부**여야 한다 (회귀 `cloneEnv.test.ts`).
-            //     그림 바이트는 안 담는다 — 구조뿐이라 작다.
-            env: {
-              prompt: usePrompt.getState().snapshot(),
-              sceneDest: tab.sceneDest,
-              cell: { name: c.name, blocks: c.blocks },
-            },
-          };
-        }),
-        ),
-        1,
-      );
+      const r = await queueGroup({
+        group: tab,
+        workspace: ws.current,
+        tabName: ws.activeTabOf()?.name ?? null,
+        // ★★**이 워크스페이스의 계정**으로 — 큐는 이 값으로 차선을 가른다 (`store/accounts`)
+        account: currentAccountId(),
+        params: get().params,
+        images: useImageInput.getState().payload(),
+        prompt: usePrompt.getState().snapshot(),
+      });
+      if ("empty" in r) {
+        /* ★눌렀는데 **조용히 아무 일도 안 일어나면** 고장으로 보인다 (v2 `index.html:15905`).
+           까닭이 둘이라 말도 둘이다:
+             · 씬은 있는데 **전부 잠김** — 잠금을 풀라고 한다.
+             · 씬이 **아예 없음** — 새 탭·새 워크스페이스의 기본값이 그렇다(2026-08-20).
+               예전에는 기본으로 씬 하나가 박혀 있어 이 경우가 드물었지만, 이제는 **처음 화면**
+               이라 아무 말도 없으면 생성 단추가 죽은 것으로 읽힌다. */
+        toast(t(r.empty === "locked" ? "gen.allLocked" : "gen.noScenes"), "warn");
+        return;
+      }
     } catch (e) {
       set({ error: String(e) });
       return;
@@ -358,6 +268,137 @@ export const useGen = create<S>((set, get) => ({
     if (get().params.seed_mode !== "fixed") get().set("seed", randomSeed());
   },
 }));
+
+/** 씬 그룹 하나의 생성을 큐에 넣는 데 필요한 것 전부 — ★생성 버튼이 읽는 것과 **같은 목록**이다. */
+export type GenSource = {
+  group: SceneGroup;
+  workspace: string | null;
+  /** 위 줄 탭의 이름 — 저장 경로 한 칸이 된다 (`<ws>/output/<탭>/<씬 그룹>/`) */
+  tabName: string | null;
+  account: string;
+  params: GenParams;
+  /** 이미지 입력이 보낼 값 (`useImageInput.payload` · 보고 있지 않은 탭은 `payloadOfSnap`) */
+  images: Record<string, unknown>;
+  /** 그 탭의 프롬프트 한 벌 (`usePrompt.snapshot` 과 같은 모양) */
+  prompt: Parameters<typeof compilePrompt>[0] & { seqChars?: boolean };
+};
+
+/** ★★씬 그룹 하나를 **한 바퀴** 큐에 넣는다 — 생성 버튼(`generateAll`)과 조수가 보고 있지 않은 씬 그룹에 넣는
+ *  생성(`genRemote.queueToWorkspace`)이 **이 함수 하나**를 거친다 (사용자 지시 2026-10-12: 생성 버튼과 똑같이).
+ *  예전에는 두 벌이라 조수 쪽에 이미지 입력·순차 생성·슬롯당 장수·와일드카드 장마다 추첨·씬 목적지가 빠져 있었다.
+ *  ★화면을 읽지 않는다 — 읽을 것은 전부 `src` 로 받는다. 큐가 거절하면 던진다. */
+export async function queueGroup(src: GenSource): Promise<{ queued: number } | { empty: "locked" | "none" }> {
+  const tab = src.group;
+  if (tab.kind !== "sceneGroup") return { empty: "none" };
+  const params = src.params;
+  // ★락은 **생성에서 뺀다** (v2 슬롯의 락). 지운 것이 아니라 이번에만 건너뛴다.
+  // ★공통 접두는 **카드마다 다르다** (2026-08-11) — 그래서 씬을 카드와 함께 편다.
+  const all = allScenes(tab);
+  const live = all.filter((x) => !x.cell.locked && !x.card.locked);
+  if (!live.length) return { empty: all.length ? "locked" : "none" };
+
+  const raw = compilePrompt(src.prompt);
+  const pools = wildcardPools();
+  // ★요청 레벨은 **대표값(폴백)** 이다. 실제로 쓰이는 것은 항목마다 다시 뽑은 값이다
+  //   (v2 `index.html:16080`).
+  const { uc, chars } = resolveShot(pools, raw);
+  /** 씬 번호(1부터) — ★카드를 가로질러 **탭 안에서** 센다. 파일 이름 앞에 붙는 번호라
+   *  카드마다 1로 되돌아가면 탐색기에서 같은 번호가 여럿이 된다. */
+  const order = allCells(tab);
+  /* ★★**순차 생성 모드** (사용자 결정 2026-09-15). 켜면 켜 둔 인물을 한 장에 모으지 않고
+     **한 명씩** 뽑는다 — 규칙은 「슬롯을 하나씩만 켠 것처럼」 하나다.
+     ★인물이 **가장 바깥**이다: A 의 씬·바퀴를 다 돌고 나서 B 로 넘어간다 (사용자 설명).
+     ★시드는 인물마다 `rounds` 를 새로 태우므로 **첫 바퀴가 서로 같은 시드**다 —
+       같은 조건에서 사람만 갈아 끼워 견줄 수 있다.
+     ★인물이 없으면(캐릭터 칸이 없거나 전부 꺼짐) 켜져 있어도 평소와 같이 한 판이다. */
+  const seq = !!src.prompt.seqChars && raw.chars.length > 0;
+  const parties = seq ? raw.chars.map((c) => [c]) : [raw.chars];
+  const items = parties.flatMap((party) =>
+    // ★**바퀴를 여기서 편다** (2026-08-11). 예전에는 씬 목록만 보내고 장 수는 서버가
+    //   펼쳤는데(`qb.count`), 그러면 "한 바퀴에 시드 하나"를 표현할 수가 없다.
+    //   여기서 펴면 순서와 시드가 둘 다 정확해진다.
+    rounds(Math.max(1, useUi.getState().perSlot), params, live, ({ cell: c }, seed) => {
+      // ★씬 프롬프트가 **payload 의 어디로** 들어가나 — 탭의 선택 하나가 정한다.
+      //   `base` 면 top-level prompt 에, 캐릭터 id 면 그 사람의 `characterPrompts[]` 에 붙는다.
+      //   ★고른 캐릭터가 목록에 없으면(꺼짐·삭제) base 로 떨어진다 — 조용히 사라지지 않게.
+      const scene = compileBlocks(c.blocks);
+      // ★목적지는 **셋**이다 — base · 캐릭터 한 명 · **캐릭터 전원**(`"all"`).
+      //   「전원」은 v2 의 `promptTarget === "char"` 이다 (`backend.py:2803-2833`): 그쪽은
+      //   씬 태그를 **켜진 캐릭터 전부**의 프롬프트에 이어 붙였다.
+      //   ★켜진 캐릭터가 **둘 이상일 때만** 뜻이 있다 (한 명이면 그 사람을 고르는 것과 같다) —
+      //     화면도 그때만 선택지를 낸다(`SceneLane`). 조건이 깨지면 base 로 떨어진다.
+      //   ★순차 모드에서는 그 장에 **한 명뿐**이라 「전원」이 곧 그 사람이다.
+      const dest =
+        tab.sceneDest === "all" && (party.length > 1 || seq)
+          ? "all"
+          : party.some((ch) => ch.id === tab.sceneDest)
+            ? tab.sceneDest
+            : "base";
+      const toChar = dest !== "base";
+      // ★★**이 장의 추첨**이다. 회차마다·씬마다 따로 뽑히며, 이 한 줄이 와일드카드의
+      //   존재 이유다 (`docs/v2-feature-catalog.md:477`: 한 번만 풀면 전 이미지가 굳는다).
+      //   ★푸는 것은 **이어 붙인 뒤**다. `#이름` 은 나타날 때마다 따로 뽑히므로 결과가 같고,
+      //     접두·캐릭터·씬을 따로 풀던 v2 보다 자리가 하나로 모인다.
+      const shot = resolveShot(pools, {
+        // 베이스 + 이 씬의 블록들 순서로 잇는다.
+        // ★씬도 블록이라 **켜진 블록만** 들어간다 — 프롬프트 쪽과 같은 규칙이다
+        // ★카드 공통 접두는 걷었다 (2026-08-21) — 같은 것을 붙이려면 베이스 블록을 쓴다
+        prompt: [raw.prompt, toChar ? "" : scene].filter(Boolean).join(", "),
+        uc: raw.uc,
+        chars: toChar
+          ? party.map((ch) =>
+              (dest === "all" || ch.id === dest) && scene
+                ? { ...ch, prompt: [ch.prompt, scene].filter(Boolean).join(", ") }
+                : ch,
+            )
+          : party,
+      });
+      return {
+        cell: c.name,
+        cell_id: c.id,
+        // ★씬 번호(1부터) — 파일 이름 앞에 붙어 탐색기에서 순서를 만든다.
+        //   ★잠긴 씬을 뺀 뒤의 순번이 아니라 **탭에서의 자리**여야 번호가 안 흔들린다
+        cell_no: order.findIndex((x) => x.id === c.id) + 1,
+        seed,
+        prompt: shot.prompt,
+        negative_prompt: shot.uc,
+        characters: withCoords(shot.chars, params.use_coords),
+        // ★★**이 장을 뽑는 화면 구조를 그대로 남긴다** (사용자 지시 2026-08-19).
+        //   「새 탭으로 복제」가 이것으로 환경을 되살린다 — PNG 메타데이터에는 **합쳐진
+        //   문자열**만 남아 스타일 카드·블록 나눔·캐릭터 카드를 못 되살리기 때문이다.
+        //   ★남겨 두면 나중에 그 탭을 고치거나 지워도 **그때 환경 그대로** 복제된다.
+        //   ★여기 담는 것은 **`queueGroup` 이 읽는 것 전부**여야 한다 (회귀 `cloneEnv.test.ts`).
+        //     그림 바이트는 안 담는다 — 구조뿐이라 작다.
+        env: {
+          prompt: src.prompt,
+          sceneDest: tab.sceneDest,
+          cell: { name: c.name, blocks: c.blocks },
+        },
+      };
+    }),
+  );
+  await useQueue.getState().enqueue(
+    {
+      ...params,
+      ...src.images,
+      workspace: src.workspace,
+      account: src.account,
+      tab: src.tabName,
+      scene_group: tab.name,
+      scene_group_id: tab.id,
+      negative_prompt: uc,
+      characters: withCoords(chars, params.use_coords),
+    },
+    items,
+    1,
+  );
+  return { queued: items.length };
+}
+
+/** 위 줄 탭에 담아 둔 이미지 입력 — 보고 있지 않은 탭의 생성이 쓴다 (`tabImages` 의 ★★주) */
+export const tabImageSnap = (tabId: string): ImageSnap | null => tabImages.get(tabId) ?? null;
+/** 담아 둔 생성 옵션이 없는 탭의 출발값 (`watchTabParams` 와 같은 규칙) */
+export const defaultParams = (): GenParams => ({ ...DEFAULT_PARAMS });
 
 /* ── 캐릭터 **활성화 수** 상한 ─────────────────────────────────────────────
  *

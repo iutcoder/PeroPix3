@@ -490,7 +490,12 @@ async function legacyAction(action: string, args: Record<string, any>): Promise<
          `sceneGroup` 을 보내면 **조용히 버려지고** 활성 씬 그룹에 생성됐다 (2026-09-07 발견, 같은 사고의
          재발). 옛 이름 둘도 받아 준다: 입력은 너그럽게, 내보내는 이름은 하나로. */
       const wantSet = String(args.sceneGroup ?? args.set ?? args.tab ?? "").trim();
-      if ((target && target !== ws.current) || wantSet) {
+      /* ★★**지금 보고 있는 씬 그룹을 지목하면 화면 경로로 간다** (2026-10-12). 도구 명세대로 id 를 주면
+           다른 경로(`genRemote`)가 받는데, 그쪽은 저장된 spec 으로만 짜서 이미지 입력·순차 생성·슬롯당 장수가 빠진다.
+           생성 버튼을 누른 것과 같아야 한다. */
+      const shown = ws.activeSceneGroup();
+      const isShown = !!wantSet && !!shown && (shown.id === wantSet || shown.name === wantSet);
+      if ((target && target !== ws.current) || (wantSet && !isShown)) {
         const { queueToWorkspace } = await import("./genRemote");
         return (await queueToWorkspace(target || ws.current, count, wantSet || undefined)) as Record<
           string,

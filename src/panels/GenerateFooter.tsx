@@ -15,7 +15,7 @@ import { toast } from "../store/toast";
 import { MAX_PER_IMAGE } from "../lib/anlas";
 import { costNow, countNow } from "../lib/costNow";
 import { usePrompt } from "../store/prompt";
-import { usageDuration, usageFullInSeconds, usageLow, usagePercent, usageRefillPerHour } from "../lib/opusUsage";
+import { usageDuration, usageFullInSeconds, usageLow, usagePercent, usagePurchased, usageRefillPerHour } from "../lib/opusUsage";
 import { useCurrentSub, useSub } from "../store/sub";
 import { currentAccountId, useAccounts, useCurrentAccount } from "../store/accounts";
 import { useAnlasMeter } from "../store/anlasMeter";
@@ -578,15 +578,19 @@ export function GenerateFooter({ compact = false }: { compact?: boolean }) {
         {usage && (
           <span
             data-opus-usage={Math.round(usagePercent(usage))}
-            /* ★가득(또는 그 이상)이면 **회복 줄을 안 적는다** — 채울 것이 없다 */
-            data-tip={
+            data-opus-extra={usagePurchased(usage) || undefined}
+            /* ★가득(또는 그 이상)이면 회복 대신 **회복이 멈춘다**는 줄 (공홈 `opusUsageRefillPaused`).
+               ★Extra Usage 가 있으면 그 줄을 함께 적는다 (공홈 `opusUsageRemainingPurchased`) */
+            data-tip={[
+              t("gen.opusUsageHint"),
+              usagePurchased(usage) > 0 ? t("gen.opusExtra", { n: String(Math.round(usagePurchased(usage))) }) : "",
               usageFullInSeconds(usage) > 0
-                ? `${t("gen.opusUsageHint")}\n${t("gen.opusRefill", {
+                ? t("gen.opusRefill", {
                     r: String(usageRefillPerHour(usage)),
                     f: usageDuration(usageFullInSeconds(usage)),
-                  })}`
-                : t("gen.opusUsageHint")
-            }
+                  })
+                : t("gen.opusRefillPaused"),
+            ].filter(Boolean).join("\n")}
             style={{ color: "var(--ink-faint)", fontVariantNumeric: "tabular-nums", whiteSpace: "nowrap" }}
           >
             {/* ★숫자는 Anlas 잔액과 **같은 꼴**로 — 변하는 값이라는 뜻 (사용자 지시 2026-08-30).
@@ -595,6 +599,12 @@ export function GenerateFooter({ compact = false }: { compact?: boolean }) {
             <b style={{ fontFamily: "var(--font-mono)", color: usageLow(usage) ? "var(--warn)" : "var(--ink-soft)" }}>
               {Math.round(usagePercent(usage))}%
             </b>
+            {/* ★산 몫(Extra Usage)은 있을 때만 뒤에 붙인다 — 일반 잔량과 따로 쓰이는 몫이다 */}
+            {usagePurchased(usage) > 0 && (
+              <b style={{ fontFamily: "var(--font-mono)", color: "var(--ink-soft)", marginLeft: 3 }}>
+                +{Math.round(usagePurchased(usage))}%
+              </b>
+            )}
           </span>
         )}
         <span data-anlas-balance data-tip={sub ? `tier ${sub.tier}` : undefined}>

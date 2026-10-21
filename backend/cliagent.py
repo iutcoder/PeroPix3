@@ -122,8 +122,56 @@ def real_exe(path: str, name: str) -> str:
     return _REAL[path]
 
 
-#: 클로드 코드의 모델 별칭 — 도움말이 예로 든 둘 (실측 2026-08-08)
-CLAUDE_MODELS = ["opus", "sonnet"]
+#: 클로드 코드에 목록을 못 물었을 때 쓰는 별칭 — 도움말이 예로 든 둘 (실측 2026-08-08)
+CLAUDE_FALLBACK = ["opus", "sonnet"]
+
+#: 실행 파일마다 한 번만 묻는다. 목록은 이 프로세스가 도는 동안 바뀌지 않는다
+_CLAUDE_MODELS: dict[str, tuple[list[str], dict[str, str]]] = {}
+
+
+def claude_models(exe: str | None) -> tuple[list[str], dict[str, str]]:
+    """클로드 코드가 **스스로 알려 주는** 모델 목록과, 별칭이 실제로 가리키는 모델 id.
+
+    ★★목록을 우리가 적어 두지 않는다 (사용자 결정 2026-10-14, 페로데스크와 같은 방식).
+      적어 둔 목록은 모델이 늘고 이름이 바뀔 때마다 조용히 낡고, 화면에는 `opus` 같은 별칭만
+      보여 정확한 모델을 알 수 없었다.
+    ★묻는 법: 흐름 입력으로 띄워 **초기화 요청(`initialize`) 한 줄만** 보낸다. 응답의 `models` 에
+      `value`(넘길 이름) · `resolvedModel`(실제 id) 이 있다. 프롬프트를 안 보내므로 모델을 부르지
+      않는다 (실측 2026-10-14: 1.5~2.5초, 13개).
+    ★`default` 는 뺀다 — 사용자가 **자기 쓰려고** 맞춰 둔 전역 설정이라 조수 일과 상관이 없다
+      (`src/store/cli.ts` 의 `CLI_EFFORT_DEFAULT` 주석, 사용자 결정 2026-08-08).
+    ★못 물으면(옛 판·로그인 전·시간 초과) 별칭 둘로 물러난다. 실제 id 는 비어 있다."""
+    if not exe:
+        return CLAUDE_FALLBACK, {}
+    if exe in _CLAUDE_MODELS:
+        return _CLAUDE_MODELS[exe]
+    import subprocess
+
+    ask = json.dumps({"type": "control_request", "request_id": "models",
+                      "request": {"subtype": "initialize"}})
+    try:
+        r = subprocess.run(
+            [exe, "-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose"],
+            input=ask + "\n", capture_output=True, text=True, encoding="utf-8", timeout=30,
+        )
+        rows: list[dict] = []
+        for line in r.stdout.splitlines():
+            try:
+                ev = json.loads(line)
+            except ValueError:
+                continue
+            if ev.get("type") == "control_response":
+                rows = ((ev.get("response") or {}).get("response") or {}).get("models") or []
+                break
+        names = [str(m["value"]) for m in rows if m.get("value") and m.get("value") != "default"]
+        if not names:
+            return CLAUDE_FALLBACK, {}
+        resolved = {str(m["value"]): str(m["resolvedModel"]) for m in rows
+                    if m.get("value") in names and m.get("resolvedModel")}
+        _CLAUDE_MODELS[exe] = (names, resolved)
+        return _CLAUDE_MODELS[exe]
+    except Exception:
+        return CLAUDE_FALLBACK, {}
 
 
 def codex_home() -> Path:
@@ -149,6 +197,11 @@ def detect() -> list[dict]:
     out = []
     for c in KNOWN:
         path = find(c["bins"])
+        if c["id"] == "claude-code":
+            names, resolved = claude_models(path)
+        else:
+            # ★코덱스는 목록 자체가 실제 id 다 (`gpt-5.6-terra`)
+            names, resolved = (codex_models() if c["id"] == "codex" else []), {}
         out.append(
             {
                 "id": c["id"],
@@ -159,9 +212,9 @@ def detect() -> list[dict]:
                 "drivable": c["id"] in DRIVABLE,
                 # ★모델 목록은 **CLI 마다 다르다.** 하나로 두면 코덱스를 골라 놓고
                 #   `sonnet` 이 떠 있게 된다 (고를 수 있는 값이 아니다)
-                "models": CLAUDE_MODELS if c["id"] == "claude-code" else (
-                    codex_models() if c["id"] == "codex" else []
-                ),
+                "models": names,
+                # ★넘길 이름 → 실제 모델 id (`opus` → `claude-opus-5-5`). 화면은 이것을 보인다
+                "resolved": resolved,
             }
         )
     return out

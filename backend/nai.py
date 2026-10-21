@@ -17,6 +17,7 @@ import math
 import random
 import re
 import zipfile
+import dataclasses
 from dataclasses import dataclass, field
 
 import httpx
@@ -87,6 +88,8 @@ QUALITY_PRESETS: dict[str, list[tuple[str, str]]] = {
     ],
 }
 QUALITY_PRESETS["nai-diffusion-5-curated"] = QUALITY_PRESETS["nai-diffusion-5-full"]
+#: ★V5 Full Medium(Effort: Medium, 2026-10 공홈 신규)도 V5 와 한 case 다 (번들 `b0f9d00`)
+QUALITY_PRESETS["nai-diffusion-5-full-medium"] = QUALITY_PRESETS["nai-diffusion-5-full"]
 QUALITY_PRESETS["custom"] = QUALITY_PRESETS["nai-diffusion-5-full"]
 
 #: 모델 → **standard 접미사**. 옛 이름을 남긴다 (읽는 쪽이 여럿이다).
@@ -149,6 +152,7 @@ UC_PRESETS["nai-diffusion-4-curated-preview"] = [
 ]
 #: ★V5 Curated 는 Full 과 **같은 목록**이다 (공홈이 한 case 로 묶어 둔다). custom 도 같다.
 UC_PRESETS["nai-diffusion-5-curated"] = UC_PRESETS["nai-diffusion-5-full"]
+UC_PRESETS["nai-diffusion-5-full-medium"] = UC_PRESETS["nai-diffusion-5-full"]
 UC_PRESETS["custom"] = UC_PRESETS["nai-diffusion-5-full"]
 
 #: `tag_hint_qt` · `tag_hint_uc_preset` 이 쓰는 **전역 번호표** (공홈 `Nb()`).
@@ -195,6 +199,7 @@ UC_CATEGORY_FALLBACK = {
 #:  (`nai-diffusion-4-curated-preview` 는 **-preview 가 탈락**한다).
 INPAINT_MODEL = {
     "nai-diffusion-5-full": "nai-diffusion-5-full-inpainting",
+    "nai-diffusion-5-full-medium": "nai-diffusion-5-full-medium-inpainting",
     # ★★V5 Curated 는 **V4.5 Curated 인페인트로 떨어진다** — 공홈과 같고, **이게 맞다.**
     #   ★결함이 아니다: `nai-diffusion-5-curated-inpainting` 은 **API 에 없는 모델**이다.
     #     실측 2026-08-21 — 그 id 로 쏘면 `400 Validation error: model
@@ -264,8 +269,23 @@ _V5 = {
     "opus_usage_limit": True,
     "anlas_multiplier": 1.5,  # ★★같은 해상도·스텝에서 V4.5 의 1.5배
 }
+for _c in (_V45, _V5):
+    _c.setdefault("anlas_step_factor", 1.0)
+    _c.setdefault("fixed", None)
+#: ★★V5 Full **Medium** (공홈 「Effort: Medium」, 번들 `b0f9d00` 2026-10-12 대조).
+#:   V5 Full 과 같고 CFG Rescale 만 없다. 그리고 **설정 몇 개가 고정**이다 (`fixedSettings`):
+#:   공홈은 보내기 직전에 스텝·샘플러·UC 프리셋을 덮고, **사용자 UC 와 캐릭터 UC 를 비운다**
+#:   (`uc: s3(model, "heavy", prompt, "")` · `characterPrompts[].uc = ""`). `build_payload` 가 같은 일을 한다.
+#:   요금은 V5 식의 스텝 항에만 `1/1.06521739` 가 곱해진다 (`anlas_step_factor`).
+_V5_MEDIUM = {
+    **_V5,
+    "cfg_rescale": False,
+    "anlas_step_factor": 1 / 1.06521739,
+    "fixed": {"steps": 14, "sampler": "k_euler_ancestral", "uc_preset_id": "heavy"},
+}
 MODEL_CAPS: dict[str, dict] = {
     "nai-diffusion-5-full": _V5,
+    "nai-diffusion-5-full-medium": _V5_MEDIUM,
     "nai-diffusion-5-curated": _V5,
     "nai-diffusion-4-5-full": _V45,
     "nai-diffusion-4-5-curated": _V45,
@@ -321,6 +341,7 @@ ENHANCE_PROMPT_ADD = ", -2::upscaled, blurry::,"
 #:  뒤집으면 V4.5 Curated 인페인트가 V5 표로 조회돼 프리셋이 통째로 바뀐다.
 BASE_MODEL = {
     "nai-diffusion-5-full-inpainting": "nai-diffusion-5-full",
+    "nai-diffusion-5-full-medium-inpainting": "nai-diffusion-5-full-medium",
     "nai-diffusion-5-curated-inpainting": "nai-diffusion-5-curated",
     "nai-diffusion-4-5-full-inpainting": "nai-diffusion-4-5-full",
     "nai-diffusion-4-5-curated-inpainting": "nai-diffusion-4-5-curated",
@@ -549,6 +570,20 @@ class GenRequest:
 def build_payload(req: GenRequest) -> dict:
     """NAI 요청 페이로드를 조립한다. 실제 생성 여부와 무관하게 단위 검증이 가능하도록 분리."""
     cap = caps(req.model)
+    # ★★고정 설정 모델(V5 Full Medium)은 **공홈처럼 보내기 직전에 덮는다** (`_V5_MEDIUM` 의 ★★주).
+    #   사용자가 적은 UC·캐릭터 UC 는 나가지 않고 프리셋 본문만 나간다. 받은 요청은 고치지 않는다(사본).
+    fixed = cap.get("fixed")
+    if fixed:
+        req = dataclasses.replace(
+            req,
+            steps=fixed["steps"],
+            sampler=fixed["sampler"],
+            uc_preset=uc_preset_name(req.model, fixed["uc_preset_id"]),
+            negative_prompt="",
+            characters=[dataclasses.replace(c, uc="") for c in req.characters],
+        )
+    if not cap["cfg_rescale"]:
+        req = dataclasses.replace(req, cfg_rescale=0.0)
     # ★그 모델에 없는 프리셋이면 내려준다 (`quality_preset_id` 주석)
     quality_pid = quality_preset_id(req.model, req.quality_preset)
     # ★★`"diffusion-4" in model` 이었다 — V5 가 그 검사를 통과하지 못한다 (`uses_v4_prompt` 주석)

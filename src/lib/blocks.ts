@@ -91,10 +91,20 @@ const sameTags = (a: Tag[], b: Tag[]) =>
 export const untouched = (bl: Block): boolean =>
   bl.src != null && sameTags(parseSegs(bl.src), bl.tags);
 
+/** ★★가중치 숫자 앞의 **하이픈 닮은 글자**를 `-` 로 (사용자 지적 2026-10-13: 갤러리에서 복제하니
+ *  `‑1::artist collaboration::` 의 `‑1` 이 따로 칩이 됐다). 붙여 온 프롬프트에 U+2011(안 깨지는 붙임표)·
+ *  빼기 기호(U+2212) 같은 것이 섞여 오면 파서가 숫자를 가중치로 못 읽고, 손대지 않은 블록은 그 글자를
+ *  그대로 NAI 로 보냈다 (공홈도 `-?\d*\.?\d*::` 의 ASCII `-` 만 읽는다).
+ *  ★한 글자를 한 글자로 바꾼다 — 자리(`parseSpans` 의 start·end)가 그대로 맞는다.
+ *  ★가중치 자리(낱말 앞 + 숫자 + `::`)만 바꾼다. 태그 안의 붙임표(`close‑up`)는 건드리지 않는다. */
+const weightDash = (str: string): string =>
+  str.replace(/(^|[,\s])[\u2010-\u2013\u2212\uFE63\uFF0D](?=\d+(?:\.\d+)?::)/g, "$1-");
+
 /** 글이 끝나는 시점의 세기 — 1(=null)이 아니면 뒤에 오는 블록으로 **번진다**.
  *  ★`::` 는 짝이 아니라 갈아 끼우는 값이라, 안 되돌린 채 끝나면 다음 블록의 태그까지
  *    그 세기에 걸린다 (`compileBlocks` 가 쉼표로 이어 붙인다). */
 const endWeight = (str: string): number | null => {
+  str = weightDash(str);
   const re = /(^|[,\s])(-?\d+(?:\.\d+)?)::|::/g;
   let w: number | null = null;
   let m: RegExpExecArray | null;
@@ -113,7 +123,7 @@ export function compileBlock(bl: Block): string {
   if (!tags.length) return "";
 
   if (untouched(bl)) {
-    const raw = bl.src!.trim();
+    const raw = weightDash(bl.src!.trim());
     // ★세기를 안 되돌린 채 끝나면 `::` 하나로 막는다 — 그 한 글자 말고는 원문 그대로다
     return endWeight(raw) != null ? `${raw}${/[-.\d]$/.test(raw) ? " ::" : "::"}` : raw;
   }
@@ -225,6 +235,7 @@ export function parseSegs(str: string): Tag[] {
 /** 태그마다 **원문에서의 자리**까지 낸다 — 칩을 눌러 글 상자를 열 때 커서를 놓는 데 쓴다
  *  (`caretAfterTag`). 규칙은 `parseSegs` 와 같은 것 하나다. */
 export function parseSpans(str: string): (Tag & { start: number; end: number })[] {
+  str = weightDash(str);
   const out: (Tag & { start: number; end: number })[] = [];
   /** 여는 자리(`낱말경계 + 숫자 + ::`) 또는 되돌리는 자리(맨 `::`) */
   const re = /(^|[,\s])(-?\d+(?:\.\d+)?)::|::/g;
@@ -312,20 +323,20 @@ export function caretAfterTag(bl: Block, i: number): { at: number; text: string 
   return { at: head.length + 2, text: last ? `${head}, ` : serializeBlock(bl) };
 }
 
-/** 켜진 블록들에서 중복 태그를 찾는다 (계기판 — 고치지 않고 표시만 한다). */
-export function dupSet(blocks: Block[]): Set<string> {
+/** 켜진 블록들에서 중복 태그를 찾는다 (계기판 — 고치지 않고 표시만 한다).
+ *  ★★`against` 를 주면 **그 목록에도 있는 태그**까지 낸다 (사용자 지시 2026-10-12: 네거티브에 있는 태그를
+ *    포지티브에 적었을 때도 표시). 같은 섹션의 Prompt ↔ Undesired Content 를 서로 넘긴다 (`SectionBody`).
+ *    기준은 중복과 같다 — 켜진 블록만, 대소문자·앞뒤 공백 무시. */
+export function dupSet(blocks: Block[], against?: Block[]): Set<string> {
+  const keys = (bs: Block[]) =>
+    bs.filter((b) => b.on).flatMap((b) => b.tags.map((x) => x.t.trim().toLowerCase()).filter(Boolean));
   const seen = new Set<string>();
   const dup = new Set<string>();
-  blocks
-    .filter((b) => b.on)
-    .forEach((b) =>
-      b.tags.forEach((x) => {
-        const k = x.t.trim().toLowerCase();
-        if (!k) return;
-        if (seen.has(k)) dup.add(k);
-        else seen.add(k);
-      }),
-    );
+  for (const k of keys(blocks)) {
+    if (seen.has(k)) dup.add(k);
+    else seen.add(k);
+  }
+  if (against) for (const k of keys(against)) if (seen.has(k)) dup.add(k);
   return dup;
 }
 

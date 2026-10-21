@@ -7,7 +7,7 @@ import type { Block } from "../lib/blocks";
 import type { Thumb } from "../store/prompt";
 import type { GenParams } from "../store/gen";
 import { STYLE_OPT_KEYS } from "../lib/styleOpts.ts";
-import { MODELS } from "../lib/naiModels.ts";
+import { isKnownModel } from "../lib/naiModels.ts";
 
 /** ★★만화 캔버스를 사용자에게 여나 (데스크 지침 「닫아 둔 기능」). 닫힌 동안 새 캔버스 창에 「만화 페이지」가 없고,
  *  조수 도구 목록에 만화 액션(`gate: "comic"`)이 안 실린다 — `scripts/gen-actions.mjs` 가 **이 줄을 읽는다**.
@@ -63,7 +63,7 @@ export function comicGenOf(raw: unknown, from: GenParams): ComicGen {
   const src = raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
   const out: Record<string, unknown> = {};
   for (const k of COMIC_GEN_KEYS) out[k] = typeof src[k] === typeof from[k] ? src[k] : from[k];
-  if (!MODELS.some(([id]) => id === out.model)) out.model = from.model;
+  if (!isKnownModel(out.model as string)) out.model = from.model;
   return out as ComicGen;
 }
 

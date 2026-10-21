@@ -52,6 +52,7 @@ export function BlockList({
   noToggle,
   tagOf,
   addAs,
+  against,
 }: {
   blocks: Block[];
   /** 블록마다 켜고끄기가 **뜻이 없는 자리** — 만화 캔버스의 배경 (켜는 것은 컷이 고른다, `BlockRow` 의 같은 이름) */
@@ -88,6 +89,8 @@ export function BlockList({
   onNext?: () => void;
   /** Tab — 옆 칸으로 */
   onTab?: (dir: 1 | -1) => void;
+  /** 맞댈 목록 — 여기에도 있는 태그를 중복처럼 표시한다 (같은 섹션의 반대쪽 탭, `dupSet` 의 ★★주) */
+  against?: Block[];
 }) {
   const t = useI18n((s) => s.t);
   const startDrag = useDragSource();
@@ -160,7 +163,7 @@ export function BlockList({
   const crossOver = useMemo(() => (crossPos && !single ? crossGap(crossPos.x, crossPos.y) : null), [crossPos, single]);
   /** 지금 끌리는 블록이 **이 목록에서** 나왔나 — 제 자리는 받을 자리로 안 빛난다 */
   const fromMe = useDrag((s) => s.drag?.srcZone === libZone);
-  const dup = dupSet(blocks);
+  const dup = dupSet(blocks, against);
   /** 갓 만들어진 블록 — 뜨자마자 편집 상태가 된다 */
   const [editId, setEditId] = useState<string | null>(null);
   /** Enter 로 딸려 만들어진 블록들. 비운 채 Esc 로 나가면 도로 거둔다 */
