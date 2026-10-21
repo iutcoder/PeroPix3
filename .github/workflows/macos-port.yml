@@ -102,3 +102,28 @@ jobs:
           assert server.INNER_DIR == Path('${{ github.workspace }}').resolve()
           print('macOS backend imports OK')
           PY
+
+      - name: Package signed macOS archives
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP=src-tauri/target/release/bundle/macos/PeroPix.app
+          VERSION=$(node -p "require('./version.json').version")
+          mkdir -p release-assets
+          codesign --verify --deep --strict "$APP"
+          ditto -c -k --sequesterRsrc --keepParent "$APP" "release-assets/PeroPix-$VERSION-arm64.zip"
+          STAGE=$(mktemp -d)
+          ditto "$APP" "$STAGE/PeroPix.app"
+          ln -s /Applications "$STAGE/Applications"
+          hdiutil create -volname "PeroPix $VERSION" -srcfolder "$STAGE" -format UDZO "release-assets/PeroPix-$VERSION-arm64.dmg"
+          hdiutil verify "release-assets/PeroPix-$VERSION-arm64.dmg"
+          src-tauri/python/bin/python3 -m pip freeze > "release-assets/PeroPix-$VERSION-python-packages.txt"
+          cd release-assets
+          shasum -a 256 *.zip *.dmg *python-packages.txt > SHA256SUMS.txt
+
+      - name: Upload macOS release candidates
+        uses: actions/upload-artifact@v4
+        with:
+          name: peropix-macos-arm64
+          path: release-assets/
+          if-no-files-found: error
