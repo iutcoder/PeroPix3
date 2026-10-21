@@ -111,9 +111,14 @@ jobs:
           VERSION=$(node -p "require('./version.json').version")
           mkdir -p release-assets
           codesign --verify --deep --strict "$APP"
-          ditto -c -k --sequesterRsrc --keepParent "$APP" "release-assets/PeroPix-$VERSION-arm64.zip"
+          ditto --norsrc --noextattr --noqtn -c -k --keepParent "$APP" "release-assets/PeroPix-$VERSION-arm64.zip"
+          CHECK=$(mktemp -d)
+          ditto -x -k "release-assets/PeroPix-$VERSION-arm64.zip" "$CHECK"
+          codesign --verify --deep --strict "$CHECK/PeroPix.app"
           STAGE=$(mktemp -d)
           ditto "$APP" "$STAGE/PeroPix.app"
+          xattr -cr "$STAGE/PeroPix.app"
+          codesign --verify --deep --strict "$STAGE/PeroPix.app"
           ln -s /Applications "$STAGE/Applications"
           hdiutil create -volname "PeroPix $VERSION" -srcfolder "$STAGE" -format UDZO "release-assets/PeroPix-$VERSION-arm64.dmg"
           hdiutil verify "release-assets/PeroPix-$VERSION-arm64.dmg"
