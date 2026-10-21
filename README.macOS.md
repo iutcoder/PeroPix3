@@ -5,7 +5,7 @@ macOS 우선 독립 포크입니다. 원본: https://github.com/mrm987/PeroPix3
 
 ## 설치
 
-Apple Silicon Mac용입니다. Intel Mac용 빌드는 제공하지 않습니다.
+macOS 14 이상인 Apple Silicon Mac용입니다. Intel Mac용 빌드는 제공하지 않습니다.
 DMG를 열고 PeroPix.app을 Applications로 복사하거나 ZIP을 풀어 앱을 옮기세요.
 Python과 검열 모델은 앱에 포함되어 있습니다.
 

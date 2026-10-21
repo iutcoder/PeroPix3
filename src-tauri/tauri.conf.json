@@ -30,6 +30,9 @@
   "bundle": {
     "active": true,
     "targets": ["app", "dmg"],
+    "macOS": {
+      "minimumSystemVersion": "14.0"
+    },
     "icon": ["icons/icon.icns"],
     "resources": {
       "../version.json": "version.json",
