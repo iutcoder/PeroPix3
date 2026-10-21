@@ -15,12 +15,22 @@ sys.path.insert(0, str(ROOT / "backend"))
 
 import files
 import recordsdb
+import nai
 import server
 from fastapi.testclient import TestClient
 from PIL import Image
 
 
 class MacSmoke(unittest.TestCase):
+    def test_medium_model_payload_preserves_user_settings(self):
+        req = nai.GenRequest(model="nai-diffusion-5-full-medium", steps=28,
+                             sampler="k_euler", negative_prompt="user-negative")
+        payload = nai.build_payload(req)
+        self.assertEqual(payload["parameters"]["steps"], 14)
+        self.assertEqual(payload["parameters"]["sampler"], "k_euler_ancestral")
+        self.assertEqual(req.steps, 28)
+        self.assertEqual(req.negative_prompt, "user-negative")
+
     def test_folder_picker_success_cancel_error(self):
         with patch.object(files.sys, "platform", "darwin"):
             with patch.object(files.subprocess, "run", return_value=SimpleNamespace(
@@ -46,6 +56,9 @@ class MacSmoke(unittest.TestCase):
             health = client.get("/api/health")
             self.assertEqual(health.status_code, 200)
             self.assertTrue(health.json()["ok"])
+            import json
+            self.assertEqual(health.json()["version"],
+                             json.loads((ROOT / "version.json").read_text())["version"])
             self.assertEqual(server.APP_DIR, Path(TEMP.name).resolve())
             for path in ("/plug/_app/peropix.js", "/plug/_app/base.css", "/api/plugins"):
                 self.assertEqual(client.get(path).status_code, 200, path)

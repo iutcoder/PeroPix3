@@ -1,3 +1,5 @@
+> macOS fork: [설치 · 업그레이드 · 빌드 안내](README.macOS.md) · [macOS releases](https://github.com/iutcoder/PeroPix3/releases). The upstream documentation below describes Windows.
+
 <div align="center">
 
 <img src="src-tauri/icons/128x128@2x.png" width="88" alt="PeroPix">

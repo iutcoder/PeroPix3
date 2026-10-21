@@ -62,6 +62,8 @@ jobs:
           test -f "$APP/Contents/Resources/models/censor/ntd11_anime_nsfw_segm_v5-variant1.onnx"
           test -f "$APP/Contents/Resources/public/tags.json"
           test -f "$APP/Contents/Resources/shared/terms.json"
+          test -f "$APP/Contents/Resources/version.json"
+          test -f "$APP/Contents/Resources/LICENSE"
           test -f "$APP/Contents/Resources/plug-app/peropix.js"
           test -f "$APP/Contents/Resources/plug-app/base.css"
           test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$APP/Contents/Info.plist")" = \

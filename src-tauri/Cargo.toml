@@ -1,6 +1,6 @@
 [package]
 name = "peropix"
-version = "3.0.0"
+version = "3.6.6"
 description = "PeroPix — NAI 전용 이미지 생성 툴"
 license = "AGPL-3.0-or-later"
 edition = "2021"
