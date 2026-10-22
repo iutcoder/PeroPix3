@@ -1,5 +1,11 @@
 > macOS fork: [설치 · 업그레이드 · 빌드 안내](README.macOS.md) · [macOS releases](https://github.com/iutcoder/PeroPix3/releases). The upstream documentation below describes Windows.
 
+このプロジェクトは、mrm987氏の原作 [PeroPix3](https://github.com/mrm987/PeroPix3) をフォークし、macOS向けに移植した非公式プロジェクトです。macOSへの移植および修正はiutcoderが行い、原作とは独立して保守しています。
+
+原作およびこのフォークは、**GNU Affero General Public License v3.0またはそれ以降のバージョン（AGPL-3.0-or-later）**に基づいて配布されます。詳しい条件は [LICENSE](LICENSE) を参照してください。
+
+**PeroPixの名称、ロゴ、アイコンなど、原作のアセットに関する著作権その他の権利は原著作者に帰属します。** このフォークは、これらのアセットの権利を所有すると主張するものではありません。第三者のアセットの権利は各権利者に帰属し、それぞれのライセンスに従います。
+
 <div align="center">
 
 <img src="src-tauri/icons/128x128@2x.png" width="88" alt="PeroPix">

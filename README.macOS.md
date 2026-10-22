@@ -1,7 +1,12 @@
 # PeroPix for macOS
 
-macOS 우선 독립 포크입니다. 원본: https://github.com/mrm987/PeroPix3
-배포: https://github.com/iutcoder/PeroPix3/releases
+이 프로젝트는 mrm987님의 원작 [PeroPix3](https://github.com/mrm987/PeroPix3)를 포크하여 macOS용으로 포팅한 비공식 프로젝트입니다. macOS 포팅 및 수정은 iutcoder가 수행하며, 원작과 별도로 유지·관리합니다.
+
+원저작물과 이 포크는 **GNU Affero General Public License v3.0 또는 그 이후 버전(AGPL-3.0-or-later)**에 따라 배포됩니다. 자세한 조건은 [LICENSE](LICENSE)를 참고하세요.
+
+**PeroPix의 이름, 로고, 아이콘 등 원작 에셋에 관한 저작권 및 기타 권리는 원저작자에게 있습니다.** 이 포크는 해당 에셋의 권리 소유를 주장하지 않습니다. 제3자 에셋의 권리는 각 권리자에게 있으며, 해당 라이선스를 따릅니다.
+
+배포: [macOS 릴리스](https://github.com/iutcoder/PeroPix3/releases)
 
 ## 설치
 
