@@ -1,4 +1,4 @@
-> macOS fork: [설치 · 업그레이드 · 빌드 안내](README.macOS.md) · [macOS releases](https://github.com/iutcoder/PeroPix3/releases). The upstream documentation below describes Windows.
+> **PeroPix3-macOS — unofficial macOS fork** · [설치 · 업그레이드 · 빌드 안내](README.macOS.md) · [macOS releases](https://github.com/iutcoder/PeroPix3-macOS/releases). The upstream documentation below describes Windows.
 
 이 프로젝트는 mrm987님의 원작 [PeroPix3](https://github.com/mrm987/PeroPix3)를 포크하여 macOS용으로 포팅한 비공식 프로젝트입니다. macOS 포팅 및 수정은 iutcoder가 수행하며, 원작과 별도로 유지·관리합니다.
 

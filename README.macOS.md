@@ -1,4 +1,4 @@
-# PeroPix for macOS
+# PeroPix3-macOS
 
 이 프로젝트는 mrm987님의 원작 [PeroPix3](https://github.com/mrm987/PeroPix3)를 포크하여 macOS용으로 포팅한 비공식 프로젝트입니다. macOS 포팅 및 수정은 iutcoder가 수행하며, 원작과 별도로 유지·관리합니다.
 
@@ -6,7 +6,7 @@
 
 **PeroPix의 이름, 로고, 아이콘 등 원작 에셋에 관한 저작권 및 기타 권리는 원저작자에게 있습니다.** 이 포크는 해당 에셋의 권리 소유를 주장하지 않습니다. 제3자 에셋의 권리는 각 권리자에게 있으며, 해당 라이선스를 따릅니다.
 
-배포: [macOS 릴리스](https://github.com/iutcoder/PeroPix3/releases)
+배포: [macOS 릴리스](https://github.com/iutcoder/PeroPix3-macOS/releases)
 
 ## 설치
 
@@ -47,5 +47,7 @@ Apple Silicon macOS, Node.js/npm, Rust, Xcode Command Line Tools가 필요합니
 배포 전에 앱 전체에 ad-hoc 또는 Developer ID 서명을 적용하고 codesign으로 검증해야 합니다.
 서명 후에는 앱 내부 파일을 변경하지 마세요.
 
-master는 원본 동기화용, macos-port-dev는 통합·검증용,
-macos-port는 검증된 macOS 배포용입니다.
+macos-port는 기본 브랜치이자 검증된 macOS 배포용이며,
+macos-port-dev는 원본 업데이트 통합·검증용입니다. master 브랜치는 사용하지 않습니다.
+원본 업데이트는 [원본 저장소](https://github.com/mrm987/PeroPix3)의 태그 또는 커밋을
+macos-port-dev에 병합하여 macOS에서 검증한 뒤 macos-port에 반영합니다.
